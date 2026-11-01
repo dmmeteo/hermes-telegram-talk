@@ -1,0 +1,45 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Fake GPT-Live provider (offline fixture)</title>
+<script>
+"use strict";
+window.peers = [];
+window.events = [];
+
+async function serve() {
+  const ctx = new AudioContext();
+  for (;;) {
+    const res = await fetch("/offer");
+    if (res.status !== 200) continue;
+    const { sdp } = await res.json();
+    const peer = new RTCPeerConnection();
+    const entry = { peer, channelState: "none", got: [] };
+    window.peers.push(entry);
+    const osc = ctx.createOscillator();
+    const dest = ctx.createMediaStreamDestination();
+    osc.frequency.value = 440;
+    osc.connect(dest);
+    osc.start();
+    dest.stream.getAudioTracks().forEach((t) => peer.addTrack(t, dest.stream));
+    peer.ondatachannel = ({ channel }) => {
+      entry.channelState = "connecting";
+      channel.onopen = () => {
+        entry.channelState = "open";
+        channel.send(JSON.stringify({ type: "response.function_call_arguments.done",
+          call_id: "call_fixture", name: "hermes_task", arguments: "{\"task\":\"read my files\"}" }));
+      };
+      channel.onclose = () => { entry.channelState = "closed"; };
+      channel.onmessage = (m) => { entry.got.push(JSON.parse(m.data)); };
+    };
+    await peer.setRemoteDescription({ type: "offer", sdp });
+    await peer.setLocalDescription(await peer.createAnswer());
+    await new Promise((resolve) => {
+      if (peer.iceGatheringState === "complete") return resolve();
+      peer.onicegatheringstatechange = () => peer.iceGatheringState === "complete" && resolve();
+      setTimeout(resolve, 2000);
+    });
+    await fetch("/answer", { method: "POST", body: JSON.stringify({ sdp: peer.localDescription.sdp }) });
+  }
+}
+serve();
+</script>

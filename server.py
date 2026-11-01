@@ -1,0 +1,368 @@
+#!/usr/bin/env python3
+"""Pewds Telegram voice test: static page plus authenticated GPT-Live signaling.
+
+The upstream exchange (URL, headers, no-redirect opener, answer checks) is adapted
+from Hermes Conduit's plugin_api.py, MIT licensed; see LICENSES/CONDUIT-LICENSE.
+"""
+import argparse
+import base64
+import hashlib
+import hmac
+import http.client
+import json
+import logging
+import os
+import re
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+logger = logging.getLogger("tg-voice")
+
+GPT_LIVE_URL = "https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas"
+GPT_LIVE_MODEL = "gpt-live-1-codex"
+GPT_LIVE_VOICE = "cove"
+UPSTREAM_TIMEOUT_S = 30.0
+MAX_ANSWER_BYTES = 64 * 1024
+MAX_BODY_BYTES = 32 * 1024
+MAX_INIT_DATA_CHARS = 4096
+INIT_DATA_MAX_AGE_S = 3600
+INIT_DATA_FUTURE_SKEW_S = 60
+READ_TIMEOUT_S = 10.0
+MINT_LIMIT = 6
+MINT_WINDOW_S = 60.0
+MAX_ACTIVE_EXCHANGES = 2
+MAX_CONNECTIONS = 32
+CALL_ID = re.compile(r"rtc_[A-Za-z0-9_-]+|[0-9a-fA-F-]{36}")
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+STATIC_FILES = {"": ("index.html", "text/html; charset=utf-8"),
+                "index.html": ("index.html", "text/html; charset=utf-8"),
+                "app.js": ("app.js", "text/javascript; charset=utf-8"),
+                "app.css": ("app.css", "text/css; charset=utf-8")}
+CSP = ("default-src 'none'; script-src 'self' https://telegram.org; style-src 'self'; "
+       "connect-src 'self'; media-src 'self' blob:; img-src 'self' data:; base-uri 'none'; "
+       "form-action 'none'; frame-ancestors 'self' https://web.telegram.org")
+
+PERSONA = (
+    "Ти — Pewds Voice Test: короткий публічний тестовий голос, пов'язаний з Pewds. "
+    "Це лише перевірка живої голосової розмови в Telegram, а не повний агент Pewds. "
+    "Говори українською, доки користувач сам не перейде на іншу мову. "
+    "Відповідай коротко, природно і спокійно, з легким дружнім гумором.\n\n"
+    "У тебе немає інструментів, файлів, пам'яті, історії чатів, інтернету чи задач Hermes. "
+    "Не делегуй завдання. Якщо просять щось зробити, перевірити, знайти чи запам'ятати, "
+    "чесно скажи, що в цьому голосовому тесті цього не вмієш, і не вигадуй результат.\n\n"
+    "Коли тебе перебивають, замовкни і слухай. Не говори першим: мовчи, доки користувач не заговорить."
+)
+
+
+class ApiError(Exception):
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    # A redirect would resend the bearer header to wherever it points.
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+_opener = urllib.request.build_opener(_NoRedirect)
+
+
+def post_sdp(url, headers, body):
+    """POST the offer; returns (status, answer text, Location). Bodies are never logged."""
+    request = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), method="POST",
+                                     headers={**headers, "Content-Type": "application/json"})
+    try:
+        with _opener.open(request, timeout=UPSTREAM_TIMEOUT_S) as response:
+            answer = response.read(MAX_ANSWER_BYTES + 1)
+            if len(answer) > MAX_ANSWER_BYTES:
+                return 502, "", ""
+            return response.status, answer.decode("utf-8", "replace"), response.headers.get("Location", "")
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+        exc.close()
+        return status, "", ""
+    except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException, ValueError) as exc:
+        logger.warning("upstream exchange failed: %s", type(exc).__name__)
+        raise ApiError(502, "Voice service is unreachable from the server. Try Start again in a minute.")
+
+
+def _jwt_account(token):
+    try:
+        payload = token.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        account = claims["https://api.openai.com/auth"]["chatgpt_account_id"]
+    except Exception:
+        return ""
+    return account.strip() if isinstance(account, str) else ""
+
+
+def hermes_codex_credentials():
+    """(bearer, account id) from Hermes' native Codex sign-in for the active HERMES_HOME."""
+    from hermes_cli.auth_codex import resolve_codex_runtime_credentials
+    credentials = resolve_codex_runtime_credentials(refresh_if_expiring=True)
+    token = str(credentials.get("api_key") or "").strip() if isinstance(credentials, dict) else ""
+    return token, _jwt_account(token)
+
+
+def session_config():
+    return {"model": GPT_LIVE_MODEL, "instructions": PERSONA,
+            "audio": {"output": {"voice": GPT_LIVE_VOICE}}, "delegation": {"type": "client"}}
+
+
+def verify_init_data(init_data, bot_token, now):
+    """Telegram user id from HMAC-signed, fresh initData; None otherwise."""
+    if not isinstance(init_data, str) or not init_data or len(init_data) > MAX_INIT_DATA_CHARS:
+        return None
+    try:
+        pairs = urllib.parse.parse_qsl(init_data, keep_blank_values=True, strict_parsing=True)
+    except ValueError:
+        return None
+    fields = dict(pairs)
+    if len(fields) != len(pairs):
+        return None
+    received = fields.pop("hash", "")
+    check = "\n".join(f"{k}={v}" for k, v in sorted(fields.items()))
+    secret = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
+    expected = hmac.new(secret, check.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, received):
+        return None
+    try:
+        auth_date = int(fields["auth_date"])
+        user_id = json.loads(fields["user"])["id"]
+    except (KeyError, ValueError, TypeError):
+        return None
+    if not now - INIT_DATA_MAX_AGE_S <= auth_date <= now + INIT_DATA_FUTURE_SKEW_S:
+        return None
+    if type(user_id) is not int:
+        return None
+    return user_id
+
+
+class MintLimiter:
+    def __init__(self, limit, window, clock):
+        self.limit, self.window, self.clock = limit, window, clock
+        self.hits = {}
+        self.lock = threading.Lock()
+
+    def acquire(self, key):
+        with self.lock:
+            now = self.clock()
+            recent = [t for t in self.hits.get(key, []) if now - t < self.window]
+            if len(recent) >= self.limit:
+                self.hits[key] = recent
+                return False
+            self.hits[key] = recent + [now]
+            return True
+
+
+class VoiceApp:
+    def __init__(self, bot_token, allowed_ids, origin, base_path="/tg-voice/",
+                 resolve=hermes_codex_credentials, post=post_sdp, clock=time.time):
+        if not bot_token or not allowed_ids:
+            raise ValueError("bot token and allowed user ids are required")
+        if not base_path.startswith("/") or not base_path.endswith("/"):
+            raise ValueError("base path must start and end with /")
+        self.bot_token = bot_token
+        self.allowed_ids = frozenset(allowed_ids)
+        self.origin = origin.rstrip("/")
+        self.base_path = base_path
+        self.resolve = resolve
+        self.post = post
+        self.clock = clock
+        self.limiter = MintLimiter(MINT_LIMIT, MINT_WINDOW_S, clock)
+        self.active = threading.BoundedSemaphore(MAX_ACTIVE_EXCHANGES)
+
+    def check_request(self, origin, content_type, length):
+        if origin != self.origin:
+            raise ApiError(403, "Open the voice test from the Pewds bot in Telegram.")
+        if (content_type or "").split(";")[0].strip().lower() != "application/json":
+            raise ApiError(415, "Expected a JSON request.")
+        try:
+            length = int(length)
+        except (TypeError, ValueError):
+            raise ApiError(411, "Request length is required.")
+        if not 0 < length <= MAX_BODY_BYTES:
+            raise ApiError(413, "Request is too large.")
+        return length
+
+    def create_session(self, raw):
+        try:
+            body = json.loads(raw)
+        except (ValueError, UnicodeDecodeError):
+            raise ApiError(400, "Malformed request.")
+        if not isinstance(body, dict) or set(body) != {"initData", "sdp"}:
+            raise ApiError(400, "Unexpected request fields.")
+        user_id = verify_init_data(body["initData"], self.bot_token, int(self.clock()))
+        if user_id is None:
+            raise ApiError(401, "Telegram sign-in expired or is invalid. Close and reopen the voice test from the Pewds bot.")
+        if user_id not in self.allowed_ids:
+            raise ApiError(403, "This Telegram account is not allowed to use the Pewds voice test.")
+        sdp = body["sdp"]
+        if not isinstance(sdp, str) or not sdp.startswith("v=0"):
+            raise ApiError(400, "Malformed WebRTC offer.")
+        if not self.limiter.acquire(user_id):
+            raise ApiError(429, "Too many calls started. Wait a minute, then tap Start.")
+        if not self.active.acquire(blocking=False):
+            raise ApiError(503, "Another call is still connecting. Try Start again shortly.")
+        try:
+            return {"sdp": self._exchange(sdp)}
+        finally:
+            self.active.release()
+
+    def _exchange(self, sdp):
+        try:
+            token, account = self.resolve()
+        except Exception as exc:
+            logger.warning("Codex sign-in unavailable: %s", type(exc).__name__)
+            token, account = "", ""
+        if not token or not account or any(c in token + account for c in "\r\n"):
+            raise ApiError(503, "The Pewds host has no working ChatGPT sign-in for voice. No API fallback was used.")
+        status, answer, location = self.post(GPT_LIVE_URL, {
+            "Authorization": f"Bearer {token}",
+            "ChatGPT-Account-Id": account,
+            "OpenAI-Alpha": "quicksilver=v2",
+        }, {"sdp": sdp, "session": session_config()})
+        if not 200 <= status < 300:
+            logger.warning("upstream rejected session: HTTP %s", status)
+            raise ApiError(502, f"Voice service rejected the call (HTTP {status}). No API fallback was used.")
+        call_id = urllib.parse.urlparse(location).path.rstrip("/").rsplit("/", 1)[-1]
+        if not (isinstance(answer, str) and answer.startswith("v=0") and CALL_ID.fullmatch(call_id)):
+            raise ApiError(502, "Voice service returned an invalid answer. No API fallback was used.")
+        return answer
+
+
+def make_handler(app):
+    class Handler(BaseHTTPRequestHandler):
+        server_version = "tg-voice"
+        sys_version = ""
+        timeout = READ_TIMEOUT_S
+
+        def log_message(self, fmt, *args):
+            pass
+
+        def log_request(self, code="-", size="-"):
+            logger.info("%s %s %s", self.command, urllib.parse.urlsplit(self.path).path[:120], code)
+
+        def _send(self, status, body, content_type, extra=None):
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            for key, value in (extra or {}).items():
+                self.send_header(key, value)
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+
+        def _json(self, status, payload):
+            self._send(status, json.dumps(payload).encode(), "application/json",
+                       {"Cache-Control": "no-store"})
+
+        def do_GET(self):
+            path = urllib.parse.urlsplit(self.path).path
+            if path == app.base_path.rstrip("/"):
+                self.send_response(308)
+                self.send_header("Location", app.base_path)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            name = path[len(app.base_path):] if path.startswith(app.base_path) else None
+            if name not in STATIC_FILES:
+                self._json(404, {"error": "Not found."})
+                return
+            filename, content_type = STATIC_FILES[name]
+            self._send(200, (STATIC_DIR / filename).read_bytes(), content_type, {
+                "Content-Security-Policy": CSP, "Cache-Control": "no-cache",
+                "Permissions-Policy": "microphone=(self), camera=(), geolocation=()"})
+
+        do_HEAD = do_GET
+
+        def do_POST(self):
+            if urllib.parse.urlsplit(self.path).path != app.base_path + "api/session":
+                self._json(404, {"error": "Not found."})
+                return
+            try:
+                length = app.check_request(self.headers.get("Origin"), self.headers.get("Content-Type"),
+                                           self.headers.get("Content-Length"))
+                raw = self.rfile.read(length)
+                if len(raw) != length:
+                    self.close_connection = True
+                    return
+                self._json(200, app.create_session(raw))
+            except ApiError as exc:
+                self.close_connection = True
+                self._json(exc.status, {"error": exc.message})
+            except TimeoutError:
+                self.close_connection = True
+
+    return Handler
+
+
+class BoundedServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, address, handler):
+        super().__init__(address, handler)
+        self.slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
+
+    def process_request(self, request, client_address):
+        if not self.slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        super().process_request(request, client_address)
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
+
+
+def allowed_ids_from(text):
+    ids = set()
+    for part in (text or "").split(","):
+        part = part.strip()
+        if not re.fullmatch(r"[1-9][0-9]{0,19}", part):
+            raise ValueError("TG_VOICE_ALLOWED_USER_IDS must be comma-separated numeric Telegram user ids")
+        ids.add(int(part))
+    return ids
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Pewds Telegram voice test server")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8791)
+    parser.add_argument("--origin", default="https://her.dmmeteo.dev")
+    parser.add_argument("--base-path", default="/tg-voice/")
+    args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    token = os.environ.get("TG_VOICE_BOT_TOKEN", "").strip()
+    if not token:
+        parser.error("TG_VOICE_BOT_TOKEN is not set")
+    try:
+        allowed = allowed_ids_from(os.environ.get("TG_VOICE_ALLOWED_USER_IDS"))
+    except ValueError as exc:
+        parser.error(str(exc))
+    app = VoiceApp(token, allowed, args.origin, args.base_path)
+    server = BoundedServer((args.host, args.port), make_handler(app))
+    logger.info("serving %s on %s:%s for %s", args.base_path, args.host, args.port, app.origin)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
