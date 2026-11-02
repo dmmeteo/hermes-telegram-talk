@@ -30,10 +30,11 @@ Non-goals for this PoC:
 
 - `plugin.yaml` and `__init__.py` make up the plugin entrypoint. `register(ctx)` adds `hermes talk serve`,
   which runs `server.py` under the same Hermes interpreter and `HERMES_HOME`.
-- `server.py` is a standard-library HTTP server. It serves `static/` (frontend-owned) and the fixed
-  routes under `/tg-voice/`. Without `--config` it is still the original voice test: a single
-  `api/session` route with the fixed test persona. With `--config` it serves the Talk API in
-  [INTERFACE.md](INTERFACE.md), the frozen frontend contract.
+- `server.py` is a standard-library HTTP server for the fixed routes under `/tg-voice/`. Without
+  `--config` it is still the original voice test: the `static/` page and a single `api/session` route
+  with the fixed test persona. With `--config` it serves the Talk UI from `static/talk/` (avatar,
+  energy ring and Mute; see [DESIGN.md](DESIGN.md)) and the Talk API in [INTERFACE.md](INTERFACE.md),
+  the frozen frontend contract. `static/` and `static/talk/` are frontend-owned.
 - `hermes_talk/`:
   - `config.py` parses the YAML into frozen values.
   - `store.py` holds the account binding, voice-session ledger, idempotent turn ingestion, the end
@@ -128,7 +129,8 @@ Typical changes:
 ## Run (manager, on the VPS)
 
 ```sh
-# Install: copy or link this directory to $HERMES_HOME/plugins/hermes-talk and add it to plugins.enabled.
+# Install: copy plugin.yaml, __init__.py, server.py, hermes_talk/, static/ and LICENSES/ to
+# $HERMES_HOME/plugins/hermes-talk and add hermes-talk to plugins.enabled (see "Native install" below).
 export HERMES_HOME=/home/me/.hermes/profiles/pewds
 export TG_VOICE_BOT_TOKEN=...            # from the existing Pewds credential source; never on argv
 export TG_VOICE_ALLOWED_USER_IDS=...     # numeric Telegram ids, comma separated
@@ -139,10 +141,23 @@ The reverse proxy maps `https://her.dmmeteo.dev/tg-voice/` to `127.0.0.1:8791/tg
 no webhook change, no polling and no gateway restart. The Mini App button, BotFather, the proxy and
 deployment belong to the manager.
 
+### Native install
+
+`hermes -p <profile> talk serve` resolves the profile's `HERMES_HOME` and runs `server.py` from that
+profile's installed plugin directory; the gate checks both on the running process. In a fresh HOME,
+`hermes plugins install file://<checkout> --ref <sha> --enable` clones and enables the plugin, but it
+and `hermes plugins enable` first provision a separate Hermes runtime and install Python dependencies
+(about 240-700 MB, with downloads). The offline gate therefore installs the plugin as an immutable,
+read-only directory copy and enables it with the `plugins.enabled` key those commands write, then
+confirms it with `hermes plugins list`. Real-profile installation and activation remain the manager's.
+
 ## Verify
 
 ```sh
+python3 verify-integrated.py --offline --require-host   # canonical gate: backend + frontend offline, host mandatory
+python3 verify-integrated.py --browser <out-dir>        # legacy and Talk Chromium inventories, capped containers
 python3 verify-backend.py --offline     # full backend gate (below)
+python3 verify-frontend.py --offline    # legacy 26 + frontend unit checks + HTTP contract on this backend
 python3 verify.py --offline             # legacy 26 signaling/security checks only
 python3 verify.py --browser <out-dir>   # legacy UI/lifecycle run in a capped --network none container
 python3 -m hermes_talk.fixtures         # synthetic Talk server for frontend work
@@ -168,10 +183,23 @@ python3 -m hermes_talk.fixtures         # synthetic Talk server for frontend wor
    - real `SessionDB`, `load_soul_md` and `skill_view`;
    - plugin discovery and registration through `PluginManager`;
    - a real `hermes talk serve` process answering bootstrap, allowlist and new, with the native
-     session rows checked afterwards.
+     session rows checked afterwards;
+   - the plugin as a read-only directory install in a named profile of a disposable HOME, served by
+     `hermes -p synthetic talk serve` from outside this checkout: the process runs the installed
+     `server.py` with that profile's `HERMES_HOME`, serves the `static/talk/` bytes, refuses a foreign
+     Origin, a bad signature and a non-allowlisted user, and provisions no runtime.
+
+   Both stage 2 and 3 also check that configured mode serves `static/talk/` and no-config mode keeps
+   the original page and its single route.
 
    The runtime comes from `HERMES_TALK_HERMES_PYTHON`, else `~/.hermes/installs/*/environments/*/venv`.
-   If none exists, stage 3 prints `SKIPPED`. It never prints `PASS`.
+   If none exists, stage 3 prints `SKIPPED`. It never prints `PASS`. `verify-integrated.py
+   --require-host` (and `HERMES_TALK_REQUIRE_HOST=1`) turn that skip into a failure.
+
+Prerequisite runtimes: Python 3 for the gate, a Hermes install for stage 3, Docker for the browser
+inventories (`django-admin-repl-verify-browser:pw1.63.0`, Playwright 1.63 with Chromium, overridable as
+`TALK_BROWSER_IMAGE`) and Node for the frontend unit checks (from `PATH`, else the local
+`node:22.22.3-bookworm-slim` image as `TALK_NODE_IMAGE`). Containers run with `--network none`.
 
 ## Status
 
@@ -180,9 +208,11 @@ python3 -m hermes_talk.fixtures         # synthetic Talk server for frontend wor
 | Auth, routes, contract | yes | yes | yes | no | no |
 | Native session continuity, new, idempotent events | yes | yes | yes (real SessionDB) | no | no |
 | SOUL / skills / summary / activity context | yes | yes | yes (host loaders) | no | no |
-| Plugin registration, `hermes talk serve` | yes | n/a | yes | no | no |
+| Plugin registration, `hermes talk serve` | yes | n/a | yes | in fixture (named disposable profile) | no |
+| Talk UI served in configured mode; legacy page without config | yes | yes | yes | in fixture | no |
+| Frontend use of the v2 routes (Chromium, local WebRTC peers) | yes | yes | n/a | n/a | no |
 | `api/session` against real GPT-Live | yes | fake upstream | not exercised | no | no |
-| Frontend use of the v2 routes | frontend owner | no | no | no | no |
+| Voice task execution | no (unsupported; the model says so) | n/a | n/a | n/a | n/a |
 
 ## Outcome checklist
 
@@ -192,8 +222,12 @@ python3 -m hermes_talk.fixtures         # synthetic Talk server for frontend wor
 - [x] Frozen frontend contract (`INTERFACE.md`) and synthetic fixtures
 - [x] Plugin registers and serves in a disposable Hermes home
 - [ ] Real GPT-Live call with composed context on the VPS (manager)
-- [ ] Frontend integration of bootstrap, events and end (frontend owner)
+- [x] Frontend integration of bootstrap, events and end, served by this plugin (fixture and Chromium)
 - [ ] Hands-free use inside Telegram on an iPhone (human verdict)
+
+Known limit: the client sends settled text in chunks of the default `event_text_chars` (2000). A
+config with a lower `context.budgets.event_text_chars` would refuse those chunks; keep the default for
+this client.
 
 ## Licenses
 

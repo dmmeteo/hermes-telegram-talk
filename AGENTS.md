@@ -1,7 +1,7 @@
 # Agents
 
 Hermes Talk PoC v2. Keep it small: `plugin.yaml`, `__init__.py`, `server.py`, `hermes_talk/`,
-`verify-backend.py`, `verify.py`, `browser/` and `static/`. `static/`, `tests/frontend/`, `tests/browser/`
+`verify-integrated.py`, `verify-backend.py`, `verify-frontend.py`, `verify.py`, `browser/`, `tests/` and `static/`. `static/`, `tests/frontend/`, `tests/browser/`
 and `DESIGN.md` belong to the frontend owner.
 
 Boundaries:
@@ -15,6 +15,8 @@ Boundaries:
 - `INTERFACE.md` wire shapes are frozen; additive public fields only, renames need the manager.
 - Keep the Conduit-derived code under its MIT notice (`LICENSES/CONDUIT-LICENSE`).
 
-Before committing: `python3 verify-backend.py --offline` must print `BACKEND OK`. It includes
-`verify.py --offline` (`26/26`). For UI or lifecycle changes, also run `python3 verify.py --browser <out-dir>`
-in the capped container and never weaken its assertions.
+Before committing: `python3 verify-integrated.py --offline --require-host` must print
+`TALK_INTEGRATED_OFFLINE_OK`. It includes `verify-backend.py --offline` (`BACKEND OK`, with `verify.py --offline`
+at `26/26`) and `verify-frontend.py --offline`. For UI or lifecycle changes, also run
+`python3 verify-integrated.py --browser <out-dir>` (legacy and Talk Chromium, capped containers) and never weaken
+its assertions.
