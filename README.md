@@ -75,8 +75,11 @@ The server builds the context for every call. Each part has its own character bu
    model call.
 6. The last `recent_turns` turns of this conversation.
 7. Activity since the last visit. These are the profile's sessions from the configured sources that
-   belong to this Telegram user or to no chat user. Talk's own sessions and other users' sessions
-   are excluded. Each item keeps its session id, source and time, plus a status.
+   belong to this Telegram user. Sessions with no chat user (CLI, cron, kanban) are the operator's
+   and are briefed only to `activity.owner_user_id`. Talk's own sessions and other users' sessions
+   are excluded. Each item keeps its session id, source and time, plus a status. Unread items are
+   listed oldest first up to `activity_items`. The rest are counted and offered next time, so a cut
+   never skips one.
 8. The greeting directive, if enabled. The model speaks first only after the call connects and
    mentions at most two updates.
 
@@ -89,8 +92,10 @@ The briefing uses four statuses:
 | `replied` | A stored assistant reply. Delivery to a chat is not proven. |
 | `unknown` | Anything else, including stale open sessions. |
 
-The read cursor moves only after the assistant has actually spoken in a call. A call that fails at
-the provider leaves the briefing unread.
+The read cursor moves only after a new assistant turn is stored for the call. A call that fails at
+the provider leaves the briefing unread. An unended call expires after `voice.session_ttl_minutes`
+and still gets its summary. A conversation whose native row was deleted is replaced on the next
+bootstrap, and its old id answers 404.
 
 Secret-shaped strings are redacted from every section. These are `sk-…` keys, bot tokens, JWTs and
 `token=`/`password=` values.

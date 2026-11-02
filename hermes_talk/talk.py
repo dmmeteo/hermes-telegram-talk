@@ -42,7 +42,7 @@ class TalkRuntime:
         self.config = config
         self.bot_id = bot_token.split(":", 1)[0]
         self.history = history
-        self.store = TalkStore(history, clock, config.voice_session_ttl_s)
+        self.store = TalkStore(history, clock, config.voice_session_ttl_s, config.budgets.summary_chars)
         self.soul = soul
         self.skill = skill
         self.clock = clock
@@ -76,10 +76,11 @@ class TalkRuntime:
             rows = self.history.activity_rows(SOURCE, max(20, c.budgets.activity_items * 4))
         except Exception as exc:  # a briefing is never worth the call
             return f"(Activity could not be read: {type(exc).__name__}. Say so if asked; do not guess.)", None
-        items = activity.snapshot(rows, now=now, since=since, user_id=user_id, sources=c.activity_sources,
-                                  exclude_ids={conversation_id}, limit=c.budgets.activity_items)
+        items, unlisted = activity.snapshot(rows, now=now, since=since, user_id=user_id,
+                                            owner_user_id=c.activity_owner_user_id, sources=c.activity_sources,
+                                            exclude_ids={conversation_id}, limit=c.budgets.activity_items)
         watermark = max((i["last_active"] for i in items), default=None)
-        return activity.briefing(items), watermark
+        return activity.briefing(items, unlisted), watermark
 
     def prepare(self, user_id, conversation_id):
         """Instructions for the next call on the account's current conversation."""
@@ -111,8 +112,7 @@ class TalkRuntime:
         return {"accepted_ids": accepted, "conversation_id": conversation_id}
 
     def end(self, user_id, conversation_id, voice_session_id):
-        return self.store.end(self.account(user_id), conversation_id, voice_session_id,
-                              self.config.budgets.summary_chars)
+        return self.store.end(self.account(user_id), conversation_id, voice_session_id)
 
 
 __all__ = ["TalkRuntime", "TalkError", "redact"]

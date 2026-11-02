@@ -28,7 +28,8 @@ These notes are backend-owned and add no field. Changing or removing a field abo
   - 400: malformed input or unexpected fields.
   - 401: bad or expired initData.
   - 403: Origin or allowlist.
-  - 404: a conversation or voice session that this account doesn't own.
+  - 404: a conversation or voice session that this account doesn't own, or whose native session
+    was deleted.
   - 409: a conversation that is no longer current, after `api/new`.
   - 413: body too large.
   - 415: not JSON.

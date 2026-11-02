@@ -34,5 +34,7 @@ activity:
   enabled: true
   window_hours: 168          # first visit looks back this far; later visits start at the read cursor
   sources: [cli, telegram, discord, cron, kanban, desktop]
+  # owner_user_id: 123456789 # numeric Telegram id of the operator; only this user hears sessions with no
+  #                          # chat user (CLI, cron, kanban). Omit it and those sessions are never briefed.
 privacy:
   persist_audio: false       # the only accepted value; raw audio is never stored

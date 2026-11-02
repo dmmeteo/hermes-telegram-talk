@@ -265,7 +265,10 @@ class VoiceApp:
             except TalkError as exc:
                 raise ApiError(exc.status, exc.message)
             answer = self._exchange(sdp, self.talk.session_config(instructions))
-            voice_session_id = self.talk.started(user_id, conversation_id, watermark)
+            try:
+                voice_session_id = self.talk.started(user_id, conversation_id, watermark)
+            except TalkError as exc:  # e.g. api/new rebound the conversation during the exchange
+                raise ApiError(exc.status, exc.message)
             return {"sdp": answer, "type": "answer", "voice_session_id": voice_session_id,
                     "conversation_id": conversation_id}
         finally:

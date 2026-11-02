@@ -24,26 +24,33 @@ def status(row, now):
     return "unknown"
 
 
-def snapshot(rows, *, now, since, user_id, sources, exclude_ids, limit):
-    """Items newer than *since* that belong to this user (or to no chat user), newest first."""
-    items = []
+def snapshot(rows, *, now, since, user_id, owner_user_id, sources, exclude_ids, limit):
+    """(items, unlisted): unread items oldest first, so a cut never skips one past the cursor.
+
+    A session tagged with a chat user belongs to that user only. An untagged one (CLI, cron,
+    kanban) is the operator's and is shown only to the configured owner.
+    """
+    unread = []
     for row in rows:
         last_active = row.get("last_active") or 0
         if last_active <= since or row["id"] in exclude_ids or row.get("source") not in sources:
             continue
-        if row.get("user_id") not in (None, "", str(user_id)):
+        owner = row.get("user_id")
+        mine = str(owner) == str(user_id) if owner not in (None, "") else user_id == owner_user_id
+        if not mine:
             continue
-        items.append({"id": row["id"], "source": row["source"], "status": status(row, now),
-                      "title": clip(row.get("title") or row.get("preview") or "untitled", 80),
-                      "started_at": row.get("started_at"), "last_active": last_active})
-        if len(items) >= limit:
-            break
-    return items
+        unread.append({"id": row["id"], "source": row["source"], "status": status(row, now),
+                       "title": clip(row.get("title") or row.get("preview") or "untitled", 80),
+                       "started_at": row.get("started_at"), "last_active": last_active})
+    unread.sort(key=lambda item: item["last_active"])
+    return unread[:limit], len(unread) - min(len(unread), limit)
 
 
-def briefing(items):
+def briefing(items, unlisted=0):
     lines = []
     for item in items:
         when = datetime.fromtimestamp(item["last_active"], timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         lines.append(f"- [{item['status']}] {item['title']} ({item['source']} session {item['id']}, {when})")
+    if unlisted:
+        lines.append(f"- {unlisted} newer update(s) not listed yet; they will be offered next time.")
     return "\n".join(lines)

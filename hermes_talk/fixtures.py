@@ -68,6 +68,7 @@ def config_data(**overrides):
             "appearance": {"listen_color": "#4FC3F7", "speak_color": "#FFB74D"},
             "greeting": {"enabled": True, "text": "Say hello in one short sentence."},
             "context": {"skills": ["talk-brief"]},
+            "activity": {"owner_user_id": USER_ID},
             "privacy": {"persist_audio": False}}
     data.update(overrides)
     return data

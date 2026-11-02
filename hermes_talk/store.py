@@ -47,10 +47,11 @@ def clip(text, limit):
 
 
 class TalkStore:
-    def __init__(self, history, clock, voice_session_ttl_s):
+    def __init__(self, history, clock, voice_session_ttl_s, summary_chars):
         self.history = history
         self.clock = clock
         self.ttl = voice_session_ttl_s
+        self.summary_chars = summary_chars
         self.lock = threading.Lock()
 
     def _binding_key(self, account):
@@ -85,6 +86,8 @@ class TalkStore:
             state = self._load(conversation_id) if conversation_id else None
             if (not conversation_id or state is None or state.get("account") != account.key
                     or not self.history.session_exists(conversation_id)):
+                if state is not None and state.get("account") == account.key:
+                    self.history.set_meta(self._conv_key(conversation_id), "null")  # its row is gone
                 conversation_id, state = self._create(account)
             self._expire_voice_sessions(conversation_id, state)
             return conversation_id, state
@@ -99,7 +102,7 @@ class TalkStore:
         if not isinstance(conversation_id, str) or not CONVERSATION_ID.fullmatch(conversation_id):
             raise TalkError(400, "Malformed conversation id.")
         state = self._load(conversation_id)
-        if state is None or state.get("account") != account.key:
+        if state is None or state.get("account") != account.key or not self.history.session_exists(conversation_id):
             raise TalkError(404, "That conversation is not available. Reopen Talk from the bot.")
         if bound and self.history.get_meta(self._binding_key(account)) != conversation_id:
             raise TalkError(409, "That conversation is no longer current. Reopen Talk from the bot.")
@@ -117,6 +120,7 @@ class TalkStore:
                 record["ended"], record["end_reason"] = now, "expired"
                 changed = True
         if changed:
+            state["summary"] = self._summary(conversation_id)
             self._save(conversation_id, state)
 
     def start_voice_session(self, account, conversation_id, briefing_watermark):
@@ -174,7 +178,7 @@ class TalkStore:
                                   "platform_message_id": receipt, "timestamp": self.clock()})
             if fresh:
                 self.history.append(conversation_id, fresh)
-            if any(e["role"] == "assistant" for e in parsed) and not record["spoke"]:
+            if any(m["role"] == "assistant" for m in fresh) and not record["spoke"]:
                 record["spoke"] = True
                 self._advance_cursor(state, record)
                 self._save(conversation_id, state)
@@ -186,7 +190,8 @@ class TalkStore:
         if watermark is not None and (state["activity_cursor"] is None or watermark > state["activity_cursor"]):
             state["activity_cursor"] = watermark
 
-    def end(self, account, conversation_id, voice_session_id, summary_chars):
+    def end(self, account, conversation_id, voice_session_id):
+        """Idempotent checkpoint: the first end closes the call; every end refreshes the summary."""
         with self.lock:
             state = self._owned(account, conversation_id)
             record = self._voice_session(state, voice_session_id)
@@ -194,11 +199,12 @@ class TalkStore:
                 record["ended"], record["end_reason"] = self.clock(), "ended"
                 if record["spoke"]:
                     self._advance_cursor(state, record)
-                state["summary"] = self._summary(conversation_id, summary_chars)
-                self._save(conversation_id, state)
+            state["summary"] = self._summary(conversation_id)
+            self._save(conversation_id, state)
             return {"ok": True}
 
-    def _summary(self, conversation_id, limit):
+    def _summary(self, conversation_id):
+        limit = self.summary_chars
         """A bounded extractive checkpoint: the latest user requests, no model call involved."""
         asks = [clip(text, 160) for role, text in self.history.recent(conversation_id, 40) if role == "user"]
         out = []

@@ -49,6 +49,7 @@ class TalkConfig:
     skills: tuple = ()
     activity_enabled: bool = True
     activity_sources: tuple = ("cli", "telegram", "discord", "cron", "kanban", "desktop")
+    activity_owner_user_id: int = None
     activity_window_s: int = 7 * 24 * 3600
     voice_session_ttl_s: int = 2 * 3600
     budgets: Budgets = field(default_factory=Budgets)
@@ -112,6 +113,13 @@ def parse_config(data, base_dir):
         raise ConfigError(f"unknown context.budgets keys: {sorted(unknown)}")
     if not 1 <= budgets.event_batch_max <= 50 or not 1 <= budgets.event_text_chars <= 4000:
         raise ConfigError("event_batch_max must be 1..50 and event_text_chars 1..4000")
+    if budgets.instructions_chars < 1500:
+        raise ConfigError("context.budgets.instructions_chars must be at least 1500 (frame and greeting rules)")
+    if budgets.event_batch_max * budgets.event_text_chars > 40000:
+        raise ConfigError("event_batch_max * event_text_chars must stay within 40000 (the request body cap)")
+    owner = activity.get("owner_user_id")
+    if owner is not None and (type(owner) is not int or owner <= 0):
+        raise ConfigError("activity.owner_user_id must be a numeric Telegram user id")
     if privacy and privacy != {"persist_audio": False}:
         raise ConfigError("privacy only supports persist_audio: false; raw audio is never stored")
     return TalkConfig(
@@ -126,6 +134,7 @@ def parse_config(data, base_dir):
         skills=tuple(dict.fromkeys(skills)),
         activity_enabled=bool(activity.get("enabled", True)),
         activity_sources=_sources(activity.get("sources", list(TalkConfig.activity_sources))),
+        activity_owner_user_id=owner,
         activity_window_s=_int(activity.get("window_hours", 168), "activity.window_hours", 1, 24 * 90) * 3600,
         voice_session_ttl_s=_int(voice.get("session_ttl_minutes", 120), "voice.session_ttl_minutes", 5, 24 * 60) * 60,
         budgets=budgets,

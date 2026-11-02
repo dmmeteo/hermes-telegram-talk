@@ -166,6 +166,10 @@ def every_route_rejects_bad_identity_before_any_state(h):
     good = h.ok("bootstrap", {})
     cid = good["conversation_id"]
     meta_before = None if h.native else dict(h.history.meta)
+    touched = []
+    for name in ("bootstrap", "new", "prepare", "started", "events", "end", "soul", "skill"):
+        original = getattr(h.talk, name)
+        setattr(h.talk, name, lambda *a, _n=name, _f=original, **k: (touched.append(_n), _f(*a, **k))[1])
     bodies = {"bootstrap": {}, "session": {"sdp": fx.OFFER, "conversation_id": cid},
               "events": {"conversation_id": cid, "voice_session_id": "vs_" + "a" * 24,
                          "events": [ev("e1", 0, "user", "hi")]},
@@ -182,6 +186,7 @@ def every_route_rejects_bad_identity_before_any_state(h):
             status, data = h.post(route, {"initData": h.init(), **body, **extra})
             assert status == 400 and data["error"], (route, extra, status)
     assert h.fake.resolves == 0 and not h.fake.posts, "no credential or upstream access on rejected requests"
+    assert touched == [], f"runtime reached before auth: {touched}"
     if meta_before is not None:
         assert h.history.meta == meta_before, "rejected requests wrote state"
 
@@ -212,6 +217,8 @@ def events_are_idempotent_and_order_tolerant(h):
     body = {"conversation_id": cid, "voice_session_id": vs, "events": batch}
     assert h.ok("events", body) == {"accepted_ids": ["u2", "a1", "u0"], "conversation_id": cid}
     assert h.ok("events", body)["accepted_ids"] == ["u2", "a1", "u0"], "retried batch accepted"
+    altered = {**body, "events": [ev("u2", 2, "assistant", "rewritten"), ev("a1", 1, "user", "rewritten too")]}
+    assert h.ok("events", altered)["accepted_ids"] == ["u2", "a1"], "a changed retry is accepted, not stored"
     late = {**body, "events": [ev("a3", 3, "assistant", "second answer"), ev("u0", 0, "user", "first question")]}
     assert h.ok("events", late)["accepted_ids"] == ["a3", "u0"]
     assert h.stored(cid) == [("user", "first question"), ("assistant", "first answer"),
@@ -222,6 +229,14 @@ def events_are_idempotent_and_order_tolerant(h):
                                                                        "text": "x", "audio": "AAAA"}]):
         assert h.post("events", {"initData": h.init(), **body, "events": bad})[0] == 400, bad
     assert len(h.stored(cid)) == 4, "rejected batches wrote nothing"
+    second, _ = h.call(cid)
+    vs2 = second["voice_session_id"]
+    h.ok("events", {"conversation_id": cid, "voice_session_id": vs2, "events": [ev("q1", 0, "user", "only a user turn")]})
+    h.ok("events", {"conversation_id": cid, "voice_session_id": vs2,
+                    "events": [ev("q1", 0, "assistant", "replayed with another role")]})
+    state = json.loads(h.history.get_meta(f"hermes_talk:conversation:{cid}"))
+    assert state["voice_sessions"][vs2]["spoke"] is False, "a replayed id does not count as the assistant speaking"
+    assert h.stored(cid)[-1] == ("user", "only a user turn")
 
 
 @check
@@ -282,7 +297,7 @@ def explicit_new_is_isolated(h):
 @check
 def context_budgets_clip_every_section(h):
     tight = fx.config_data(context={"skills": ["talk-brief", "not-allowed"], "budgets": {
-        "instructions_chars": 900, "soul_chars": 60, "skill_chars": 50, "skills_chars": 70,
+        "instructions_chars": 1500, "soul_chars": 100, "skill_chars": 100, "skills_chars": 150,
         "recent_turns": 2, "turn_chars": 20}})
     h2 = Harness(h.native, tight)
     try:
@@ -290,18 +305,27 @@ def context_budgets_clip_every_section(h):
         h2.ok("events", {"conversation_id": data["conversation_id"], "voice_session_id": data["voice_session_id"],
                          "events": [ev(f"u{i}", i, "user", f"turn {i} " + "w" * 40) for i in range(5)]})
         _, instructions = h2.call()
-        assert len(instructions) <= 900, len(instructions)
-        assert "[clipped]" in instructions
-        assert fx.OTHER_SKILL_MARKER not in instructions, "second skill exceeds skills_chars"
+        _, composed, _, report = h2.talk.prepare(fx.USER_ID, None)
+        assert composed == instructions and len(instructions) <= 1500, len(instructions)
+        assert 0 < report["soul"] <= 100 and 0 < report["skills"] <= 150, report
+        assert report["skills_included"] == ["talk-brief"], "second skill exceeds skills_chars"
+        assert "[clipped]" in instructions and fx.OTHER_SKILL_MARKER not in instructions
         assert "turn 4" in instructions and "turn 3" in instructions and "turn 2" not in instructions
-        assert fx.SECRET_IN_SOUL not in instructions
+        assert fx.SECRET_IN_SOUL not in instructions and instructions.rstrip().endswith("says so.")
+        h2.talk.soul = lambda: "S" * 50000
+        h2.talk.skill = lambda name: "K" * 50000
+        _, full, _, report = h2.talk.prepare(fx.USER_ID, None)
+        assert len(full) <= 1500 and "## Greeting" in full and "Voice limits in this build" in full, report
     finally:
         h2.close()
     for bad in ({"profile": {"id": "x", "avatar": "https://cdn.example/a.png?token=1"}},
                 {"profile": {"id": "x", "avatar": "missing.svg"}},
                 {"profile": {"id": "x"}, "privacy": {"persist_audio": True}},
                 {"profile": {"id": "x"}, "context": {"budgets": {"provider_tokens": 128000}}},
-                {"profile": {"id": "x"}, "appearance": {"listen_color": "red"}}, {"profile": {}}):
+                {"profile": {"id": "x"}, "appearance": {"listen_color": "red"}}, {"profile": {}},
+                {"profile": {"id": "x"}, "context": {"budgets": {"event_batch_max": 50, "event_text_chars": 4000}}},
+                {"profile": {"id": "x"}, "context": {"budgets": {"instructions_chars": 400}}},
+                {"profile": {"id": "x"}, "activity": {"owner_user_id": "1001"}}):
         try:
             parse_config(bad, h.home)
         except ConfigError:
@@ -330,6 +354,11 @@ def activity_briefing_is_scoped_truthful_and_cursored(h):
     assert "other user" not in brief and "excluded source" not in brief and "Telegram Voice" not in brief
     assert "[completed]" not in brief and "[active]" not in brief
     assert "cli session " in brief and " UTC)" in brief, "source ids and timestamps preserved"
+    _, theirs = h.call(user=fx.OTHER_USER_ID)
+    theirs = theirs.split("## Activity since the last visit\n", 1)[1]
+    assert "Synthetic other user chat" in theirs, "a user's own chat is theirs"
+    for private in ("Synthetic deploy check", "Synthetic broken job", "Synthetic own telegram chat"):
+        assert private not in theirs, f"leaked to another allowlisted user: {private}"
     cid, vs = data["conversation_id"], data["voice_session_id"]
     _, unchanged = h.call(cid)
     assert "Synthetic broken job" in unchanged, "unread until the assistant actually spoke"
@@ -340,6 +369,25 @@ def activity_briefing_is_scoped_truthful_and_cursored(h):
     _, later = h.call(cid)
     later_brief = later.split("## Activity since the last visit\n", 1)[1]
     assert "[active] Synthetic new job" in later_brief and "Synthetic broken job" not in later_brief
+
+
+@check
+def a_cut_briefing_never_skips_older_unread_items(h):
+    small = fx.config_data(context={"skills": [], "budgets": {"activity_items": 2}})
+    h2 = Harness(h.native, small)
+    try:
+        h2.seed("Synthetic oldest failure", turns=[("user", "go"), ("assistant", "boom")], failed=True, age_s=900)
+        h2.seed("Synthetic middle job", turns=[("user", "go"), ("assistant", "ok")], end_reason="done", age_s=800)
+        h2.seed("Synthetic newest job", turns=[("user", "go"), ("assistant", "ok")], end_reason="done", age_s=700)
+        data, first = h2.call()
+        assert "[failed] Synthetic oldest failure" in first and "Synthetic middle job" in first
+        assert "Synthetic newest job" not in first and "1 newer update(s) not listed yet" in first
+        h2.ok("events", {"conversation_id": data["conversation_id"], "voice_session_id": data["voice_session_id"],
+                         "events": [ev("a1", 0, "assistant", "two updates")]})
+        _, second = h2.call()
+        assert "Synthetic newest job" in second and "Synthetic oldest failure" not in second
+    finally:
+        h2.close()
 
 
 @check
@@ -360,10 +408,13 @@ def provider_and_credential_failures_create_no_voice_session(h):
 def stale_voice_sessions_expire_without_resetting_the_conversation(h):
     data, _ = h.call()
     cid, vs = data["conversation_id"], data["voice_session_id"]
+    h.ok("events", {"conversation_id": cid, "voice_session_id": vs,
+                    "events": [ev("u1", 0, "user", "plan the garden shed")]})
     h.clock.now += h.config.voice_session_ttl_s + 1
     assert h.ok("bootstrap", {})["conversation_id"] == cid
     state = json.loads(h.history.get_meta(f"hermes_talk:conversation:{cid}"))
     assert state["voice_sessions"][vs]["end_reason"] == "expired"
+    assert state["summary"] == "- plan the garden shed", "an expired call still leaves a summary"
     assert h.ok("end", {"conversation_id": cid, "voice_session_id": vs}) == {"ok": True}
     assert json.loads(h.history.get_meta(f"hermes_talk:conversation:{cid}"))["voice_sessions"][vs]["end_reason"] \
         == "expired", "a later end does not rewrite an expiry"
@@ -402,7 +453,11 @@ def a_deleted_native_session_is_reconciled_to_a_new_conversation(h):
     fresh = h.ok("bootstrap", {})["conversation_id"]
     assert fresh != gone and h.history.session_exists(fresh)
     status, err = h.post("session", {"initData": h.init(), "sdp": fx.OFFER, "conversation_id": gone})
-    assert status == 409 and err["error"], (status, err)
+    assert status == 404 and err["error"], (status, err)
+    status, err = h.post("events", {"initData": h.init(), "conversation_id": gone,
+                                    "voice_session_id": data["voice_session_id"],
+                                    "events": [ev("u1", 0, "user", "into the void")]})
+    assert status == 404 and err["error"], (status, err)
 
 
 @check
@@ -570,7 +625,7 @@ def run_offline():
         print(host.stdout.strip() or f"host run produced no output: {host.stderr[-800:]}")
         host_ok = host.returncode == 0
     ok = legacy_ok and memory_failures == 0 and host_ok
-    print("BACKEND OK" if ok else "BACKEND FAILED")
+    print(("BACKEND OK" + ("" if runtime else " (host integration SKIPPED)")) if ok else "BACKEND FAILED")
     return 0 if ok else 1
 
 
