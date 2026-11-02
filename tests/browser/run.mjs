@@ -1,5 +1,5 @@
 import {spawn} from 'node:child_process';
-import {writeFileSync,appendFileSync,readFileSync,createWriteStream} from 'node:fs';
+import {writeFileSync,appendFileSync,readFileSync,createWriteStream,existsSync} from 'node:fs';
 import {createHash} from 'node:crypto';
 import {chromium} from 'playwright';
 const OUT=process.argv[2] || '/output/talk';
@@ -16,7 +16,7 @@ const until=async(fn,message,ms=15000)=>{
 };
 let failures=0,passes=0;
 async function step(name,fn){log(name,{started:true});try{const detail=await fn();passes++;log(name,{result:'pass',...detail});}
- catch(e){failures++;log(name,{result:'fail',error:String(e.stack||e).slice(0,1000)});}}
+ catch(e){failures++;log(name,{result:'fail',error:String(e.stack||e).slice(0,6000),resources:Object.fromEntries(['memory.current','memory.events','pids.current','pids.events'].map(name=>[name,readFileSync('/sys/fs/cgroup/'+name,'utf8')]))});}}
 const fixture=spawn('python3',['/src/tests/browser/fixture.py'],{stdio:['ignore','pipe','pipe']});
 fixture.stderr.pipe(createWriteStream(`${OUT}/fixture.stderr`));
 await new Promise((resolve,reject)=>{
@@ -24,11 +24,12 @@ await new Promise((resolve,reject)=>{
  fixture.stdout.on('data',d=>{if(String(d).includes('TALK FIXTURE READY')){clearTimeout(timer);resolve();}});
  fixture.on('exit',c=>reject(new Error(`fixture exit ${c}`)));
 });
-const args=['--use-fake-device-for-media-stream','--use-fake-ui-for-media-stream','--allow-loopback-in-peer-connection',
+const args=['--disable-gpu','--use-fake-device-for-media-stream','--use-fake-ui-for-media-stream','--allow-loopback-in-peer-connection',
  '--disable-features=WebRtcHideLocalIpsWithMdns','--autoplay-policy=no-user-gesture-required'];
 const browser=await chromium.launch({args});
+let visibilityBrowser,visibilityChrome;
 let nativePolicyBrowser;
-log('runtime',{browser:browser.version(),fixture:'real frozen backend + local Chromium WebRTC peers; all identities/context/media synthetic',network:'none'});
+log('runtime',{browser:browser.version(),display:'headless Chromium; native CDP context for real tab visibility',fixture:'real frozen backend + local Chromium WebRTC peers; all identities/context/media synthetic',network:'none'});
 const provider=await browser.newPage();
 await provider.goto(`${FIX}/provider.html`);
 const {initData}=await(await fetch(`${FIX}/identity`)).json();
@@ -53,10 +54,10 @@ function instrument() {
  const raf=requestAnimationFrame;window.requestAnimationFrame=fn=>raf(t=>{window.__raf++;fn(t);});
 }
 async function open(options={}){
- const ctx=await (options.browser || browser).newContext({viewport:options.viewport||{width:390,height:844},hasTouch:true,permissions:['microphone'],reducedMotion:options.reducedMotion||'no-preference'});
- contexts.push(ctx);await ctx.addInitScript(instrument);
+ const ctx=options.context || await (options.browser || browser).newContext({viewport:options.viewport||{width:390,height:844},hasTouch:true,permissions:['microphone'],reducedMotion:options.reducedMotion||'no-preference'});
+ if(!options.context)contexts.push(ctx);await ctx.addInitScript(instrument);
  if(options.init)await ctx.addInitScript(options.init);
- const page=await ctx.newPage();page.on('pageerror',e=>errors.push(String(e)));
+ const page=await ctx.newPage();if(options.context)await page.setViewportSize({width:390,height:844});page.on('pageerror',e=>errors.push(String(e)));
  await page.route('https://telegram.org/**',r=>r.fulfill({contentType:'text/javascript',body:`window.Telegram={WebApp:{initData:new URLSearchParams(location.hash.slice(1)).get('tgWebAppData')||'',ready(){},expand(){}}};`}));
  await page.route('**/*',r=>{
   const url=r.request().url();if(url.startsWith('http://127.0.0.1:')||url.startsWith('https://telegram.org/'))return r.fallback();
@@ -71,7 +72,7 @@ const state=page=>page.evaluate(()=>({phase:document.getElementById('orb').datas
  gum:window.__gum,tracks:window.__streams.flatMap(s=>s.getTracks()).map(t=>({enabled:t.enabled,state:t.readyState})),
  peers:window.__pcs.map(p=>p.connectionState),audio:window.__audios.map(a=>a.state),
  playing:!document.getElementById('remote').paused,analysers:window.__analysers,raf:window.__raf}));
-const ready=page=>until(async()=>{const s=await state(page);return ['listening','speaking'].includes(s.phase)&&s.tracks.some(t=>t.enabled)&&s;},'call ready');
+const ready=async page=>{try{return await until(async()=>{const s=await state(page);return ['listening','speaking'].includes(s.phase)&&s.tracks.some(t=>t.enabled)&&s;},'call ready');}catch(error){error.message+=' '+JSON.stringify(await state(page));throw error;}};
 const lastPeer=()=>provider.evaluate(()=>window.peers.length-1);
 const send=(index,event)=>provider.evaluate(({index,event})=>window.peers[index].send(event),{index,event});
 const gain=(index,value)=>provider.evaluate(({index,value})=>{window.peers[index].gain.gain.value=value;},{index,value});
@@ -188,11 +189,21 @@ try {
   await page.unroute('**/api/events');
  });
  await step('real-background-tab-does-not-end-call',async()=>{
-  const before=await state(page);const other=await page.context().newPage();await other.goto('about:blank');await other.bringToFront();
-  await page.waitForTimeout(500);const during=await state(page);
-  const visibility=await page.evaluate(()=>document.visibilityState);assert(visibility==='hidden','background tab is actually hidden');
-  assert(during.peers.at(-1)==='connected'&&during.tracks.every(t=>t.state==='live'),'hidden page media preserved');
-  await page.bringToFront();await other.close();await ready(page);return {before:before.peers,after:during.peers,visibility};
+  visibilityChrome=spawn(chromium.executablePath(),['--headless=new','--no-sandbox','--disable-dev-shm-usage',
+   '--remote-debugging-port=9222','--user-data-dir=/tmp/visibility-profile',...args,'about:blank'],{stdio:'ignore'});
+  await until(async()=>{try{return(await fetch('http://127.0.0.1:9222/json/version')).ok;}catch{return false;}},'native visibility browser');
+  visibilityBrowser=await chromium.connectOverCDP('http://127.0.0.1:9222',{noDefaults:true});
+  const context=visibilityBrowser.contexts()[0];
+  const native=await open({context});await ready(native);
+  const before=await state(native);const other=await context.newPage();await other.goto('about:blank');await other.bringToFront();
+  await until(()=>native.evaluate(()=>document.visibilityState==='hidden'),'native hidden tab');
+  const during=await state(native);const visibility=await native.evaluate(()=>document.visibilityState);
+  assert(visibility==='hidden','background tab is actually hidden');
+  assert(during.peers.at(-1)==='connected'&&during.tracks.at(-1).state==='live','current hidden page media preserved');
+  assert(JSON.stringify(during.tracks.map(t=>t.state))===JSON.stringify(before.tracks.map(t=>t.state)),'hiding preserves every prior live and ended track state');
+  await native.bringToFront();await other.close();await ready(native);await native.close();
+  await visibilityBrowser.close();visibilityBrowser=null;visibilityChrome.kill('SIGTERM');visibilityChrome=null;
+  return {before:before.peers,after:during.peers,visibility,nativeContext:'CDP noDefaults avoids Playwright forced visible focus emulation'};
  });
  await step('visibility-hidden-and-persisted-exit-are-distinct',async()=>{
   await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
@@ -228,7 +239,7 @@ try {
    navigator.mediaDevices.getUserMedia=c=>{if(deny){deny=false;return Promise.reject(new DOMException('Fixture denial','NotAllowedError'));}return gum(c);};}});
   await until(async()=>(await state(denied)).error.includes('Microphone access denied'),'actionable permission denial');
   assert((await state(denied)).peers.length===0,'no peer after denial');await screenshot(denied,'mobile-permission-error');
-  await denied.click('#start');await ready(denied);await denied.close();
+  await denied.click('#start');await ready(denied);await denied.context().close();
  });
  await step('autoplay-denial-one-tap-unlock-retains-one-peer',async()=>{
   const blocked=await open({init:()=>{window.__allowPlay=false;const play=HTMLMediaElement.prototype.play;
@@ -237,7 +248,7 @@ try {
   await until(async()=>(await state(blocked)).phase==='blocked','autoplay blocked fallback');
   const s=await state(blocked);assert(s.tracks.every(t=>!t.enabled)&&s.fallback&&s.muteDisabled,'blocked output cannot send mic');
   await screenshot(blocked,'mobile-enable-audio');await blocked.click('#start');await ready(blocked);
-  assert((await state(blocked)).peers.length===1,'unlock same peer');await blocked.close();
+  assert((await state(blocked)).peers.length===1,'unlock same peer');await blocked.context().close();
  });
  await step('handshake-and-first-greeting-gate-actual-mic',async()=>{
   await provider.evaluate(()=>window.behavior={handshake:false,greeting:false});
@@ -249,7 +260,7 @@ try {
   await held.waitForTimeout(500);assert((await state(held)).tracks.every(t=>!t.enabled),'text without actual greeting energy cannot enable microphone');
   await gain(i,.18);
   await held.waitForTimeout(500);assert((await state(held)).tracks.every(t=>!t.enabled),'settled text alone cannot bypass outgoing audio tail');
-  await gain(i,0);await ready(held);await held.close();await provider.evaluate(()=>window.behavior={handshake:true,greeting:true});
+  await gain(i,0);await ready(held);await held.context().close();await provider.evaluate(()=>window.behavior={handshake:true,greeting:true});
  });
  await step('native-autoplay-policy-needs-real-user-activation',async()=>{
   nativePolicyBrowser=await chromium.launch({args:args.filter(a=>!a.startsWith('--autoplay-policy')).concat('--autoplay-policy=document-user-activation-required')});
@@ -259,7 +270,7 @@ try {
   }});
   await until(async()=>{const s=await state(native);return s.phase==='blocked'&&s.audio.at(-1)==='suspended';},'native activation policy fallback before media permission');
   assert((await state(native)).peers.length===0&&(await state(native)).fallback,'native blocked audio exposes activation before microphone access');
-  await native.click('#start');await native.evaluate(()=>window.__releaseMic());await ready(native);await native.close();
+  await native.click('#start');await native.evaluate(()=>window.__releaseMic());await ready(native);await native.context().close();await nativePolicyBrowser.close();nativePolicyBrowser=null;
  });
  await step('suspended-output-pauses-mic-and-unlocks-same-call',async()=>{
   const paused=await open();await ready(paused);
@@ -267,7 +278,7 @@ try {
   await until(async()=>(await state(paused)).phase==='blocked','suspended audio blocked state');
   assert((await state(paused)).tracks.every(t=>!t.enabled),'suspended audio cannot transmit microphone');
   await paused.click('#start');await ready(paused);
-  assert((await state(paused)).peers.length===1,'same call after output resume');await paused.close();
+  assert((await state(paused)).peers.length===1,'same call after output resume');await paused.context().close();
  });
  await step('greeting-suspension-exposes-unlock-before-ready',async()=>{
   await provider.evaluate(()=>window.behavior={handshake:true,greeting:false});
@@ -278,24 +289,24 @@ try {
   assert((await state(held)).fallback&&(await state(held)).tracks.every(t=>!t.enabled),'greeting suspension remains paused');
   await held.click('#start');await gain(i,.18);
   await held.waitForTimeout(250);await send(i,{type:'turn.done',turn:{id:'resumed-greeting',role:'assistant',transcript:'Synthetic resumed greeting.'}});
-  await gain(i,0);await ready(held);await held.close();await provider.evaluate(()=>window.behavior={handshake:true,greeting:true});
+  await gain(i,0);await ready(held);await held.context().close();await provider.evaluate(()=>window.behavior={handshake:true,greeting:true});
  });
  await step('reduced-motion-uses-static-circle-with-real-audio-state',async()=>{
   const reduced=await open({reducedMotion:'reduce'});await ready(reduced);const i=await lastPeer();
   await gain(i,.18);await until(async()=>(await state(reduced)).phase==='speaking','reduced motion speaking state');
   assert(await reduced.evaluate(()=>matchMedia('(prefers-reduced-motion: reduce)').matches),'preference respected');
-  await screenshot(reduced,'mobile-reduced-motion');await reduced.close();
+  await screenshot(reduced,'mobile-reduced-motion');await reduced.context().close();
  });
  await step('missing-telegram-auth-never-opens-microphone',async()=>{
   const missing=await open({noAuth:true});const s=await state(missing);
-  assert(s.gum===0&&s.peers.length===0&&s.error.includes('Telegram'),'authenticated entry required');await missing.close();
+  assert(s.gum===0&&s.peers.length===0&&s.error.includes('Telegram'),'authenticated entry required');await missing.context().close();
  });
  await step('stale-getusermedia-completion-stops-returned-track',async()=>{
   const delayed=await open({init:()=>{const gum=navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
    navigator.mediaDevices.getUserMedia=async c=>{const stream=await gum(c);await new Promise(r=>{window.__releaseMic=r;});return stream;};}});
   await until(()=>delayed.evaluate(()=>Boolean(window.__releaseMic)),'microphone pending');
   await delayed.evaluate(()=>window.dispatchEvent(new PageTransitionEvent('pagehide')));
-  await delayed.evaluate(()=>window.__releaseMic());await closed(delayed);await delayed.close();
+  await delayed.evaluate(()=>window.__releaseMic());await closed(delayed);await delayed.context().close();
  });
  await step('auth-errors-never-show-raw-upstream-or-leak-context',async()=>{
   await page.route('**/api/bootstrap',r=>r.fulfill({status:401,contentType:'application/json',body:JSON.stringify({error:'SYNTHETIC-PRIVATE-UPSTREAM'})}));
@@ -309,7 +320,7 @@ try {
  await step('no-uncaught-browser-errors',async()=>{assert(errors.length===0,JSON.stringify(errors));});
 } finally {
  for(const context of contexts)await context.close();
- await nativePolicyBrowser?.close();await browser.close();fixture.kill('SIGTERM');
+ await nativePolicyBrowser?.close();await visibilityBrowser?.close();visibilityChrome?.kill('SIGTERM');await browser.close();fixture.kill('SIGTERM');
 }
 log('summary',{passes,failures,mandatory:27});
 assert(passes+failures===27,'complete mandatory inventory ran');
