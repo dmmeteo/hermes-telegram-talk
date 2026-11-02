@@ -1,7 +1,7 @@
 # Agents
 
 Hermes Talk PoC v2. Keep it small: `plugin.yaml`, `__init__.py`, `server.py`, `hermes_talk/`,
-`verify-integrated.py`, `verify-backend.py`, `verify-frontend.py`, `verify.py`, `browser/`, `tests/` and `static/`. `static/`, `tests/frontend/`, `tests/browser/`
+`verify-integrated.py`, `verify-agent.py`, `verify-backend.py`, `verify-frontend.py`, `verify.py`, `browser/`, `tests/` and `static/`. `static/`, `tests/frontend/`, `tests/browser/`
 and `DESIGN.md` belong to the frontend owner.
 
 Boundaries:
@@ -17,6 +17,8 @@ Boundaries:
 
 Before committing: `python3 verify-integrated.py --offline --require-host` must print
 `TALK_INTEGRATED_OFFLINE_OK`. It includes `verify-backend.py --offline` (`BACKEND OK`, with `verify.py --offline`
-at `26/26`) and `verify-frontend.py --offline`. For UI or lifecycle changes, also run
+at `26/26`) and `verify-frontend.py --offline`. For task, context or delegation changes, `python3 verify-agent.py --require-hermes` must print `TALK_AGENT_OK` and
+`python3 verify-agent.py --browser <out-dir>` `TALK_AGENT_BROWSER_OK`. Voice tasks run only through `hermes chat`
+single-query processes; never add an approval path, `--yolo` or an in-process agent. For UI or lifecycle changes, also run
 `python3 verify-integrated.py --browser <out-dir>` (legacy and Talk Chromium, capped containers) and never weaken
 its assertions.

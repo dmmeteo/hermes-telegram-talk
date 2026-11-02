@@ -36,5 +36,16 @@ activity:
   sources: [cli, telegram, discord, cron, kanban, desktop]
   # owner_user_id: 123456789 # numeric Telegram id of the operator; only this user hears sessions with no
   #                          # chat user (CLI, cron, kanban). Omit it and those sessions are never briefed.
+tasks:
+  enabled: false             # voice delegations become native Hermes tasks only when true
+  # user_ids: [123456789]    # required when enabled: Telegram ids allowed to start tasks
+  # toolsets: [file, web, session_search]   # required when enabled: Hermes toolsets a task may use
+  # workdir: .               # the task's working directory, relative to this file
+  # max_concurrent: 1        # 1..2 native processes at once
+  # max_open_per_user: 3
+  # run_budget_seconds: 600  # Hermes' own run budget; Talk stops the run 60 s after it
+  # max_turns: 30
+  # request_chars: 2000
+  # result_chars: 1500
 privacy:
   persist_audio: false       # the only accepted value; raw audio is never stored

@@ -19,8 +19,11 @@ In scope:
 - Voice instructions built from the profile SOUL, allowlisted skills, the conversation summary,
   recent turns and a small activity briefing.
 
+- Optional voice tasks: a GPT-Live delegation becomes a real Hermes task in the profile's own agent, and its
+  result comes back on that delegation (see "Voice tasks"). Off unless `tasks.enabled` is set.
+
 Non-goals for this PoC:
-- Starting or cancelling Hermes work from voice. The model is told to say it can't.
+- Approving flagged actions from voice. A task that needs approval is blocked and says so.
 - Any paid API fallback, `/v1/realtime/sessions`, or raw audio storage.
 - Posting voice turns as Telegram messages.
 - Health or location data.
@@ -41,7 +44,9 @@ Non-goals for this PoC:
     checkpoint and the read cursor.
   - `history.py` is Hermes `SessionDB` through its public methods, plus a synthetic in-memory twin.
   - `activity.py` builds the briefing.
-  - `context.py` composes the instructions.
+  - `context.py` composes the instructions and mid-call context updates.
+  - `jobs.py` is the task record, its state machine and the job board (dedupe, scheduling, receipts, restart).
+  - `agent.py` runs a task as one native `hermes chat` process and decides task readiness.
   - `talk.py` holds the runtime the routes call.
   - `fixtures.py` provides synthetic test data and a fixture server.
 - The upstream exchange is adapted from Hermes Conduit (MIT, `LICENSES/CONDUIT-LICENSE`).
@@ -109,6 +114,57 @@ Budgets are this application's character limits. The token window of the GPT-Liv
 endpoint is not published. No setting here claims to match it, so raise budgets only after a live
 qualification shows they're accepted.
 
+## Voice tasks
+
+When `tasks.enabled` is true, the voice model's client delegations become Hermes tasks:
+
+1. GPT-Live sends `delegation.created` (`item.type` delegation, `target` client, text in `item.content[].text`) on the
+   data channel. `static/talk/app.js` posts it to `api/task` with the original `delegation_item_id`, and appends the
+   returned `reply` to that delegation on the `commentary` channel ("working on it; the result will follow").
+2. The server checks initData, Origin, the allowlist, `tasks.user_ids`, the account's live call, limits and readiness.
+   It stores a job keyed by account scope, call generation and delegation id. A repeated delegation returns the same
+   job and starts nothing.
+3. The job board starts `hermes chat --query-file - --format stream-json --source telegram-voice --max-turns N
+   --run-budget S -t <tasks.toolsets> [--resume <session>]` under the profile's `HERMES_HOME`, in `tasks.workdir`. The
+   prompt carries the bounded voice turns before the request and then the request once. That is the profile's own
+   agent with its own model, provider, skills, memory and approval policy. Tasks of one conversation run one at a
+   time in one native session (`--resume`), so the agent keeps its own context across tasks, calls and restarts.
+   The child environment drops the Talk bot token, the allowlist and every Hermes approval bypass variable.
+4. The browser polls `api/tasks`. When the job ends it appends the server's `spoken` text to the original delegation
+   on `speakable`, in 500-byte chunks (Conduit framing), once per call, and then acks with `api/task/ack`.
+5. If the call ended first, the task keeps running. The next call's instructions list it ("running" or its result).
+   A result that arrives during a later call goes out as a `session.context.append` from `api/context`, and only its
+   ack (`api/context/ack`) marks it delivered. Results carried in instructions count as delivered once the assistant
+   speaks in that call. The same update carries new Pulse items, and the activity cursor moves only on that ack.
+
+Job states are accepted, running, succeeded, failed, cancelled and interrupted. A running job is stored before its
+process starts. After a Talk restart a live process is adopted and finishes normally. A dead one is settled from its
+output file, or marked interrupted and never rerun. Receipt is separate: delivered means the client appended the
+result (or the call that carried it spoke), not that anyone heard it. Ending a call never cancels a task; `api/task/
+cancel` and a spoken "cancel task N" delegation do.
+
+Readiness is checked on every bootstrap and task. Tasks are unavailable, and the voice is told it cannot start work,
+unless the profile has a model, every `tasks.toolsets` name exists, the Hermes command is installed, approvals are
+`manual`, and `approvals.single_query_mode` is not approving. In single-query mode Hermes itself blocks every flagged
+action with nobody to approve it; Talk adds no approval path and never passes `--yolo`. Full tool parity with an
+attended chat is not claimed: anything that needs approval fails and the result says so.
+
+Limits: `tasks.max_concurrent` (1..2) processes, `tasks.max_open_per_user` open jobs, `tasks.request_chars`,
+`tasks.result_chars`, `tasks.max_turns` and `tasks.run_budget_seconds` (Hermes' own budget, then a stop 60 s later).
+Every task route is rate limited per user and accepts 32 KiB.
+
+### Decision trail
+
+| Candidate | Grounding | Verdict |
+| --- | --- | --- |
+| Dashboard `/api/ws` JSON-RPC (`session.create`, `prompt.submit`), as Conduit iOS uses | Needs the dashboard running and a ticket or user token in the plugin; approvals arrive as server requests | Not taken: adds a credential and a second service to a standalone plugin |
+| `tui_gateway` stdio JSON-RPC subprocess | Same methods; one long-lived child per server | Not taken: every task dies with the Talk process, so restart adoption is impossible |
+| Embedded `AIAgent` in the Talk process | No public builder (private recipes in `hermes_cli/oneshot.py`, `cron/scheduler.py`); an in-process agent with no approval context auto-approves flagged commands | Not taken: unsafe by default and couples the voice server to agent work |
+| `hermes chat` single-query process per task | Documented CLI (`--query-file`, `--format stream-json`, `--resume`, `--run-budget`, `--source`); single-query approvals fail closed; SIGINT ends with `error: Interrupted`; about 190 MB and 7 s per run here | **Taken** |
+
+The scripted model in `tests/agent/scripted_model.py` stands in for the provider only. Hermes' AIAgent, tools,
+approvals and SessionDB run unchanged against it.
+
 ## Configuration
 
 See [talk.example.yaml](talk.example.yaml). It sets:
@@ -155,6 +211,8 @@ confirms it with `hermes plugins list`. Real-profile installation and activation
 
 ```sh
 python3 verify-integrated.py --offline --require-host   # canonical gate: backend + frontend offline, host mandatory
+python3 verify-agent.py --require-hermes                 # voice tasks through the real Hermes agent (scripted model)
+python3 verify-agent.py --browser <out-dir>              # Chromium delegation job: real app.js, server and tasks
 python3 verify-integrated.py --browser <out-dir>        # legacy and Talk Chromium inventories, capped containers
 python3 verify-backend.py --offline     # full backend gate (below)
 python3 verify-frontend.py --offline    # legacy 26 + frontend unit checks + HTTP contract on this backend
@@ -212,7 +270,8 @@ inventories (`django-admin-repl-verify-browser:pw1.63.0`, Playwright 1.63 with C
 | Talk UI served in configured mode; legacy page without config | yes | yes | yes | in fixture | no |
 | Frontend use of the v2 routes (Chromium, local WebRTC peers) | yes | yes | n/a | n/a | no |
 | `api/session` against real GPT-Live | yes | fake upstream | not exercised | no | no |
-| Voice task execution | no (unsupported; the model says so) | n/a | n/a | n/a | n/a |
+| Voice tasks: native agent, tools, delivery, restart | yes (off by default) | n/a | yes (real `hermes chat`, scripted model) | in fixture (named disposable profile) | no |
+| Delegation wiring in the Talk UI (Chromium, local peers) | yes | n/a | yes (real tasks in the browser job) | n/a | no |
 
 ## Outcome checklist
 
@@ -232,5 +291,8 @@ this client.
 ## Licenses
 
 The project code is this repository's own. The signaling exchange is adapted from Hermes Conduit
-(MIT); see `LICENSES/CONDUIT-LICENSE`. The Pulse-style briefing is an independent implementation
+(MIT); see `LICENSES/CONDUIT-LICENSE`. The delegation append framing and 500-byte chunking in `static/talk/app.js`
+follow Conduit `GPTLiveProtocol.swift` at 4b6889097d53ad731089f255b03afe534ef3da45; the task flow (commentary
+progress, speakable result on the same delegation id, call and task lifetimes kept apart) follows its
+`GPTLiveDelegationBridge.swift` and `VoiceBackgroundJobs.swift`. No other Conduit code is copied. The Pulse-style briefing is an independent implementation
 inspired by Conduit notifier's Pulse. No code was copied from it.

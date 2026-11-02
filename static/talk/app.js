@@ -12,6 +12,8 @@ const webApp = window.Telegram && window.Telegram.WebApp;
 let call = null;
 let conversation = null;
 let exiting = false;
+const APPEND_MAX_BYTES = 500;
+const FINISHED = ["succeeded", "failed", "cancelled", "interrupted"];
 
 function initData() {
   return webApp?.initData || new URLSearchParams(location.hash.slice(1)).get("tgWebAppData") || "";
@@ -44,6 +46,7 @@ async function post(route, body, options = {}) {
       503: "Voice is unavailable on the server. Try again in a minute."})[response.status]
       || "Voice connection failed. Check your connection, then tap Retry.");
     error.status = response.status;
+    error.serverMessage = typeof data.error === "string" ? data.error : "";
     throw error;
   }
   return data;
@@ -142,6 +145,7 @@ function stop(message = "") {
     cancelAnimationFrame(current.frame);
     current.stream?.getTracks().forEach(track => track.stop());
     current.remoteStream?.getTracks().forEach(track => track.stop());
+    clearTimeout(current.pollTimer);
     if (current.channel) {
       current.channel.onopen = current.channel.onclose = current.channel.onmessage = null;
       current.channel.close();
@@ -206,6 +210,7 @@ function settle(current, event) {
   if (current.seen.has(key) || (!identity && current.lastSettled === key)) return;
   current.lastSettled = key;
   if (identity) current.seen.add(key);
+  if (turn.role === "user") current.lastUserText = text;
   const owner = current.conversation;
   if (owner.disabled) return;
   const characters = Array.from(text);
@@ -236,9 +241,107 @@ function onMessage(current, message) {
   if (event.type === "delegation.created" && event.item?.target === "client"
     && typeof event.item.id === "string" && !current.delegations.has(event.item.id)) {
     current.delegations.add(event.item.id);
-    current.channel.send(JSON.stringify({type: "delegation.context.append", delegation_item_id: event.item.id,
+    if (current.conversation?.tasks) void delegate(current, event.item);
+    else current.channel.send(JSON.stringify({type: "delegation.context.append", delegation_item_id: event.item.id,
       channel: "speakable", content: [{type: "input_text", text: "Tasks are unavailable in Hermes Talk. Nothing was executed."}]}));
   }
+}
+
+// Message framing and 500-byte chunking follow Conduit GPTLiveProtocol.contextAppendMessages (MIT).
+function chunks(text) {
+  const encoder = new TextEncoder();
+  const out = [];
+  let current = "", bytes = 0;
+  for (const character of text.trim()) {
+    const size = encoder.encode(character).length;
+    if (bytes + size > APPEND_MAX_BYTES && current) { out.push(current); current = ""; bytes = 0; }
+    current += character; bytes += size;
+  }
+  if (current) out.push(current);
+  return out;
+}
+
+function append(current, text, channel, delegationId) {
+  if (call !== current || current.channel?.readyState !== "open") return false;
+  for (const chunk of chunks(text)) {
+    const message = {type: delegationId ? "delegation.context.append" : "session.context.append", channel,
+      content: [{type: "input_text", text: chunk}]};
+    if (delegationId) message.delegation_item_id = delegationId;
+    current.channel.send(JSON.stringify(message));
+  }
+  return true;
+}
+
+function callFields(current) {
+  return {initData: current.auth, conversation_id: current.conversation.id, voice_session_id: current.voiceId};
+}
+
+async function delegate(current, item) {
+  const asked = (Array.isArray(item.content) ? item.content : [])
+    .filter(part => part?.type === "input_text" && typeof part.text === "string").map(part => part.text).join("").trim();
+  const request = Array.from(asked || current.lastUserText || "").slice(0, 2000).join("");
+  if (!request || !current.voiceId) {
+    append(current, "There was nothing to hand to Hermes. Nothing was executed.", "speakable", item.id); return;
+  }
+  try {
+    const data = await post("task", {...callFields(current), delegation_item_id: item.id, request});
+    if (call !== current) return;
+    append(current, data.reply, data.channel === "speakable" ? "speakable" : "commentary", item.id);
+    if (data.job?.delegation_item_id === item.id) current.jobs.set(data.job.id, item.id);
+    schedulePoll(current, 500);
+  } catch (error) {
+    if (call !== current) return;
+    append(current, `Hermes could not take this task. ${error.serverMessage || error.message} Nothing was executed.`,
+      "speakable", item.id);
+  }
+}
+
+function schedulePoll(current, delay) {
+  if (call !== current || !current.conversation?.tasks) return;
+  clearTimeout(current.pollTimer);
+  current.pollTimer = setTimeout(() => void poll(current), delay);
+}
+
+async function poll(current) {
+  if (call !== current || !current.voiceId) return;
+  let data;
+  try { data = await post("tasks", callFields(current)); } catch (_) { schedulePoll(current, 5000); return; }
+  if (call !== current) return;
+  for (const job of Array.isArray(data.jobs) ? data.jobs : []) {
+    const delegationId = current.jobs.get(job.id);
+    if (!delegationId || job.delegation_item_id !== delegationId || job.voice_session_id !== current.voiceId
+      || !FINISHED.includes(job.state) || current.spoken.has(job.id)) continue;
+    current.spoken.add(job.id);
+    if (append(current, job.spoken || `Hermes task ${job.number} ${job.state}.`, "speakable", delegationId)) {
+      void acknowledge(current, job.id, 0);
+    }
+  }
+  if (data.context_pending || current.polls++ % 6 === 0) void refresh(current);
+  schedulePoll(current, [...current.jobs.keys()].some(id => !current.spoken.has(id)) ? 2000 : 10000);
+}
+
+async function acknowledge(current, jobId, attempt) {
+  try {
+    await post("task/ack", {...callFields(current), job_id: jobId});
+  } catch (error) {
+    if (attempt < 2 && call === current && ![401, 403, 404, 409].includes(error.status)) {
+      setTimeout(() => void acknowledge(current, jobId, attempt + 1), 1000 * 2 ** attempt);
+    }
+  }
+}
+
+async function refresh(current) {
+  if (current.refreshing || call !== current || !current.voiceId) return;
+  current.refreshing = true;
+  try {
+    const data = await post("context", callFields(current));
+    if (call !== current || !Number.isInteger(data.revision) || typeof data.text !== "string" || !data.text) return;
+    if (append(current, data.text, data.sources?.jobs ? "speakable" : "commentary")) {
+      await post("context/ack", {...callFields(current), revision: data.revision});
+    }
+  } catch (_) {
+    // A refresh is retried by the next poll; nothing counts as delivered without its ack.
+  } finally { current.refreshing = false; }
 }
 
 function advance(current) {
@@ -323,7 +426,8 @@ async function start() {
   const auth = initData();
   if (!auth) { stop("Open Hermes Talk from Telegram to sign in."); return; }
   const current = { auth, phase: "connecting", abort: new AbortController(), nodes: [],
-    seen: new Set(), delegations: new Set(), muted: false, inputLevel: 0, outputLevel: 0 };
+    seen: new Set(), delegations: new Set(), jobs: new Map(), spoken: new Set(), polls: 0,
+    muted: false, inputLevel: 0, outputLevel: 0 };
   call = current; showError(); render();
   try {
     current.audio = new AudioContext();
@@ -349,6 +453,7 @@ async function start() {
     current.conversation = conversation;
     conversation.batchMax = data.limits.event_batch_max;
     conversation.greeting = data.greeting_enabled;
+    conversation.tasks = data.tasks?.available === true;
     conversation.disabled = false;
     conversation.retries = 0;
     void flush(conversation);
@@ -395,6 +500,7 @@ async function start() {
     current.voiceId = answer.voice_session_id;
     if (call !== current) { checkpoint(current); return; }
     await current.peer.setRemoteDescription({type: "answer", sdp: answer.sdp});
+    schedulePoll(current, 1500);
     sample(current);
   } catch (error) {
     if (call !== current) return;
