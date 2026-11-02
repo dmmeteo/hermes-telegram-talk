@@ -56,6 +56,10 @@ class NativeHistory:
         with self.lock:
             self.db.set_meta(key, value)
 
+    def list_meta_prefix(self, prefix):
+        with self.lock:
+            return self.db.list_meta_prefix(prefix)
+
     def has_receipt(self, session_id, receipt):
         with self.lock:
             return self.db.has_platform_message_id(session_id, receipt)
@@ -123,6 +127,9 @@ class MemoryHistory:
 
     def set_meta(self, key, value):
         self.meta[key] = value
+
+    def list_meta_prefix(self, prefix):
+        return [(k, v) for k, v in self.meta.items() if k.startswith(prefix)]
 
     def has_receipt(self, session_id, receipt):
         return any(m.get("platform_message_id") == receipt for m in self.messages.get(session_id, []))

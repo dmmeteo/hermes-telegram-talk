@@ -30,8 +30,8 @@ class TalkError(Exception):
 
 
 @dataclass(frozen=True)
-class Account:
-    """The verified identity a conversation is bound to; never browser-chosen."""
+class VoiceScope:
+    """The verified identity a conversation and its tasks are bound to; never browser-chosen."""
     profile: str
     bot_id: str
     user_id: int
@@ -134,14 +134,16 @@ class TalkStore:
             state["summary"] = self._summary(conversation_id)
             self._save(conversation_id, state)
 
-    def start_voice_session(self, account, conversation_id, briefing_watermark):
+    def start_voice_session(self, account, conversation_id, briefing_watermark, job_ids=()):
         with self.lock:
             state = self._owned(account, conversation_id, bound=True)
             self._expire_voice_sessions(conversation_id, state)
             voice_session_id = "vs_" + secrets.token_urlsafe(18)
+            state["generations"] = state.get("generations", 0) + 1
             state["voice_sessions"][voice_session_id] = {
                 "started": self.clock(), "ended": None, "end_reason": None,
-                "briefing_watermark": briefing_watermark, "spoke": False}
+                "briefing_watermark": briefing_watermark, "spoke": False,
+                "generation": state["generations"], "job_ids": list(job_ids), "snapshots": {}}
             # Bounded ledger: the oldest ended records go first.
             ended = sorted((r["started"], k) for k, r in state["voice_sessions"].items() if r["ended"] is not None)
             for _, key in ended[: max(0, len(state["voice_sessions"]) - 50)]:
@@ -159,7 +161,8 @@ class TalkStore:
         return record
 
     def ingest(self, account, conversation_id, voice_session_id, events, batch_max, text_chars):
-        """Append settled turns once; returns accepted ids (duplicates included, never rewritten)."""
+        """Append settled turns once: (accepted ids, duplicates included and never rewritten; job ids the call's
+        instructions carried, when this batch holds the call's first stored assistant turn)."""
         if not isinstance(events, list) or not 1 <= len(events) <= batch_max:
             raise TalkError(400, f"Send between 1 and {batch_max} events.")
         parsed = []
@@ -189,11 +192,13 @@ class TalkStore:
                                   "platform_message_id": receipt, "timestamp": self.clock()})
             if fresh:
                 self.history.append(conversation_id, fresh)
+            spoke = []
             if any(m["role"] == "assistant" for m in fresh) and not record["spoke"]:
                 record["spoke"] = True
                 self._advance_cursor(state, record)
                 self._save(conversation_id, state)
-            return [e["id"] for e in parsed]
+                spoke = list(record.get("job_ids") or ())
+            return [e["id"] for e in parsed], spoke
 
     def _advance_cursor(self, state, record):
         # Items the call's instructions carried whole count as read once the assistant spoke in it.
@@ -203,6 +208,54 @@ class TalkStore:
         cursor = state["activity_cursor"]
         if cursor is None or cursor_key(watermark) > cursor_key(cursor):
             state["activity_cursor"] = list(cursor_key(watermark))
+
+    def voice_session(self, account, conversation_id, voice_session_id, live=False):
+        """A copy of the account's voice session record; live=True also requires the current, unended call."""
+        with self.lock:
+            state = self._owned(account, conversation_id, bound=live)
+            self._expire_voice_sessions(conversation_id, state)
+            record = self._voice_session(state, voice_session_id)
+            if live and record["ended"] is not None:
+                raise TalkError(409, "That call has ended. Reopen Talk from the bot.")
+            return dict(record)
+
+    def save_snapshot(self, account, conversation_id, voice_session_id, watermark, job_ids):
+        """Record a mid-call context update; returns its revision. Nothing counts as read until it is acked."""
+        with self.lock:
+            state = self._owned(account, conversation_id, bound=True)
+            record = self._voice_session(state, voice_session_id)
+            snapshots = record.setdefault("snapshots", {})
+            revision = record.get("revision", 0) + 1
+            record["revision"] = revision
+            snapshots[str(revision)] = {"watermark": watermark, "job_ids": list(job_ids), "acked": False}
+            for old in sorted(snapshots, key=int)[:-5]:
+                del snapshots[old]
+            self._save(conversation_id, state)
+            return revision
+
+    def ack_snapshot(self, account, conversation_id, voice_session_id, revision):
+        """Mark a delivered context update read: (job ids it carried); a repeated ack changes nothing."""
+        with self.lock:
+            state = self._owned(account, conversation_id)
+            record = self._voice_session(state, voice_session_id)
+            snapshot = (record.get("snapshots") or {}).get(str(revision)) if type(revision) is int else None
+            if snapshot is None:
+                raise TalkError(404, "That context update is not available.")
+            if snapshot["acked"]:
+                return []
+            snapshot["acked"] = True
+            if snapshot["watermark"] is not None:
+                self._advance_cursor(state, {"briefing_watermark": snapshot["watermark"]})
+                record["context_watermark"] = snapshot["watermark"]
+            self._save(conversation_id, state)
+            return snapshot["job_ids"]
+
+    def agent_session(self, conversation_id):
+        session_id = self.history.get_meta(f"hermes_talk:agent_session:{conversation_id}")
+        return session_id if session_id and self.history.session_exists(session_id) else None
+
+    def bind_agent_session(self, conversation_id, session_id):
+        self.history.set_meta(f"hermes_talk:agent_session:{conversation_id}", session_id)
 
     def end(self, account, conversation_id, voice_session_id):
         """Idempotent checkpoint: the first end closes the call; every end refreshes the summary."""

@@ -1,0 +1,185 @@
+"""Runs voice tasks as native Hermes turns: one `hermes chat` single-query process per job.
+
+The process is the profile's own CLI agent under the same HERMES_HOME, so it loads that profile's
+model, provider, toolsets, skills, memory and approval policy itself. Talk adds no tool and no
+approval path. Single-query mode has nobody to answer an approval, and Hermes blocks flagged actions
+there unless the profile set approvals.single_query_mode: approve; readiness() refuses that and any
+other bypass. Output goes to a per-job file, so a job keeps running across a Talk restart and is
+adopted, or reconciled from its file, afterwards.
+"""
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+SOURCE = "telegram-voice"
+DATA_DIR = ("plugin-data", "hermes-talk", "jobs")
+CHILD_ENV_DROP = ("TG_VOICE_BOT_TOKEN", "TG_VOICE_ALLOWED_USER_IDS", "HERMES_YOLO_MODE", "HERMES_ACCEPT_HOOKS",
+                  "HERMES_EXEC_ASK", "HERMES_GATEWAY_SESSION", "HERMES_SESSION_PLATFORM", "HERMES_CRON_SESSION",
+                  "HERMES_INTERACTIVE", "HERMES_SESSION_SOURCE")
+APPROVING = {"approve", "off", "allow", "yes", "true"}
+CANCEL_GRACE_S = 8.0
+OUTPUT_MAX_BYTES = 4 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class Readiness:
+    ready: bool
+    reason: str
+
+
+@dataclass(frozen=True)
+class Outcome:
+    exit_code: int
+    text: str
+    error: str
+    session_id: str
+
+
+def hermes_command():
+    exe = Path(sys.executable).parent / "hermes"
+    return [str(exe)] if exe.is_file() else [sys.executable, "-m", "hermes_cli.main"]
+
+
+def _profile_config(home):
+    path = Path(home) / "config.yaml"
+    if not path.is_file():
+        return {}
+    from .config import _yaml_load
+    data = _yaml_load(path.read_text(encoding="utf-8"))
+    return data if isinstance(data, dict) else {}
+
+
+def readiness(tasks, home, command=None, env=None):
+    """Whether this profile can run voice tasks now, with a non-sensitive reason when it cannot."""
+    if not tasks.enabled:
+        return Readiness(False, "Tasks are off in the Talk config.")
+    env = os.environ if env is None else env
+    try:
+        config = _profile_config(home)
+    except Exception as exc:
+        return Readiness(False, f"The profile config could not be read ({type(exc).__name__}).")
+    approvals = config.get("approvals") or {}
+    if str(approvals.get("mode", "manual")).strip().lower() != "manual":
+        return Readiness(False, "The profile approval mode is not manual, so a voice task could be approved "
+                                "without the user. Talk refuses to start tasks.")
+    if str(approvals.get("single_query_mode", "deny")).strip().lower() in APPROVING:
+        return Readiness(False, "The profile auto-approves flagged actions in single-query runs. "
+                                "Talk refuses to start tasks.")
+    model = config.get("model")
+    if not (model.get("default") if isinstance(model, dict) else model):
+        return Readiness(False, "The profile has no configured model for tasks.")
+    try:
+        import toolsets
+        unknown = [name for name in tasks.toolsets if not toolsets.validate_toolset(name)]
+    except Exception as exc:
+        return Readiness(False, f"Hermes toolsets are unavailable ({type(exc).__name__}).")
+    if unknown:
+        return Readiness(False, f"Unknown Hermes toolsets in tasks.toolsets: {', '.join(unknown)}.")
+    head = Path((command or hermes_command())[0])
+    if not head.is_file():
+        return Readiness(False, "The Hermes command is not installed next to this interpreter.")
+    return Readiness(True, "")
+
+
+def process_start(pid):
+    """The kernel start time of pid, which tells a live job process from a reused pid."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    return stat.rsplit(")", 1)[1].split()[19]
+
+
+def alive(pid, start):
+    return bool(pid) and start is not None and process_start(pid) == start
+
+
+def read_outcome(path):
+    """The final result event of a job's stream-json output, or None if the run never reported one."""
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(OUTPUT_MAX_BYTES)
+    except OSError:
+        return None
+    session_id, result = "", None
+    for line in raw.decode("utf-8", "replace").splitlines():
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if event.get("type") == "system" and event.get("session_id"):
+            session_id = str(event["session_id"])
+        if event.get("type") == "result":
+            result = event
+    if result is None:
+        return None
+    code = result.get("exit_code")
+    return Outcome(exit_code=code if type(code) is int else 1, text=str(result.get("text") or ""),
+                   error=str(result.get("error") or ""), session_id=str(result.get("session_id") or session_id))
+
+
+class NativeAgent:
+    def __init__(self, tasks, home, command=None, env=None):
+        self.tasks = tasks
+        self.home = Path(home)
+        self.command = command or hermes_command()
+        base = dict(os.environ if env is None else env)
+        self.env = {k: v for k, v in base.items() if k not in CHILD_ENV_DROP}
+        self.env["HERMES_HOME"] = str(self.home)
+        self.dir = self.home.joinpath(*DATA_DIR)
+
+    def readiness(self):
+        return readiness(self.tasks, self.home, self.command, self.env)
+
+    def argv(self, resume):
+        argv = [*self.command, "chat", "--query-file", "-", "--format", "stream-json", "--source", SOURCE,
+                "--max-turns", str(self.tasks.max_turns), "--run-budget", str(self.tasks.run_budget_s),
+                "-t", ",".join(self.tasks.toolsets)]
+        return argv + (["--resume", resume] if resume else [])
+
+    def start(self, job_id, prompt, resume):
+        """Start the native run; returns (process, output path). The caller persists pid first-class."""
+        self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        output = self.dir / f"{job_id}.jsonl"
+        with open(output, "wb") as out:
+            process = subprocess.Popen(self.argv(resume), cwd=str(self.tasks.workdir), env=self.env,
+                                       stdin=subprocess.PIPE, stdout=out, stderr=subprocess.DEVNULL,
+                                       start_new_session=True)
+        try:
+            process.stdin.write(prompt.encode("utf-8"))
+            process.stdin.close()
+        except OSError:
+            pass
+        return process, str(output)
+
+    @staticmethod
+    def signal(pid, start, sig):
+        if alive(pid, start):
+            try:
+                os.killpg(pid, sig)
+            except OSError:
+                pass
+
+    def stop(self, pid, start, wait=None):
+        """Interrupt the run (Hermes reports it as interrupted), escalating if it does not exit."""
+        self.signal(pid, start, signal.SIGINT)
+        for sig, grace in ((signal.SIGTERM, CANCEL_GRACE_S), (signal.SIGKILL, CANCEL_GRACE_S)):
+            deadline = time.monotonic() + grace
+            while time.monotonic() < deadline:
+                if wait and wait(0.2) is not None or not alive(pid, start):
+                    return
+                time.sleep(0.2)
+            self.signal(pid, start, sig)
+
+    def discard_output(self, path):
+        try:
+            Path(path).unlink()
+        except (OSError, TypeError):
+            pass

@@ -40,12 +40,20 @@ READ_TIMEOUT_S = 10.0
 MINT_LIMIT = 6
 MINT_WINDOW_S = 60.0
 MAX_ACTIVE_EXCHANGES = 2
-TALK_LIMITS = {"bootstrap": 30, "new": 10, "events": 120, "end": 30}
+TALK_LIMITS = {"bootstrap": 30, "new": 10, "events": 120, "end": 30, "task": 20, "tasks": 240, "task/cancel": 20,
+               "task/ack": 60, "context": 30, "context/ack": 30}
+CALL = {"initData", "conversation_id", "voice_session_id"}
 TALK_ROUTES = {"bootstrap": ({"initData"}, set()),
                "session": ({"initData", "sdp"}, {"conversation_id"}),
-               "events": ({"initData", "conversation_id", "voice_session_id", "events"}, set()),
-               "end": ({"initData", "conversation_id", "voice_session_id"}, set()),
-               "new": ({"initData", "conversation_id"}, set())}
+               "events": (CALL | {"events"}, set()),
+               "end": (CALL, set()),
+               "new": ({"initData", "conversation_id"}, set()),
+               "task": (CALL | {"delegation_item_id", "request"}, set()),
+               "tasks": (CALL, set()),
+               "task/cancel": ({"initData", "conversation_id", "job_id"}, set()),
+               "task/ack": (CALL | {"job_id"}, set()),
+               "context": (CALL, set()),
+               "context/ack": (CALL | {"revision"}, set())}
 AVATAR_TYPES = {".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
 MAX_CONNECTIONS = 32
 CALL_ID = re.compile(r"rtc_[A-Za-z0-9_-]+|[0-9a-fA-F-]{36}")
@@ -242,7 +250,20 @@ class VoiceApp:
                 return self.talk.new(user_id, body["conversation_id"], self.avatar_url)
             if route == "events":
                 return self.talk.events(user_id, body["conversation_id"], body["voice_session_id"], body["events"])
-            return self.talk.end(user_id, body["conversation_id"], body["voice_session_id"])
+            if route == "end":
+                return self.talk.end(user_id, body["conversation_id"], body["voice_session_id"])
+            if route == "task":
+                return self.talk.task(user_id, body["conversation_id"], body["voice_session_id"],
+                                      body["delegation_item_id"], body["request"])
+            if route == "tasks":
+                return self.talk.tasks(user_id, body["conversation_id"], body["voice_session_id"])
+            if route == "task/cancel":
+                return self.talk.cancel(user_id, body["conversation_id"], body["job_id"])
+            if route == "task/ack":
+                return self.talk.ack(user_id, body["conversation_id"], body["voice_session_id"], body["job_id"])
+            if route == "context":
+                return self.talk.context(user_id, body["conversation_id"], body["voice_session_id"])
+            return self.talk.context_ack(user_id, body["conversation_id"], body["voice_session_id"], body["revision"])
         except TalkError as exc:
             raise ApiError(exc.status, exc.message)
 
@@ -263,12 +284,12 @@ class VoiceApp:
             if not self.talk:
                 return {"sdp": self._exchange(sdp, session_config())}
             try:
-                conversation_id, instructions, watermark, _ = self.talk.prepare(user_id, body.get("conversation_id"))
+                conversation_id, instructions, watermark, report = self.talk.prepare(user_id, body.get("conversation_id"))
             except TalkError as exc:
                 raise ApiError(exc.status, exc.message)
             answer = self._exchange(sdp, self.talk.session_config(instructions))
             try:
-                voice_session_id = self.talk.started(user_id, conversation_id, watermark)
+                voice_session_id = self.talk.started(user_id, conversation_id, watermark, report["job_ids"])
             except TalkError as exc:  # e.g. api/new rebound the conversation during the exchange
                 raise ApiError(exc.status, exc.message)
             return {"sdp": answer, "type": "answer", "voice_session_id": voice_session_id,
@@ -440,7 +461,7 @@ def main(argv=None):
         profile = home_path.name if home_path.parent.name == "profiles" else "default"
         if profile != config.profile_id:
             parser.error(f"profile.id in the Talk config must be {profile!r}, the HERMES_HOME profile")
-        talk = TalkRuntime(config, token, NativeHistory(home))
+        talk = TalkRuntime(config, token, NativeHistory(home), home=home_path)
     app = VoiceApp(token, allowed, args.origin, args.base_path, talk=talk)
     server = BoundedServer((args.host, args.port), make_handler(app))
     logger.info("serving %s on %s:%s for %s", args.base_path, args.host, args.port, app.origin)

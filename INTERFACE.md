@@ -40,3 +40,14 @@ These notes are backend-owned and add no field. Changing or removing a field abo
 - **Greeting.** The instructions tell the model to speak first only after the call connects. The frontend should request the first response once the data channel is open, and only if `greeting_enabled` is true.
 - **Tasks.** Starting or cancelling Hermes work from voice is not supported in this build, and the instructions tell the model to say so. `End` (`api/end`) never cancels anything.
 - **Fixtures.** `python3 -m hermes_talk.fixtures --port 8792` runs the real server with synthetic history, credential and upstream, and prints a signed synthetic initData. `hermes_talk.fixtures.sign_init_data(user_id, auth_date)` signs others. Real initData is never generated.
+
+## Voice tasks (additive; present only when `tasks.enabled` is true in the Talk config)
+
+- **Bootstrap/new** add `tasks: {available: bool}`. It is true only for a user in `tasks.user_ids` when the profile can run tasks now (see README). Without tasks in the config the shapes above are unchanged.
+- Every route below takes signed `initData`, exact `Origin` and the allowlist first, then the account's own conversation and voice session. Guessed or foreign ids answer 404; a call that ended answers 409 where a live call is required; tasks unavailable answer 503 with the reason.
+- `POST api/task {initData,conversation_id,voice_session_id,delegation_item_id,request}` -> `{job, created, channel, reply}`. Starts one native Hermes task for a delegation of the live call. The same delegation id in the same call returns the same job and starts nothing. `request` is the delegation text (1..`tasks.request_chars`). `"cancel task N"` cancels task N instead. The client appends `reply` on `channel` to the same `delegation_item_id`.
+- `POST api/tasks {initData,conversation_id,voice_session_id}` -> `{jobs:[job], context_pending, tasks:{available}}`.
+- `POST api/task/cancel {initData,conversation_id,job_id}` -> `{job}`. Idempotent. Ending a call never cancels.
+- `POST api/task/ack {initData,conversation_id,voice_session_id,job_id}` -> `{job}`. Sent after the client appended the result to the job's own delegation in the job's own call; repeats change nothing. Delivered means appended, not heard.
+- `POST api/context {initData,conversation_id,voice_session_id}` -> `{revision, text, sources:{jobs,activity}}`. Task outcomes and Pulse items the live call has not received; `revision` is null when there is nothing new. `POST api/context/ack {initData,conversation_id,voice_session_id,revision}` -> `{ok:true}` marks them read.
+- `job` is `{id, number, delegation_item_id, voice_session_id, state, receipt, result, error, spoken}`; `state` is accepted, running, succeeded, failed, cancelled or interrupted; `receipt` is undelivered or delivered.

@@ -30,8 +30,24 @@ class Budgets:
     turn_chars: int = 300
     activity_items: int = 5
     activity_chars: int = 1200
+    tasks_chars: int = 2000
     event_batch_max: int = 20
     event_text_chars: int = 2000
+
+
+@dataclass(frozen=True)
+class Tasks:
+    """Background Hermes tasks started from voice. Off unless the operator turns them on."""
+    enabled: bool = False
+    user_ids: tuple = ()
+    toolsets: tuple = ()
+    workdir: Path = None
+    max_concurrent: int = 1
+    max_open_per_user: int = 3
+    run_budget_s: int = 600
+    max_turns: int = 30
+    request_chars: int = 2000
+    result_chars: int = 1500
 
 
 @dataclass(frozen=True)
@@ -53,6 +69,7 @@ class TalkConfig:
     activity_window_s: int = 7 * 24 * 3600
     voice_session_ttl_s: int = 2 * 3600
     budgets: Budgets = field(default_factory=Budgets)
+    tasks: Tasks = field(default_factory=Tasks)
 
 
 def _text(value, what, limit=400):
@@ -71,6 +88,36 @@ def _sources(value):
     if not isinstance(value, list) or not all(isinstance(s, str) and NAME.fullmatch(s) for s in value):
         raise ConfigError("activity.sources must be a list of session source names")
     return tuple(value)
+
+
+def _tasks(data, base_dir):
+    if not isinstance(data, dict):
+        raise ConfigError("tasks must be a mapping")
+    unknown = set(data) - {"enabled", "user_ids", "toolsets", "workdir", "max_concurrent", "max_open_per_user",
+                           "run_budget_seconds", "max_turns", "request_chars", "result_chars"}
+    if unknown:
+        raise ConfigError(f"unknown tasks keys: {sorted(unknown)}")
+    if not data.get("enabled", False):
+        return Tasks()
+    if data["enabled"] is not True:
+        raise ConfigError("tasks.enabled must be true or false")
+    users = data.get("user_ids")
+    if not isinstance(users, list) or not users or not all(type(u) is int and u > 0 for u in users):
+        raise ConfigError("tasks.user_ids must list the numeric Telegram ids allowed to start tasks")
+    toolsets = data.get("toolsets")
+    if not isinstance(toolsets, list) or not toolsets or not all(isinstance(t, str) and NAME.fullmatch(t) for t in toolsets):
+        raise ConfigError("tasks.toolsets must list the Hermes toolsets a voice task may use")
+    workdir = (Path(base_dir) / _text(data.get("workdir", "."), "tasks.workdir", 300)).resolve()
+    if not workdir.is_dir():
+        raise ConfigError("tasks.workdir must be an existing directory")
+    return Tasks(enabled=True, user_ids=tuple(dict.fromkeys(users)), toolsets=tuple(dict.fromkeys(toolsets)),
+                 workdir=workdir,
+                 max_concurrent=_int(data.get("max_concurrent", 1), "tasks.max_concurrent", 1, 2),
+                 max_open_per_user=_int(data.get("max_open_per_user", 3), "tasks.max_open_per_user", 1, 5),
+                 run_budget_s=_int(data.get("run_budget_seconds", 600), "tasks.run_budget_seconds", 20, 3600),
+                 max_turns=_int(data.get("max_turns", 30), "tasks.max_turns", 1, 200),
+                 request_chars=_int(data.get("request_chars", 2000), "tasks.request_chars", 20, 4000),
+                 result_chars=_int(data.get("result_chars", 1500), "tasks.result_chars", 100, 6000))
 
 
 def parse_config(data, base_dir):
@@ -138,17 +185,20 @@ def parse_config(data, base_dir):
         activity_window_s=_int(activity.get("window_hours", 168), "activity.window_hours", 1, 24 * 90) * 3600,
         voice_session_ttl_s=_int(voice.get("session_ttl_minutes", 120), "voice.session_ttl_minutes", 5, 24 * 60) * 60,
         budgets=budgets,
+        tasks=_tasks(data.get("tasks") or {}, base_dir),
         **colors,
     )
 
 
-def load_config(path):
-    path = Path(path)
-    text = path.read_text(encoding="utf-8")
+def _yaml_load(text):
     try:
         import yaml
-        data = yaml.safe_load(text)
+        return yaml.safe_load(text)
     except ImportError:  # the Hermes runtime ships ruamel.yaml rather than PyYAML
         from ruamel.yaml import YAML
-        data = YAML(typ="safe").load(text)
-    return parse_config(data, path.parent)
+        return YAML(typ="safe").load(text)
+
+
+def load_config(path):
+    path = Path(path)
+    return parse_config(_yaml_load(path.read_text(encoding="utf-8")), path.parent)

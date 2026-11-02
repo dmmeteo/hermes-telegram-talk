@@ -13,9 +13,22 @@ FRAME = (
     "browse. If asked to do something, say plainly that Talk cannot start work yet and that nothing "
     "was executed. Never claim a task ran, finished or was sent. Ending this call cancels nothing."
 )
+TASKS_FRAME = (
+    "You are the realtime voice of the Hermes profile \"{name}\" in Hermes Talk, a Telegram Mini App. "
+    "Speak naturally and briefly. When interrupted, stop and listen.\n"
+    "You can hand work to Hermes, this profile's own agent with its tools. When the user asks for something this "
+    "context cannot answer (look something up, read or check something, research), delegate it. A delegated task "
+    "runs in the background: say you handed it to Hermes and keep talking. Its result arrives later on that "
+    "delegation or as context. Report only what it says, and never claim a task ran, finished or was sent before "
+    "then. To cancel a task, delegate exactly \"cancel task <number>\". Hermes cannot ask anyone to approve an "
+    "action during a task; such an action is blocked and reported. Ending this call cancels nothing; open tasks "
+    "keep running."
+)
 MARKER = "\n[clipped]"
 MIN_SECTION = 40
 ACTIVITY_HEADER = "## Activity since the last visit\n"
+TASKS_HEADER = "## Hermes tasks\n"
+UPDATE_HEADER = "## Context update {revision}\n"
 
 
 def _fit(text, limit):
@@ -50,14 +63,37 @@ def _activity(lines, total, note, limit):
     return "", 0
 
 
-def compose(config, soul, skills, summary, turns, activity_lines, activity_total, activity_note):
+def whole_lines(header, items, limit):
+    """(section, ids): the leading (id, line) items that fit whole under header within limit."""
+    taken, text = [], ""
+    for item_id, line in items:
+        candidate = (text or header) + line + "\n"
+        if len(candidate.rstrip("\n")) > limit:
+            break
+        text = candidate
+        taken.append(item_id)
+    return text.rstrip("\n"), taken
+
+
+def update(revision, job_items, activity_lines, activity_total, activity_note, limit):
+    """A mid-call context update: (text, job ids carried whole, activity lines carried whole)."""
+    header = UPDATE_HEADER.format(revision=revision)
+    jobs, job_ids = whole_lines(TASKS_HEADER, job_items, limit - len(header))
+    room = limit - len(header) - len(jobs) - 2
+    activity, k = _activity(activity_lines, activity_total, activity_note, room) if room >= MIN_SECTION else ("", 0)
+    body = "\n\n".join(part for part in (jobs, activity) if part)
+    return (header + body if body else ""), job_ids, k
+
+
+def compose(config, soul, skills, summary, turns, activity_lines, activity_total, activity_note,
+            tasks_ready=False, job_items=()):
     """Instruction text plus a per-section report of what was included (names and sizes only).
 
     report["activity_items"] is how many of activity_lines the text carries whole; only those count
-    as read.
+    as read. report["job_ids"] lists the task results the text carries whole.
     """
     b = config.budgets
-    frame = FRAME.format(name=config.display_name)
+    frame = (TASKS_FRAME if tasks_ready else FRAME).format(name=config.display_name)
     greeting = ""
     if config.greeting_enabled:
         greeting = _section("Greeting", config.greeting + " Speak first only after the call connects. If the "
@@ -89,6 +125,13 @@ def compose(config, soul, skills, summary, turns, activity_lines, activity_total
         else:
             part = ""
         report[key] = len(part)
+    jobs, report["job_ids"] = "", []
+    if job_items and room - 2 >= MIN_SECTION:
+        jobs, report["job_ids"] = whole_lines(TASKS_HEADER, job_items, min(b.tasks_chars, room - 2))
+        if jobs:
+            parts.append(jobs)
+            room -= len(jobs) + 2
+    report["jobs"] = len(jobs)
     activity, report["activity_items"] = "", 0
     if room - 2 >= MIN_SECTION:
         activity, report["activity_items"] = _activity(activity_lines, activity_total, activity_note,
