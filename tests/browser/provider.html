@@ -1,0 +1,55 @@
+<!doctype html><meta charset="utf-8"><title>Synthetic subscription peer</title>
+<script>
+window.peers = [];
+window.behavior = { handshake: true, greeting: true };
+async function serve() {
+  const audio = new AudioContext();
+  await audio.resume();
+  for (;;) {
+    const response = await fetch('/offer');
+    if (response.status !== 200) continue;
+    const {sdp} = await response.json();
+    const peer = new RTCPeerConnection();
+    const entry = {peer, got: [], behavior: {...window.behavior}};
+    window.peers.push(entry);
+    const oscillator = audio.createOscillator();
+    const gain = audio.createGain();
+    const destination = audio.createMediaStreamDestination();
+    oscillator.frequency.value = 440;
+    gain.gain.value = 0;
+    oscillator.connect(gain).connect(destination);
+    oscillator.start();
+    entry.gain = gain;
+    entry.send = event => entry.channel.send(JSON.stringify(event));
+    destination.stream.getTracks().forEach(track => peer.addTrack(track, destination.stream));
+    peer.ondatachannel = ({channel}) => {
+      entry.channel = channel;
+      channel.onopen = () => {
+        if (entry.behavior.handshake) entry.send({type:'session.started',session:{id:'synthetic'}});
+      };
+      channel.onmessage = message => {
+        const event = JSON.parse(message.data);
+        entry.got.push(event);
+        if (event.type === 'session.context.append' && entry.behavior.greeting) {
+          gain.gain.value = .18;
+          entry.send({type:'output_transcript.added',item:{text:'Hello '}});
+          setTimeout(() => {
+            entry.send({type:'turn.done',turn:{id:'opening',role:'assistant',transcript:'Hello from the synthetic peer.'}});
+            gain.gain.value = 0;
+          }, 700);
+        }
+      };
+      channel.onclose = () => { oscillator.stop(); destination.stream.getTracks().forEach(t => t.stop()); peer.close(); };
+    };
+    await peer.setRemoteDescription({type:'offer',sdp});
+    await peer.setLocalDescription(await peer.createAnswer());
+    await new Promise(resolve => {
+      if (peer.iceGatheringState === 'complete') return resolve();
+      peer.onicegatheringstatechange = () => peer.iceGatheringState === 'complete' && resolve();
+      setTimeout(resolve,1500);
+    });
+    await fetch('/answer',{method:'POST',body:JSON.stringify({sdp:peer.localDescription.sdp})});
+  }
+}
+serve();
+</script>
