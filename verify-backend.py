@@ -17,6 +17,7 @@ import io
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -386,6 +387,100 @@ def a_cut_briefing_never_skips_older_unread_items(h):
                          "events": [ev("a1", 0, "assistant", "two updates")]})
         _, second = h2.call()
         assert "Synthetic newest job" in second and "Synthetic oldest failure" not in second
+    finally:
+        h2.close()
+
+
+def visit(h, user=fx.USER_ID):
+    """One call in which the assistant actually speaks; returns its instructions."""
+    data, instructions = h.call(user=user)
+    h.ok("events", {"conversation_id": data["conversation_id"], "voice_session_id": data["voice_session_id"],
+                    "events": [ev("greet", 0, "assistant", "hello there")]}, user)
+    return instructions
+
+
+def delivered(instructions, prefix, count):
+    """Indices whose complete briefing line is in the instructions."""
+    return {i for i in range(count)
+            if re.search(rf"^- \[\w+\] {prefix} {i} \(cli session \S+, [0-9-]+ [0-9:]+ UTC\)$", instructions, re.M)}
+
+
+def activity_harness(h, **budgets):
+    return Harness(h.native, fx.config_data(context={"skills": ["talk-brief", "not-allowed"],
+                                                     "budgets": {"instructions_chars": 1500, **budgets}}))
+
+
+@check
+def activity_omitted_from_exhausted_instructions_stays_unread(h):
+    h2 = activity_harness(h)
+    try:
+        for i in range(5):
+            h2.seed(f"Synthetic omitted {i}", turns=[("user", "go"), ("assistant", "ok")], end_reason="done",
+                    age_s=900 - i)
+        h2.talk.soul, h2.talk.skill = (lambda: "PERSONA " * 1000), (lambda name: "RULE " * 1000)
+        first = visit(h2)
+        assert "## Activity since the last visit" not in first and delivered(first, "Synthetic omitted", 5) == set()
+        h2.talk.soul, h2.talk.skill = (lambda: ""), (lambda name: "")
+        assert delivered(visit(h2), "Synthetic omitted", 5) == set(range(5)), "omitted updates were skipped"
+    finally:
+        h2.close()
+
+
+@check
+def clipped_activity_advances_only_past_complete_items(h):
+    h2 = activity_harness(h, activity_chars=330)
+    try:
+        for i in range(5):
+            h2.seed(f"Synthetic clip job {i}", turns=[("user", "go"), ("assistant", "ok")], end_reason="done",
+                    age_s=900 - i)
+        first = delivered(visit(h2), "Synthetic clip job", 5)
+        assert first and len(first) < 5 and first == set(range(len(first))), first
+        second = delivered(visit(h2), "Synthetic clip job", 5)
+        assert min(set(range(5)) - first) in second and not first & second, (first, second)
+    finally:
+        h2.close()
+
+
+@check
+def same_timestamp_backlog_is_delivered_without_skips(h):
+    h2 = activity_harness(h, activity_items=2)
+    try:
+        for i in range(5):
+            h2.seed(f"Synthetic tie {i}", turns=[("user", "go"), ("assistant", "ok")], end_reason="done", age_s=900)
+        seen = []
+        for _ in range(3):
+            seen += sorted(delivered(visit(h2), "Synthetic tie", 5))
+        assert sorted(seen) == list(range(5)), seen
+    finally:
+        h2.close()
+
+
+@check
+def backlog_beyond_one_scan_page_is_read_oldest_first(h):
+    h2 = activity_harness(h, activity_items=2)
+    try:
+        for i in range(30):
+            h2.seed(f"Synthetic backlog {i}", turns=[("user", "go"), ("assistant", "ok")], end_reason="done",
+                    age_s=5000 - i * 10)
+        first = visit(h2)
+        assert delivered(first, "Synthetic backlog", 30) == {0, 1}, delivered(first, "Synthetic backlog", 30)
+        assert "28 newer update(s) not listed yet" in first
+        assert delivered(visit(h2), "Synthetic backlog", 30) == {2, 3}
+    finally:
+        h2.close()
+
+
+@check
+def a_bounded_scan_discloses_that_it_is_not_exhaustive(h):
+    h2 = activity_harness(h, activity_items=2)
+    try:
+        for i in range(30):
+            h2.seed(f"Synthetic bounded {i}", turns=[("user", "go"), ("assistant", "ok")], end_reason="done",
+                    age_s=5000 - i * 10)
+        h2.talk.activity_scan_max = 10
+        first = visit(h2)
+        assert "older updates since the last visit were not read" in first, first[-600:]
+        assert delivered(first, "Synthetic bounded", 30) and not delivered(first, "Synthetic bounded", 30) & {0, 1}
     finally:
         h2.close()
 
