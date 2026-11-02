@@ -38,6 +38,9 @@ def native_skill(name):
 
 
 class TalkRuntime:
+    # Sessions read per visit for the briefing; past this the briefing says it is not exhaustive.
+    activity_scan_max = 1000
+
     def __init__(self, config, bot_token, history, soul=native_soul, skill=native_skill, clock=time.time):
         self.config = config
         self.bot_id = bot_token.split(":", 1)[0]
@@ -67,20 +70,24 @@ class TalkRuntime:
         return self._public(conversation_id, avatar_url)
 
     def _briefing(self, user_id, conversation_id, state):
+        """(candidate rows, unread total, note) for the next call; nothing is marked read here."""
         c = self.config
         if not c.activity_enabled or c.budgets.activity_items == 0:
-            return "", None
+            return [], 0, ""
         now = self.clock()
-        since = state.get("activity_cursor") or now - c.activity_window_s
+        cursor = state.get("activity_cursor")
+        since = activity.cursor_key(cursor) if cursor is not None else (now - c.activity_window_s, "")
         try:
-            rows = self.history.activity_rows(SOURCE, max(20, c.budgets.activity_items * 4))
+            rows, exhaustive = self.history.activity_rows(SOURCE, since[0], self.activity_scan_max)
+            pending = activity.unread(rows, since=since, user_id=user_id, owner_user_id=c.activity_owner_user_id,
+                                      sources=c.activity_sources, exclude_ids={conversation_id})
+            candidates = []
+            for row in pending[: c.budgets.activity_items]:
+                last_role, last_kind = self.history.last_turn(row["id"])
+                candidates.append({**row, "last_role": last_role, "last_kind": last_kind})
         except Exception as exc:  # a briefing is never worth the call
-            return f"(Activity could not be read: {type(exc).__name__}. Say so if asked; do not guess.)", None
-        items, unlisted = activity.snapshot(rows, now=now, since=since, user_id=user_id,
-                                            owner_user_id=c.activity_owner_user_id, sources=c.activity_sources,
-                                            exclude_ids={conversation_id}, limit=c.budgets.activity_items)
-        watermark = max((i["last_active"] for i in items), default=None)
-        return activity.briefing(items, unlisted), watermark
+            return [], 0, f"- Activity could not be read ({type(exc).__name__}). Say so if asked; do not guess."
+        return candidates, len(pending), "" if exhaustive else activity.NOT_EXHAUSTIVE
 
     def prepare(self, user_id, conversation_id):
         """Instructions for the next call on the account's current conversation."""
@@ -93,9 +100,14 @@ class TalkRuntime:
         soul = redact(self.soul() or "")
         skills = [(name, redact(self.skill(name) or "")) for name in c.skills]
         turns = [(role, redact(text)) for role, text in self.history.recent(conversation_id, c.budgets.recent_turns)]
-        briefing, watermark = self._briefing(user_id, conversation_id, state)
+        candidates, total, note = self._briefing(user_id, conversation_id, state)
+        now = self.clock()
+        lines = [redact(activity.line(row, now)) for row in candidates]
         instructions, report = compose(c, soul, [s for s in skills if s[1]], redact(state.get("summary") or ""),
-                                       turns, redact(briefing))
+                                       turns, lines, total, note)
+        # Only items the final text carries whole can be marked read once the assistant speaks.
+        k = report["activity_items"]
+        watermark = list(activity.key(candidates[k - 1])) if k else None
         return conversation_id, instructions, watermark, report
 
     def session_config(self, instructions):

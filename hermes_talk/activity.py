@@ -5,13 +5,23 @@ error end is "failed"; a recently active open session is "active"; a stored
 assistant reply is "replied" (delivery to a chat platform is not proven);
 anything else, including stale open sessions, is "unknown". Nothing is
 reported as done unless a reply row exists.
+
+Items are ordered by (last_active, session id), oldest first. The read cursor
+is the key of the last complete item the final instructions carried, so an
+item that was cut, omitted or tied on time is offered again rather than skipped.
 """
 from datetime import datetime, timezone
 
-from .store import clip
+from .store import clip, cursor_key  # noqa: F401  (cursor_key is part of this module's surface)
 
 FAILED_END_REASONS = ("error", "failed", "crashed", "timeout")
 ACTIVE_WINDOW_S = 30 * 60
+NOT_EXHAUSTIVE = ("- More sessions changed than this briefing scans in one visit; older updates since the last "
+                  "visit were not read and are not listed.")
+
+
+def key(item):
+    return (item.get("last_active") or 0, item["id"])
 
 
 def status(row, now):
@@ -24,33 +34,24 @@ def status(row, now):
     return "unknown"
 
 
-def snapshot(rows, *, now, since, user_id, owner_user_id, sources, exclude_ids, limit):
-    """(items, unlisted): unread items oldest first, so a cut never skips one past the cursor.
+def unread(rows, *, since, user_id, owner_user_id, sources, exclude_ids):
+    """Rows after the *since* key that this user may hear about, oldest first.
 
     A session tagged with a chat user belongs to that user only. An untagged one (CLI, cron,
     kanban) is the operator's and is shown only to the configured owner.
     """
-    unread = []
+    out = []
     for row in rows:
-        last_active = row.get("last_active") or 0
-        if last_active <= since or row["id"] in exclude_ids or row.get("source") not in sources:
+        if key(row) <= since or row["id"] in exclude_ids or row.get("source") not in sources:
             continue
         owner = row.get("user_id")
         mine = str(owner) == str(user_id) if owner not in (None, "") else user_id == owner_user_id
-        if not mine:
-            continue
-        unread.append({"id": row["id"], "source": row["source"], "status": status(row, now),
-                       "title": clip(row.get("title") or row.get("preview") or "untitled", 80),
-                       "started_at": row.get("started_at"), "last_active": last_active})
-    unread.sort(key=lambda item: item["last_active"])
-    return unread[:limit], len(unread) - min(len(unread), limit)
+        if mine:
+            out.append(row)
+    return sorted(out, key=key)
 
 
-def briefing(items, unlisted=0):
-    lines = []
-    for item in items:
-        when = datetime.fromtimestamp(item["last_active"], timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        lines.append(f"- [{item['status']}] {item['title']} ({item['source']} session {item['id']}, {when})")
-    if unlisted:
-        lines.append(f"- {unlisted} newer update(s) not listed yet; they will be offered next time.")
-    return "\n".join(lines)
+def line(row, now):
+    when = datetime.fromtimestamp(row["last_active"], timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    title = clip(row.get("title") or row.get("preview") or "untitled", 80)
+    return f"- [{status(row, now)}] {title} ({row['source']} session {row['id']}, {when})"

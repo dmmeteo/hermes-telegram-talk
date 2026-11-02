@@ -11,6 +11,10 @@ import time
 from pathlib import Path
 
 ROLES = ("user", "assistant")
+ACTIVITY_FIELDS = ("id", "source", "title", "preview", "started_at", "ended_at", "end_reason", "last_active", "user_id")
+PAGE = 50
+# Pages overlap so a session that jumps to the top mid-scan cannot push an unread one past a page edge unseen.
+PAGE_OVERLAP = 5
 
 
 def _turns(rows):
@@ -66,18 +70,33 @@ class NativeHistory:
         with self.lock:
             return _turns(self.db.get_messages(session_id, limit=limit, latest=True))
 
-    def activity_rows(self, exclude_source, limit):
+    def activity_rows(self, exclude_source, since_ts, max_rows):
+        """(rows active at or after since_ts, newest first; exhaustive) read page by page.
+
+        exhaustive is False when max_rows was reached before the scan got back to since_ts.
+        """
+        rows, seen, offset = [], set(), 0
         with self.lock:
-            rows = self.db.list_sessions_rich(limit=limit, order_by_last_active=True,
-                                              exclude_sources=[exclude_source])
-            out = []
-            for row in rows:
-                last = self.db.get_messages(row["id"], limit=1, latest=True)
-                out.append({**{k: row.get(k) for k in ("id", "source", "title", "preview", "started_at",
-                                                       "ended_at", "end_reason", "last_active", "user_id")},
-                            "last_role": last[-1]["role"] if last else None,
-                            "last_kind": last[-1].get("display_kind") if last else None})
-            return out
+            while True:
+                page = self.db.list_sessions_rich(limit=PAGE, offset=offset, order_by_last_active=True,
+                                                  exclude_sources=[exclude_source])
+                for row in page:
+                    if row.get("last_active") is None or row["id"] in seen:
+                        continue  # an undated row says nothing about where the scan is in time
+                    if row["last_active"] < since_ts:
+                        return rows, True
+                    if len(rows) >= max_rows:
+                        return rows, False
+                    seen.add(row["id"])
+                    rows.append({k: row.get(k) for k in ACTIVITY_FIELDS})
+                if len(page) < PAGE:
+                    return rows, True
+                offset += PAGE - PAGE_OVERLAP
+
+    def last_turn(self, session_id):
+        with self.lock:
+            last = self.db.get_messages(session_id, limit=1, latest=True)
+        return (last[-1]["role"], last[-1].get("display_kind")) if last else (None, None)
 
 
 class MemoryHistory:
@@ -120,12 +139,12 @@ class MemoryHistory:
     def end_session(self, session_id, reason, at=None):
         self.sessions[session_id].update(ended_at=at or time.time(), end_reason=reason)
 
-    def activity_rows(self, exclude_source, limit):
-        rows = sorted((s for s in self.sessions.values() if s["source"] != exclude_source),
-                      key=lambda s: s["last_active"], reverse=True)[:limit]
-        out = []
-        for row in rows:
-            last = self.messages[row["id"]][-1] if self.messages[row["id"]] else None
-            out.append({**row, "last_role": last["role"] if last else None,
-                        "last_kind": last.get("display_kind") if last else None})
-        return out
+    def activity_rows(self, exclude_source, since_ts, max_rows):
+        rows = sorted((dict(s) for s in self.sessions.values()
+                       if s["source"] != exclude_source and s["last_active"] >= since_ts),
+                      key=lambda s: s["last_active"], reverse=True)
+        return rows[:max_rows], len(rows) <= max_rows
+
+    def last_turn(self, session_id):
+        last = self.messages[session_id][-1] if self.messages.get(session_id) else None
+        return (last["role"], last.get("display_kind")) if last else (None, None)

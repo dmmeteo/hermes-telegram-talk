@@ -78,8 +78,11 @@ The server builds the context for every call. Each part has its own character bu
    belong to this Telegram user. Sessions with no chat user (CLI, cron, kanban) are the operator's
    and are briefed only to `activity.owner_user_id`. Talk's own sessions and other users' sessions
    are excluded. Each item keeps its session id, source and time, plus a status. Unread items are
-   listed oldest first up to `activity_items`. The rest are counted and offered next time, so a cut
-   never skips one.
+   listed oldest first by (last time, session id), up to `activity_items`. Only lines the final
+   instructions carry whole count as read. A line omitted for lack of room, clipped, or past the
+   item limit is counted and offered again next time. The reader pages through
+   `list_sessions_rich` with overlapping pages, up to 1000 sessions per visit. If more changed, the
+   briefing says older updates were not read, rather than claiming it saw everything.
 8. The greeting directive, if enabled. The model speaks first only after the call connects and
    mentions at most two updates.
 
@@ -92,7 +95,8 @@ The briefing uses four statuses:
 | `replied` | A stored assistant reply. Delivery to a chat is not proven. |
 | `unknown` | Anything else, including stale open sessions. |
 
-The read cursor moves only after a new assistant turn is stored for the call. A call that fails at
+The read cursor is the (last time, session id) key of the last complete item in that call's
+instructions. It moves only after a new assistant turn is stored for the call. A call that fails at
 the provider leaves the briefing unread. An unended call expires after `voice.session_ttl_minutes`
 and still gets its summary. A conversation whose native row was deleted is replaced on the next
 bootstrap, and its old id answers 404.

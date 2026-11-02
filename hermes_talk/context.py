@@ -15,6 +15,7 @@ FRAME = (
 )
 MARKER = "\n[clipped]"
 MIN_SECTION = 40
+ACTIVITY_HEADER = "## Activity since the last visit\n"
 
 
 def _fit(text, limit):
@@ -31,8 +32,30 @@ def _section(title, body, limit):
     return header + _fit(body, limit - len(header))
 
 
-def compose(config, soul, skills, summary, turns, briefing):
-    """Instruction text plus a per-section report of what was included (names and sizes only)."""
+def _activity(lines, total, note, limit):
+    """(section, k): the first k item lines whole, never a partial one, plus an honest tail."""
+    for k in range(len(lines), -1, -1):
+        rest = total - k
+        tail = []
+        if rest:
+            tail.append(f"- {rest} newer update(s) not listed yet; they will be offered next time." if k else
+                        f"- {rest} update(s) since the last visit are not listed yet; they will be offered next time.")
+        if note:
+            tail.append(note)
+        if not lines[:k] + tail:
+            return "", 0
+        text = ACTIVITY_HEADER + "\n".join(lines[:k] + tail)
+        if len(text) <= limit:
+            return text, k
+    return "", 0
+
+
+def compose(config, soul, skills, summary, turns, activity_lines, activity_total, activity_note):
+    """Instruction text plus a per-section report of what was included (names and sizes only).
+
+    report["activity_items"] is how many of activity_lines the text carries whole; only those count
+    as read.
+    """
     b = config.budgets
     frame = FRAME.format(name=config.display_name)
     greeting = ""
@@ -55,7 +78,6 @@ def compose(config, soul, skills, summary, turns, briefing):
         ("skills", "\n\n".join(part for _, part in skill_parts)),
         ("summary", _section("Earlier in this conversation", summary, b.summary_chars)),
         ("recent", _section("Most recent turns", recent, b.recent_turns * (b.turn_chars + 12) + 20)),
-        ("activity", _section("Activity since the last visit", briefing, b.activity_chars)),
     ]
     room = b.instructions_chars - len(frame) - (len(greeting) + 2 if greeting else 0)
     parts, report = [frame], {"frame": len(frame)}
@@ -67,6 +89,13 @@ def compose(config, soul, skills, summary, turns, briefing):
         else:
             part = ""
         report[key] = len(part)
+    activity, report["activity_items"] = "", 0
+    if room - 2 >= MIN_SECTION:
+        activity, report["activity_items"] = _activity(activity_lines, activity_total, activity_note,
+                                                       min(b.activity_chars, room - 2))
+    if activity:
+        parts.append(activity)
+    report["activity"] = len(activity)
     if greeting:
         parts.append(greeting)
     report["greeting"] = len(greeting)

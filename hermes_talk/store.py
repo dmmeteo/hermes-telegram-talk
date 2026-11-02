@@ -41,6 +41,17 @@ class Account:
         return f"{self.profile}:tg{self.bot_id}:{self.user_id}"
 
 
+def cursor_key(cursor):
+    """A stored activity cursor as a comparable (last_active, session id) key.
+
+    A bare timestamp from older state compares below every id at that time, so its ties are
+    offered again rather than skipped.
+    """
+    if isinstance(cursor, list):
+        return (cursor[0], cursor[1])
+    return (cursor, "")
+
+
 def clip(text, limit):
     text = " ".join(str(text).split())
     return text if len(text) <= limit else text[: max(0, limit - 1)].rstrip() + "…"
@@ -185,10 +196,13 @@ class TalkStore:
             return [e["id"] for e in parsed]
 
     def _advance_cursor(self, state, record):
-        # The briefing counts as read only once the assistant actually spoke in that call.
+        # Items the call's instructions carried whole count as read once the assistant spoke in it.
         watermark = record.get("briefing_watermark")
-        if watermark is not None and (state["activity_cursor"] is None or watermark > state["activity_cursor"]):
-            state["activity_cursor"] = watermark
+        if watermark is None:
+            return
+        cursor = state["activity_cursor"]
+        if cursor is None or cursor_key(watermark) > cursor_key(cursor):
+            state["activity_cursor"] = list(cursor_key(watermark))
 
     def end(self, account, conversation_id, voice_session_id):
         """Idempotent checkpoint: the first end closes the call; every end refreshes the summary."""
