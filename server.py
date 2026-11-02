@@ -22,6 +22,8 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from hermes_talk.store import TalkError
+
 logger = logging.getLogger("tg-voice")
 
 GPT_LIVE_URL = "https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas"
@@ -30,6 +32,7 @@ GPT_LIVE_VOICE = "cove"
 UPSTREAM_TIMEOUT_S = 30.0
 MAX_ANSWER_BYTES = 64 * 1024
 MAX_BODY_BYTES = 32 * 1024
+MAX_EVENTS_BODY_BYTES = 192 * 1024
 MAX_INIT_DATA_CHARS = 4096
 INIT_DATA_MAX_AGE_S = 3600
 INIT_DATA_FUTURE_SKEW_S = 60
@@ -37,6 +40,13 @@ READ_TIMEOUT_S = 10.0
 MINT_LIMIT = 6
 MINT_WINDOW_S = 60.0
 MAX_ACTIVE_EXCHANGES = 2
+TALK_LIMITS = {"bootstrap": 30, "new": 10, "events": 120, "end": 30}
+TALK_ROUTES = {"bootstrap": ({"initData"}, set()),
+               "session": ({"initData", "sdp"}, {"conversation_id"}),
+               "events": ({"initData", "conversation_id", "voice_session_id", "events"}, set()),
+               "end": ({"initData", "conversation_id", "voice_session_id"}, set()),
+               "new": ({"initData", "conversation_id"}, set())}
+AVATAR_TYPES = {".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
 MAX_CONNECTIONS = 32
 CALL_ID = re.compile(r"rtc_[A-Za-z0-9_-]+|[0-9a-fA-F-]{36}")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -166,7 +176,7 @@ class MintLimiter:
 
 class VoiceApp:
     def __init__(self, bot_token, allowed_ids, origin, base_path="/tg-voice/",
-                 resolve=hermes_codex_credentials, post=post_sdp, clock=time.time):
+                 resolve=hermes_codex_credentials, post=post_sdp, clock=time.time, talk=None):
         if not bot_token or not allowed_ids:
             raise ValueError("bot token and allowed user ids are required")
         if not base_path.startswith("/") or not base_path.endswith("/"):
@@ -180,8 +190,15 @@ class VoiceApp:
         self.clock = clock
         self.limiter = MintLimiter(MINT_LIMIT, MINT_WINDOW_S, clock)
         self.active = threading.BoundedSemaphore(MAX_ACTIVE_EXCHANGES)
+        # Without a Talk runtime the server is the original voice test: one route, fixed persona.
+        self.talk = talk
+        self.talk_limiters = {route: MintLimiter(limit, MINT_WINDOW_S, clock) for route, limit in TALK_LIMITS.items()}
 
-    def check_request(self, origin, content_type, length):
+    @property
+    def routes(self):
+        return tuple(TALK_ROUTES) if self.talk else ("session",)
+
+    def check_request(self, origin, content_type, length, limit=MAX_BODY_BYTES):
         if origin != self.origin:
             raise ApiError(403, "Open the voice test from the Pewds bot in Telegram.")
         if (content_type or "").split(";")[0].strip().lower() != "application/json":
@@ -190,22 +207,49 @@ class VoiceApp:
             length = int(length)
         except (TypeError, ValueError):
             raise ApiError(411, "Request length is required.")
-        if not 0 < length <= MAX_BODY_BYTES:
+        if not 0 < length <= limit:
             raise ApiError(413, "Request is too large.")
         return length
 
-    def create_session(self, raw):
+    def _authenticated(self, raw, route):
+        """(user id, body) only for a well-formed body with signed, fresh, allowlisted initData."""
         try:
             body = json.loads(raw)
         except (ValueError, UnicodeDecodeError):
             raise ApiError(400, "Malformed request.")
-        if not isinstance(body, dict) or set(body) != {"initData", "sdp"}:
+        required, optional = TALK_ROUTES[route] if self.talk else ({"initData", "sdp"}, set())
+        if not isinstance(body, dict) or not required <= set(body) <= required | optional:
             raise ApiError(400, "Unexpected request fields.")
         user_id = verify_init_data(body["initData"], self.bot_token, int(self.clock()))
         if user_id is None:
             raise ApiError(401, "Telegram sign-in expired or is invalid. Close and reopen the voice test from the Pewds bot.")
         if user_id not in self.allowed_ids:
             raise ApiError(403, "This Telegram account is not allowed to use the Pewds voice test.")
+        return user_id, body
+
+    def handle(self, route, raw):
+        if route == "session":
+            return self.create_session(raw)
+        user_id, body = self._authenticated(raw, route)
+        if not self.talk_limiters[route].acquire(user_id):
+            raise ApiError(429, "Too many requests. Wait a minute, then try again.")
+        try:
+            if route == "bootstrap":
+                return self.talk.bootstrap(user_id, self.avatar_url)
+            if route == "new":
+                return self.talk.new(user_id, body["conversation_id"], self.avatar_url)
+            if route == "events":
+                return self.talk.events(user_id, body["conversation_id"], body["voice_session_id"], body["events"])
+            return self.talk.end(user_id, body["conversation_id"], body["voice_session_id"])
+        except TalkError as exc:
+            raise ApiError(exc.status, exc.message)
+
+    @property
+    def avatar_url(self):
+        return self.base_path + "avatar"
+
+    def create_session(self, raw):
+        user_id, body = self._authenticated(raw, "session")
         sdp = body["sdp"]
         if not isinstance(sdp, str) or not sdp.startswith("v=0"):
             raise ApiError(400, "Malformed WebRTC offer.")
@@ -214,11 +258,20 @@ class VoiceApp:
         if not self.active.acquire(blocking=False):
             raise ApiError(503, "Another call is still connecting. Try Start again shortly.")
         try:
-            return {"sdp": self._exchange(sdp)}
+            if not self.talk:
+                return {"sdp": self._exchange(sdp, session_config())}
+            try:
+                conversation_id, instructions, watermark, _ = self.talk.prepare(user_id, body.get("conversation_id"))
+            except TalkError as exc:
+                raise ApiError(exc.status, exc.message)
+            answer = self._exchange(sdp, self.talk.session_config(instructions))
+            voice_session_id = self.talk.started(user_id, conversation_id, watermark)
+            return {"sdp": answer, "type": "answer", "voice_session_id": voice_session_id,
+                    "conversation_id": conversation_id}
         finally:
             self.active.release()
 
-    def _exchange(self, sdp):
+    def _exchange(self, sdp, session):
         try:
             token, account = self.resolve()
         except Exception as exc:
@@ -230,7 +283,7 @@ class VoiceApp:
             "Authorization": f"Bearer {token}",
             "ChatGPT-Account-Id": account,
             "OpenAI-Alpha": "quicksilver=v2",
-        }, {"sdp": sdp, "session": session_config()})
+        }, {"sdp": sdp, "session": session})
         if not 200 <= status < 300:
             logger.warning("upstream rejected session: HTTP %s", status)
             raise ApiError(502, f"Voice service rejected the call (HTTP {status}). No API fallback was used.")
@@ -277,6 +330,12 @@ def make_handler(app):
                 self.end_headers()
                 return
             name = path[len(app.base_path):] if path.startswith(app.base_path) else None
+            if name == "avatar" and app.talk:
+                avatar = app.talk.config.avatar_path
+                self._send(200, avatar.read_bytes(), AVATAR_TYPES[avatar.suffix.lower()], {
+                    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+                    "Cache-Control": "no-cache"})
+                return
             if name not in STATIC_FILES:
                 self._json(404, {"error": "Not found."})
                 return
@@ -288,22 +347,30 @@ def make_handler(app):
         do_HEAD = do_GET
 
         def do_POST(self):
-            if urllib.parse.urlsplit(self.path).path != app.base_path + "api/session":
+            path = urllib.parse.urlsplit(self.path).path
+            route = path[len(app.base_path + "api/"):] if path.startswith(app.base_path + "api/") else None
+            if route not in app.routes:
                 self._json(404, {"error": "Not found."})
                 return
             try:
                 length = app.check_request(self.headers.get("Origin"), self.headers.get("Content-Type"),
-                                           self.headers.get("Content-Length"))
+                                           self.headers.get("Content-Length"),
+                                           MAX_EVENTS_BODY_BYTES if route == "events" else MAX_BODY_BYTES)
                 raw = self.rfile.read(length)
                 if len(raw) != length:
                     self.close_connection = True
                     return
-                self._json(200, app.create_session(raw))
+                self._json(200, app.handle(route, raw))
             except ApiError as exc:
                 self.close_connection = True
                 self._json(exc.status, {"error": exc.message})
             except TimeoutError:
                 self.close_connection = True
+            except Exception as exc:
+                # The type only: a store or runtime error message can carry conversation text.
+                logger.warning("request failed: %s", type(exc).__name__)
+                self.close_connection = True
+                self._json(500, {"error": "The server could not complete this request. Try again shortly."})
 
     return Handler
 
@@ -344,6 +411,7 @@ def main(argv=None):
     parser.add_argument("--port", type=int, default=8791)
     parser.add_argument("--origin", default="https://her.dmmeteo.dev")
     parser.add_argument("--base-path", default="/tg-voice/")
+    parser.add_argument("--config", help="Hermes Talk YAML; without it the server stays the original voice test")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     token = os.environ.get("TG_VOICE_BOT_TOKEN", "").strip()
@@ -353,7 +421,21 @@ def main(argv=None):
         allowed = allowed_ids_from(os.environ.get("TG_VOICE_ALLOWED_USER_IDS"))
     except ValueError as exc:
         parser.error(str(exc))
-    app = VoiceApp(token, allowed, args.origin, args.base_path)
+    talk = None
+    if args.config:
+        from hermes_talk.config import load_config
+        from hermes_talk.history import NativeHistory
+        from hermes_talk.talk import TalkRuntime
+        home = os.environ.get("HERMES_HOME", "").strip()
+        if not home:
+            parser.error("HERMES_HOME must name the profile Talk binds to")
+        config = load_config(args.config)
+        home_path = Path(home).resolve()
+        profile = home_path.name if home_path.parent.name == "profiles" else "default"
+        if profile != config.profile_id:
+            parser.error(f"profile.id in the Talk config must be {profile!r}, the HERMES_HOME profile")
+        talk = TalkRuntime(config, token, NativeHistory(home))
+    app = VoiceApp(token, allowed, args.origin, args.base_path, talk=talk)
     server = BoundedServer((args.host, args.port), make_handler(app))
     logger.info("serving %s on %s:%s for %s", args.base_path, args.host, args.port, app.origin)
     try:

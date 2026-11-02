@@ -1,0 +1,38 @@
+# Hermes Talk configuration example. Copy next to the profile (not into this repo) and edit.
+# Every value here is public. Secrets never go in this file: the bot token and allowlist come from
+# TG_VOICE_BOT_TOKEN / TG_VOICE_ALLOWED_USER_IDS, and GPT-Live credentials from the profile's Codex sign-in.
+profile:
+  id: pewds                  # must equal the HERMES_HOME profile ("default" for ~/.hermes)
+  display_name: Pewds
+  # avatar: avatar.png       # local .svg/.png/.jpg relative to this file; URLs are refused. Default: neutral SVG.
+appearance:
+  listen_color: "#4FC3F7"
+  speak_color: "#FFB74D"
+voice:
+  model: gpt-live-1-codex
+  voice: cove
+  language_hint: "Speak Ukrainian unless the user switches language."
+  session_ttl_minutes: 120   # an unended call is marked expired after this; the conversation itself never resets
+greeting:
+  enabled: true
+  text: "Greet the user in one short sentence."
+context:
+  skills: []                 # allowlist of skill names read through the host skill loader; empty = none
+  budgets:                   # application character limits, not provider tokens
+    instructions_chars: 12000
+    soul_chars: 4000
+    skill_chars: 1500
+    skills_chars: 3000
+    summary_chars: 1200
+    recent_turns: 8
+    turn_chars: 300
+    activity_items: 5
+    activity_chars: 1200
+    event_batch_max: 20
+    event_text_chars: 2000
+activity:
+  enabled: true
+  window_hours: 168          # first visit looks back this far; later visits start at the read cursor
+  sources: [cli, telegram, discord, cron, kanban, desktop]
+privacy:
+  persist_audio: false       # the only accepted value; raw audio is never stored

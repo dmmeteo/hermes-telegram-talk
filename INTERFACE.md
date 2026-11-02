@@ -1,0 +1,41 @@
+# Hermes Talk v2 shared interface
+Base path /tg-voice/, same origin HTTPS. Every authenticated request carries initData validated server-side. No user-chosen profile/bot. JSON UTF-8; fixed application-owned routes only.
+POST api/bootstrap {initData} -> {conversation_id, profile:{id,display_name,avatar_url}, appearance:{listen_color,speak_color}, greeting_enabled, limits:{event_batch_max}}. Must not return SOUL, skill bodies, raw history or credentials. UI may display avatar/name, but no transcript/status dashboard.
+POST api/session {initData,sdp,conversation_id} -> {sdp,type:"answer",voice_session_id,conversation_id}. Backend composes SOUL/skills/resume/activity instructions and history before creating subscription call. No browser-supplied provider URL, instructions, model or billing. Keep existing WebRTC transport.
+POST api/events {initData,conversation_id,voice_session_id,events:[{id,sequence,role,text}]} -> {accepted_ids:[...],conversation_id}. Only settled user/assistant text; idempotent server validation, bounded batch/text. No raw frames/audio/SDP/reasoning/tool output logging. Retain retryable pending batches across reconnect only within the verified same account/conversation, reject foreign ownership. Never replay task launches.
+POST api/end {initData,conversation_id,voice_session_id} -> {ok:true}. Idempotent release/checkpoint; no task cancellation, browser pagehide best effort plus server-side expiry. Visibility hidden / screen lock is NOT End.
+POST api/new {initData,conversation_id} -> same shape as bootstrap with new conversation_id. Not required as a primary UI button; available as explicit future command. Current frontend needs only avatar/ring + Mute and a one-tap launch/retry fallback if autoplay/mic requires user activation.
+Errors use JSON {error:non_sensitive_actionable_message}, appropriate HTTP code, no raw upstream body. Workers may add backward-compatible public fields, not remove/rename these without manager decision. All tests use explicitly synthetic local fixtures; real Telegram initData is never generated in frontend source or auth bypassed in production.
+
+
+## Backend notes (additive; the wire shapes above are frozen)
+
+These notes are backend-owned and add no field. Changing or removing a field above needs a manager decision.
+
+- **Implemented routes.** All five routes above exist in Talk mode (`server.py --config ...` or `hermes talk serve`). Without `--config` the server stays the original voice test and serves only `POST api/session {initData,sdp} -> {sdp}`.
+- **Explicit compatibility.** In Talk mode, `api/session` also accepts a body without `conversation_id`. The backend then uses the account's current conversation, so the existing `static/app.js` keeps working until integration. The response still carries the full v2 shape. Any other extra field gets a 400.
+- **Field rules.**
+  - Bodies must contain exactly the listed keys.
+  - `initData` must be signed, at most 1 h old, and from an allowlisted user before any state, credential or upstream access.
+  - `Origin` must match exactly.
+  - `events[].id` matches `[A-Za-z0-9_.:-]{1,64}`. `sequence` is an integer in 0..999999. `role` is `user` or `assistant`. `text` is 1..`event_text_chars` characters.
+  - A batch holds 1..`limits.event_batch_max` events. The `events` route accepts up to 192 KiB; the others accept 32 KiB.
+- **Idempotency.**
+  - `accepted_ids` echoes every valid id in the batch, including ones already stored. A retried or out-of-order batch is safe.
+  - A stored turn is never rewritten. Turns in one batch are stored in `sequence` order.
+  - Events for an already-ended call of the same account and conversation are still accepted, which covers pending batches after reconnect.
+- **Status codes.**
+  - 400: malformed input or unexpected fields.
+  - 401: bad or expired initData.
+  - 403: Origin or allowlist.
+  - 404: a conversation or voice session that this account doesn't own.
+  - 409: a conversation that is no longer current, after `api/new`.
+  - 413: body too large.
+  - 415: not JSON.
+  - 429: rate limit.
+  - 502: upstream rejected the call or returned an invalid answer.
+  - 503: no ChatGPT sign-in on the host. No API fallback exists.
+- **Avatar.** `profile.avatar_url` is the same-origin path `/tg-voice/avatar`. It serves the configured local file (neutral SVG by default) with a sandboxing CSP.
+- **Greeting.** The instructions tell the model to speak first only after the call connects. The frontend should request the first response once the data channel is open, and only if `greeting_enabled` is true.
+- **Tasks.** Starting or cancelling Hermes work from voice is not supported in this build, and the instructions tell the model to say so. `End` (`api/end`) never cancels anything.
+- **Fixtures.** `python3 -m hermes_talk.fixtures --port 8792` runs the real server with synthetic history, credential and upstream, and prints a signed synthetic initData. `hermes_talk.fixtures.sign_init_data(user_id, auth_date)` signs others. Real initData is never generated.
