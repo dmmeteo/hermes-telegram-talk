@@ -36,10 +36,10 @@ async function post(route, body, options = {}) {
   let data;
   try { data = await response.json(); } catch (_) { data = {}; }
   if (!response.ok) {
-    const error = new Error(({401: "Telegram sign-in expired. Close and reopen Hermes Talk.",
-      403: "This Telegram account cannot use Hermes Talk.",
-      404: "This conversation is unavailable. Close and reopen Hermes Talk.",
-      409: "This conversation changed. Close and reopen Hermes Talk.",
+    const error = new Error(({401: "Telegram sign-in expired. Close and reopen Hermes Telegram Talk.",
+      403: "This Telegram account cannot use Hermes Telegram Talk.",
+      404: "This conversation is unavailable. Close and reopen Hermes Telegram Talk.",
+      409: "This conversation changed. Close and reopen Hermes Telegram Talk.",
       429: "Too many attempts. Wait a minute, then tap Retry.",
       503: "Voice is unavailable on the server. Try again in a minute."})[response.status]
       || "Voice connection failed. Check your connection, then tap Retry.");
@@ -212,7 +212,7 @@ function settle(current, event) {
   const chunks = [];
   for (let offset = 0; offset < characters.length; offset += 2000) chunks.push(characters.slice(offset, offset + 2000).join(""));
   if (characters.length > 16000 || owner.pending.length + chunks.length > 128 || owner.sequence + chunks.length > 1000000) {
-    stop("Conversation is too long to save. Close and reopen Hermes Talk."); return;
+    stop("Conversation is too long to save. Close and reopen Hermes Telegram Talk."); return;
   }
   for (const chunk of chunks) owner.pending.push({voiceId: current.voiceId, event: {
     id: crypto.randomUUID(), sequence: owner.sequence++, role: turn.role, text: chunk,
@@ -237,7 +237,7 @@ function onMessage(current, message) {
     && typeof event.item.id === "string" && !current.delegations.has(event.item.id)) {
     current.delegations.add(event.item.id);
     current.channel.send(JSON.stringify({type: "delegation.context.append", delegation_item_id: event.item.id,
-      channel: "speakable", content: [{type: "input_text", text: "Tasks are unavailable in Hermes Talk. Nothing was executed."}]}));
+      channel: "speakable", content: [{type: "input_text", text: "Tasks are unavailable in Hermes Telegram Talk. Nothing was executed."}]}));
   }
 }
 
@@ -321,7 +321,7 @@ async function start() {
     return;
   }
   const auth = initData();
-  if (!auth) { stop("Open Hermes Talk from Telegram to sign in."); return; }
+  if (!auth) { stop("Open Hermes Telegram Talk from Telegram to sign in."); return; }
   const current = { auth, phase: "connecting", abort: new AbortController(), nodes: [],
     seen: new Set(), delegations: new Set(), muted: false, inputLevel: 0, outputLevel: 0 };
   call = current; showError(); render();

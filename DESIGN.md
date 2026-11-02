@@ -1,4 +1,4 @@
-# Hermes Talk
+# Hermes Telegram Talk
 
 A small English Telegram Mini App for a single authenticated voice conversation. The screen has a profile face, an audio ring, the profile name and Mute. Enable audio or Retry appears only when needed. There is no transcript, history, settings, account picker or task control.
 

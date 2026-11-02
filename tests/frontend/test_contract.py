@@ -2,6 +2,7 @@ import http.client
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 import threading
@@ -97,11 +98,20 @@ class Contract(unittest.TestCase):
         response=conn.getresponse()
         html=response.read().decode()
         self.assertEqual(response.status,200)
-        self.assertIn('<title>Hermes Talk</title>',html)
+        self.assertIn('<title>Hermes Telegram Talk</title>',html)
         self.assertIn("connect-src 'self'",response.getheader('Content-Security-Policy'))
         self.assertNotIn('id="end"',html)
         self.assertIn('id="ring"',html)
         conn.close()
+        assets = re.findall(r'"(app\.(?:js|css)\?v=[a-f0-9]+)"', html)
+        self.assertEqual(len(assets), 2)
+        for asset in assets:
+            conn = http.client.HTTPConnection(*self.httpd.server_address, timeout=5)
+            conn.request('GET', '/tg-voice/' + asset)
+            response = conn.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(response.read(), (BACKEND / 'static/talk' / asset.split('?')[0]).read_bytes())
+            conn.close()
 
 
 if __name__ == '__main__':

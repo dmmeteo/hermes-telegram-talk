@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The canonical Hermes Talk gate for this checkout. Synthetic data only; no network, no provider calls.
+"""The canonical Hermes Telegram Talk gate for this checkout. Synthetic data only; no network, no provider calls.
 
   python3 verify-integrated.py --offline [--require-host]
       verify-backend.py --offline: legacy signaling suite, Talk checks on in-memory history, and the same

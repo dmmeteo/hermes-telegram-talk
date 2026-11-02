@@ -1,4 +1,4 @@
-"""Hermes Talk runtime: the authenticated operations behind the /tg-voice/ API.
+"""Hermes Telegram Talk runtime: the authenticated operations behind the /tg-voice/ API.
 
 Every method takes a Telegram user id that server.py already verified from
 signed initData and the allowlist. Profile and bot come from configuration

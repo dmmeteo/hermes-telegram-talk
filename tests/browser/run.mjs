@@ -90,7 +90,7 @@ try {
   return {inboundBytes:bytes};
  });
  await step('portrait-dark-avatar-ring-and-only-mute',async()=>{
-  assert(await page.title()==='Hermes Talk','title');
+  assert(await page.title()==='Hermes Telegram Talk','title');
   const d=await page.evaluate(()=>({buttons:[...document.querySelectorAll('button')].filter(b=>!b.hidden).map(b=>b.textContent.trim()),
    overflow:document.documentElement.scrollWidth>innerWidth,face:document.getElementById('avatar').complete,
    name:document.getElementById('name').textContent,bg:getComputedStyle(document.body).backgroundColor}));

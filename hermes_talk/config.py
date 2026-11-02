@@ -1,4 +1,4 @@
-"""Hermes Talk configuration: one YAML file, parsed once into frozen values.
+"""Hermes Telegram Talk configuration: one YAML file, parsed once into frozen values.
 
 Budgets are application character limits on what this backend puts into the
 voice instructions. The provider's own token window is not published for the

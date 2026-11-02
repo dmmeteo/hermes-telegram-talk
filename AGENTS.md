@@ -1,6 +1,6 @@
 # Agents
 
-Hermes Talk PoC v2. Keep it small: `plugin.yaml`, `__init__.py`, `server.py`, `hermes_talk/`,
+Hermes Telegram Talk PoC v2. Keep it small: `plugin.yaml`, `__init__.py`, `server.py`, `hermes_talk/`,
 `verify-integrated.py`, `verify-backend.py`, `verify-frontend.py`, `verify.py`, `browser/`, `tests/` and `static/`. `static/`, `tests/frontend/`, `tests/browser/`
 and `DESIGN.md` belong to the frontend owner.
 

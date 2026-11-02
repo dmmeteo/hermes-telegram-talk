@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hermes Talk backend checks. Synthetic identities, text and credentials only; no network.
+"""Hermes Telegram Talk backend checks. Synthetic identities, text and credentials only; no network.
 
   python3 verify-backend.py --offline
 
@@ -161,6 +161,47 @@ def bootstrap_returns_frozen_public_shape(h):
     status, headers, body = h.get("/tg-voice/avatar")
     assert status == 200 and headers["Content-Type"] == "image/svg+xml" and body.startswith(b"<svg")
     assert "sandbox" in headers["Content-Security-Policy"]
+    assert h.fake.resolves == 0 and not h.fake.posts
+
+
+@check
+def renamed_plugin_reopens_existing_native_metadata_without_reset(h):
+    cid = h.history.create_session("Telegram Voice", "telegram-voice")
+    account = "synthetic:tg123456:1001"
+    binding_key = "hermes_talk:binding:" + account
+    conversation_key = "hermes_talk:conversation:" + cid
+    voice_id = "vs_" + "a" * 24
+    cursor = [h.clock() - 10, "synthetic-pulse-cursor"]
+    state = {"account": account, "created": h.clock() - 60,
+             "voice_sessions": {voice_id: {"started": h.clock() - 45, "ended": h.clock() - 30,
+                                           "end_reason": "ended", "briefing_watermark": cursor, "spoke": True}},
+             "summary": "Synthetic saved summary.", "activity_cursor": cursor, "last_visit": h.clock() - 45}
+    h.history.set_meta(binding_key, cid)
+    h.history.set_meta(conversation_key, json.dumps(state, sort_keys=True))
+    h.history.append(cid, [{"role": "user", "content": "Synthetic saved question.",
+                            "platform_message_id": f"talk:{voice_id}:old-settled", "timestamp": h.clock() - 40}])
+    before = h.stored(cid)
+    h.talk = TalkRuntime(h.config, fx.BOT_TOKEN, h.history, soul=fx.file_soul(h.home),
+                         skill=fx.file_skill(h.home), clock=h.clock)
+    h.app.talk = h.talk
+    assert h.talk.account(fx.USER_ID).key == account
+    assert h.ok("bootstrap", {})["conversation_id"] == cid
+    assert h.history.get_meta(binding_key) == cid
+    assert json.loads(h.history.get_meta(conversation_key)) == state
+    reply = h.ok("events", {"conversation_id": cid, "voice_session_id": voice_id,
+                            "events": [ev("old-settled", 0, "user", "Synthetic saved question.")]})
+    assert reply == {"accepted_ids": ["old-settled"], "conversation_id": cid}
+    assert h.stored(cid) == before
+    assert h.history.has_receipt(cid, f"talk:{voice_id}:old-settled")
+    assert json.loads(h.history.get_meta(conversation_key)) == state
+    assert h.ok("bootstrap", {}, user=fx.OTHER_USER_ID)["conversation_id"] != cid
+    other_profile = parse_config(fx.config_data(profile={"id": "other-profile", "display_name": "Synthetic other"}), h.home)
+    for config, token in ((other_profile, fx.BOT_TOKEN), (h.config, "654321:synthetic-offline-bot-token")):
+        other = TalkRuntime(config, token, h.history, soul=fx.file_soul(h.home),
+                            skill=fx.file_skill(h.home), clock=h.clock)
+        assert other.bootstrap(fx.USER_ID, "/tg-voice/avatar")["conversation_id"] != cid
+    assert h.history.get_meta(binding_key) == cid
+    assert json.loads(h.history.get_meta(conversation_key)) == state
     assert h.fake.resolves == 0 and not h.fake.posts
 
 
@@ -611,22 +652,22 @@ def configured_talk_serves_the_talk_ui_and_legacy_keeps_its_page(h):
 def plugin_registers_in_a_disposable_home():
     home = Path(tempfile.mkdtemp(prefix="talk-plugin-"))
     try:
-        target = home / "plugins" / "hermes-talk"
+        target = home / "plugins" / "hermes-telegram-talk"
         target.mkdir(parents=True)
         for name in PLUGIN_FILES:
             src = ROOT / name
             (shutil.copytree if src.is_dir() else shutil.copy2)(src, target / name)
-        (home / "config.yaml").write_text("plugins:\n  enabled:\n    - hermes-talk\n")
+        (home / "config.yaml").write_text("plugins:\n  enabled:\n    - hermes-telegram-talk\n")
         os.environ["HERMES_HOME"] = str(home)
         from hermes_cli.plugins import PluginManager
         manager = PluginManager()
         manager.discover_and_load(force=True)
         listed = {p["name"]: p for p in manager.list_plugins()}
-        assert "hermes-talk" in listed, sorted(listed)
-        entry = listed["hermes-talk"]
+        assert "hermes-telegram-talk" in listed, sorted(listed)
+        entry = listed["hermes-telegram-talk"]
         assert entry.get("enabled") and not entry.get("error"), entry
         assert "talk" in manager._cli_commands, sorted(manager._cli_commands)
-        assert manager._cli_commands["talk"]["plugin"] == "hermes-talk"
+        assert manager._cli_commands["talk"]["plugin"] == "hermes-telegram-talk"
     finally:
         shutil.rmtree(home, ignore_errors=True)
 
@@ -640,12 +681,12 @@ def cli_serves_talk_in_a_disposable_profile():
     home = fx.write_home(root / "profiles" / "synthetic")
     proc = None
     try:
-        target = home / "plugins" / "hermes-talk"
+        target = home / "plugins" / "hermes-telegram-talk"
         target.mkdir(parents=True)
         for name in PLUGIN_FILES:
             src = ROOT / name
             (shutil.copytree if src.is_dir() else shutil.copy2)(src, target / name)
-        (home / "config.yaml").write_text("plugins:\n  enabled:\n    - hermes-talk\n")
+        (home / "config.yaml").write_text("plugins:\n  enabled:\n    - hermes-telegram-talk\n")
         (home / "talk.yaml").write_text(json.dumps(fx.config_data()))
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
@@ -717,7 +758,7 @@ def installed_plugin_serves_talk_from_a_named_profile():
         assert out.returncode == 0, out.stderr[-600:]
         profile = user_home / ".hermes" / "profiles" / "synthetic"
         fx.write_home(profile)
-        target = profile / "plugins" / "hermes-talk"
+        target = profile / "plugins" / "hermes-telegram-talk"
         target.mkdir(parents=True)
         for name in PLUGIN_FILES:
             src = ROOT / name
@@ -725,10 +766,10 @@ def installed_plugin_serves_talk_from_a_named_profile():
         for path in [target, *target.rglob("*")]:
             path.chmod(path.stat().st_mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
         with (profile / "config.yaml").open("a") as config:
-            config.write("plugins:\n  enabled:\n    - hermes-talk\n")
+            config.write("plugins:\n  enabled:\n    - hermes-telegram-talk\n")
         out = native("-p", "synthetic", "plugins", "list", "--plain", "--no-bundled")
         listed = [line.split() for line in out.stdout.splitlines()]
-        assert out.returncode == 0 and ["enabled", "user", "0.2.0", "hermes-talk"] in listed, out.stdout[-600:]
+        assert out.returncode == 0 and ["enabled", "user", "0.2.0", "hermes-telegram-talk"] in listed, out.stdout[-600:]
         (profile / "talk.yaml").write_text(json.dumps(fx.config_data()))
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
