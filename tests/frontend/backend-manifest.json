@@ -1,15 +1,15 @@
 {
-  "revision": "f217dcf09f30fc016231d45850572be95cfbfca6",
+  "source": "integrated checkout: backend fb6f469 with frontend 5ddec03; exact tested bytes",
   "files": {
-    "server.py": "9961d73bef867fb9a094c439232a40c009d4088860e79b0134c31c598b628596",
+    "server.py": "00b55c135e4913e9a5aa983d2ea45e0716e98bc3e50e204f880f8be7a5e8b072",
     "INTERFACE.md": "1a324701081342168e064623e6a88dce53bd9192fae24ef1892190169310af2e",
-    "hermes_talk/fixtures.py": "b58ea46d1e3ecd2d9b6ebaa2a8d7bf7872d2ace6edc008f6f0b4acd3eadbf850",
-    "hermes_talk/talk.py": "e8182845c5abde4bac7d09b4d0947d56087f2bdfdd601ad2aac4c35e178037a2",
+    "hermes_talk/fixtures.py": "7d4d8346ee7fa75283a51d460ff87a682ee6523e2e99c2ef282aa02aca74d971",
+    "hermes_talk/talk.py": "9ced364f82d2e18d555d07ce5d573411b237799ec6c83af325c4ea95df79d94f",
     "hermes_talk/config.py": "238e3ccf70cefe2d89c361177da8f1b48cbf0d72846be5df90fc29682256970a",
-    "hermes_talk/store.py": "e122b1808b7fbfcda8a9312a39b9ac752b8396b3fb0db2a1ba665ef455095dd6",
-    "hermes_talk/context.py": "f92c4ef3f2277a97dc98c5f440d5ac3244bf49656d12cf22a2f3f26e22fa5989",
-    "hermes_talk/history.py": "ee94076b9ef330552d261a217f80eecf87cd972934813c996b637761bdd604cf",
-    "hermes_talk/activity.py": "b8ec900fc923afe3f2c06c0c854f24d6b116f473cc47f59b69cd27e2094f825d",
+    "hermes_talk/store.py": "0d1210bea120a74ba22a768789b454548996417821dd35e6fb0e7de58fcaa3ab",
+    "hermes_talk/context.py": "8a18596ba9e4bcf6c10fbf51d782125b6b9827b6b0a636607a7517e01df279b2",
+    "hermes_talk/history.py": "2b552e261d67047919565894fd43ed4f1e22f88a69a19710a617eee78d7108ab",
+    "hermes_talk/activity.py": "cbaf19fcbba7f0a527b161ca66b7cbf0e22756b59eba48d51b4ee682801a9776",
     "hermes_talk/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "hermes_talk/assets/avatar.svg": "23c225ebdc39efb2bdb7d06296ae03596af5fae603c3de30b185d096057bbc5b",
     "LICENSES/CONDUIT-LICENSE": "f73f674a9cd717d93528c469b3e5a71d4b3f1d20f1cc7f8eda89ea07a3a3cda6"

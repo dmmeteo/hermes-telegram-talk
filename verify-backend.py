@@ -9,7 +9,8 @@ runs, in order:
   3. the same Talk checks plus plugin discovery/registration in a disposable HERMES_HOME under a
      real Hermes runtime, which supplies SessionDB, load_soul_md and skill_view. The runtime is
      HERMES_TALK_HERMES_PYTHON, else the first ~/.hermes/installs/*/environments/*/venv/bin/python.
-     If none exists the step is reported as SKIPPED with that reason, never as passed.
+     If none exists the step is reported as SKIPPED with that reason, never as passed;
+     HERMES_TALK_REQUIRE_HOST=1 turns that skip into a failure.
 """
 import argparse
 import glob
@@ -19,6 +20,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -579,6 +581,33 @@ def store_failure_is_a_json_500_without_details(h):
     assert len(h.fake.posts) == 1, "no upstream call when context cannot be built"
 
 
+@check
+def configured_talk_serves_the_talk_ui_and_legacy_keeps_its_page(h):
+    for name in ("", "index.html", "app.js", "app.css"):
+        status, headers, body = h.get("/tg-voice/" + name)
+        assert status == 200 and body == (server.TALK_STATIC_DIR / (name or "index.html")).read_bytes(), name
+        assert headers["Content-Security-Policy"] == server.CSP, headers
+    assert (server.STATIC_DIR / "index.html").read_bytes() != (server.TALK_STATIC_DIR / "index.html").read_bytes()
+    legacy = server.VoiceApp(fx.BOT_TOKEN, {fx.USER_ID}, fx.ORIGIN, resolve=h.fake.resolve, post=h.fake.post)
+    httpd = server.BoundedServer(("127.0.0.1", 0), server.make_handler(legacy))
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        for name in ("", "app.js", "app.css"):
+            conn = http.client.HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=15)
+            conn.request("GET", "/tg-voice/" + name)
+            resp = conn.getresponse()
+            assert resp.status == 200 and resp.read() == (server.STATIC_DIR / (name or "index.html")).read_bytes()
+            conn.close()
+        conn = http.client.HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=15)
+        conn.request("POST", "/tg-voice/api/bootstrap", body=b"{}",
+                     headers={"Content-Type": "application/json", "Origin": fx.ORIGIN})
+        assert conn.getresponse().status == 404, "legacy mode keeps its single route"
+        conn.close()
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
 def plugin_registers_in_a_disposable_home():
     home = Path(tempfile.mkdtemp(prefix="talk-plugin-"))
     try:
@@ -665,6 +694,100 @@ def cli_serves_talk_in_a_disposable_profile():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def installed_plugin_serves_talk_from_a_named_profile():
+    """The plugin as an immutable directory install in a named profile of a wholly disposable HOME,
+    enabled and served through the native `hermes -p` CLI, from outside this checkout.
+
+    `hermes plugins install` and `hermes plugins enable` are not used: in a fresh HOME each provisions a
+    separate Hermes runtime and installs Python dependencies, which this offline gate must not do. The
+    plugin is enabled with the `plugins.enabled` key those commands write, and the check asserts that
+    no runtime was provisioned."""
+    import socket
+    import time
+    root = Path(tempfile.mkdtemp(prefix="talk-native-"))
+    user_home = root / "home"
+    user_home.mkdir()
+    hermes = str(Path(sys.executable).parent / "hermes")
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(user_home), "PYTHONDONTWRITEBYTECODE": "1"}
+    native = lambda *args: subprocess.run([hermes, *args], cwd=root, env=env, capture_output=True, text=True,
+                                          timeout=120)
+    proc = None
+    try:
+        out = native("profile", "create", "synthetic", "--no-alias", "--no-skills")
+        assert out.returncode == 0, out.stderr[-600:]
+        profile = user_home / ".hermes" / "profiles" / "synthetic"
+        fx.write_home(profile)
+        target = profile / "plugins" / "hermes-talk"
+        target.mkdir(parents=True)
+        for name in PLUGIN_FILES:
+            src = ROOT / name
+            (shutil.copytree if src.is_dir() else shutil.copy2)(src, target / name)
+        for path in [target, *target.rglob("*")]:
+            path.chmod(path.stat().st_mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+        with (profile / "config.yaml").open("a") as config:
+            config.write("plugins:\n  enabled:\n    - hermes-talk\n")
+        out = native("-p", "synthetic", "plugins", "list", "--plain", "--no-bundled")
+        listed = [line.split() for line in out.stdout.splitlines()]
+        assert out.returncode == 0 and ["enabled", "user", "0.2.0", "hermes-talk"] in listed, out.stdout[-600:]
+        (profile / "talk.yaml").write_text(json.dumps(fx.config_data()))
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        proc = subprocess.Popen([hermes, "-p", "synthetic", "talk", "serve", "--config", str(profile / "talk.yaml"),
+                                 "--origin", fx.ORIGIN, "--port", str(port)], cwd=root,
+                                env={**env, "TG_VOICE_BOT_TOKEN": fx.BOT_TOKEN,
+                                     "TG_VOICE_ALLOWED_USER_IDS": f"{fx.USER_ID},{fx.OTHER_USER_ID}"},
+                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        deadline = time.time() + 60
+        while time.time() < deadline and proc.poll() is None:
+            try:
+                socket.create_connection(("127.0.0.1", port), timeout=1).close()
+                break
+            except OSError:
+                time.sleep(0.3)
+        assert proc.poll() is None, proc.stderr.read().decode()[-600:]
+        argv = Path(f"/proc/{proc.pid}/cmdline").read_bytes().split(b"\0")
+        assert argv[1].decode() == str(target / "server.py"), argv
+        environ = dict(item.split(b"=", 1) for item in Path(f"/proc/{proc.pid}/environ").read_bytes().split(b"\0") if item)
+        assert environ[b"HERMES_HOME"].decode() == str(profile), environ.get(b"HERMES_HOME")
+
+        def request(method, path, body=None, origin=fx.ORIGIN):
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=15)
+            conn.request(method, path, body=json.dumps(body).encode() if body is not None else None,
+                         headers={"Content-Type": "application/json", "Origin": origin} if body is not None else {})
+            resp = conn.getresponse()
+            out = resp.status, dict(resp.getheaders()), resp.read()
+            conn.close()
+            return out
+
+        for name in ("", "app.js", "app.css"):
+            status, headers, body = request("GET", "/tg-voice/" + name)
+            assert status == 200 and body == (ROOT / "static/talk" / (name or "index.html")).read_bytes(), name
+        assert headers["Content-Security-Policy"] == server.CSP
+        assert request("GET", "/tg-voice/avatar")[0] == 200
+        init = fx.sign_init_data(fx.USER_ID, int(time.time()))
+        assert request("POST", "/tg-voice/api/bootstrap", {"initData": init}, "https://evil.example")[0] == 403
+        assert request("POST", "/tg-voice/api/bootstrap", {"initData": init[:-1] + ("1" if init.endswith("0") else "0")})[0] == 401
+        assert request("POST", "/tg-voice/api/bootstrap", {"initData": fx.sign_init_data(9999, int(time.time()))})[0] == 403
+        status, _, raw = request("POST", "/tg-voice/api/bootstrap", {"initData": init})
+        boot = json.loads(raw)
+        assert status == 200 and boot["profile"]["id"] == "synthetic", (status, boot)
+    finally:
+        if proc:
+            proc.terminate()
+            proc.wait(10)
+    assert not (user_home / ".hermes" / "installs").exists(), "no Hermes runtime was provisioned"
+    from hermes_state import SessionDB
+    db = SessionDB(db_path=profile / "state.db")
+    try:
+        assert db.get_session(boot["conversation_id"])["source"] == "telegram-voice"
+    finally:
+        db.close()
+        for path in [target, *target.rglob("*")]:
+            path.chmod(path.stat().st_mode | stat.S_IWUSR)
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def run_talk(native):
     failures = 0
     label = "host" if native else "memory"
@@ -679,16 +802,20 @@ def run_talk(native):
         finally:
             h.close()
     if native:
-        for fn in (plugin_registers_in_a_disposable_home, cli_serves_talk_in_a_disposable_profile):
+        for fn in HOST_CHECKS:
             try:
                 fn()
                 print(f"PASS [host] {fn.__name__}")
             except Exception as exc:
                 failures += 1
                 print(f"FAIL [host] {fn.__name__}: {type(exc).__name__}: {exc}")
-    total = len(CHECKS) + (2 if native else 0)
+    total = len(CHECKS) + (len(HOST_CHECKS) if native else 0)
     print(f"{total - failures}/{total} talk checks passed [{label}]")
     return failures
+
+
+HOST_CHECKS = (plugin_registers_in_a_disposable_home, cli_serves_talk_in_a_disposable_profile,
+               installed_plugin_serves_talk_from_a_named_profile)
 
 
 def hermes_python():
@@ -709,7 +836,7 @@ def run_offline():
     runtime = hermes_python()
     if not runtime:
         print("SKIPPED host integration: no Hermes runtime found; set HERMES_TALK_HERMES_PYTHON")
-        host_ok = True
+        host_ok = os.environ.get("HERMES_TALK_REQUIRE_HOST") != "1"
     else:
         scratch = tempfile.mkdtemp(prefix="talk-host-")
         try:
