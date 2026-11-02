@@ -50,6 +50,8 @@ AVATAR_TYPES = {".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpe
 MAX_CONNECTIONS = 32
 CALL_ID = re.compile(r"rtc_[A-Za-z0-9_-]+|[0-9a-fA-F-]{36}")
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+# A configured Talk runtime serves the Talk UI; without one the original voice-test page stays.
+TALK_STATIC_DIR = STATIC_DIR / "talk"
 STATIC_FILES = {"": ("index.html", "text/html; charset=utf-8"),
                 "index.html": ("index.html", "text/html; charset=utf-8"),
                 "app.js": ("app.js", "text/javascript; charset=utf-8"),
@@ -343,7 +345,8 @@ def make_handler(app):
                 self._json(404, {"error": "Not found."})
                 return
             filename, content_type = STATIC_FILES[name]
-            self._send(200, (STATIC_DIR / filename).read_bytes(), content_type, {
+            static_dir = TALK_STATIC_DIR if app.talk else STATIC_DIR
+            self._send(200, (static_dir / filename).read_bytes(), content_type, {
                 "Content-Security-Policy": CSP, "Cache-Control": "no-cache",
                 "Permissions-Policy": "microphone=(self), camera=(), geolocation=()"})
 

@@ -19,7 +19,6 @@ from hermes_talk.config import parse_config
 from hermes_talk.history import MemoryHistory
 from hermes_talk.talk import TalkRuntime
 
-server.STATIC_DIR = FRONTEND / 'static/talk'
 offers, answers = queue.Queue(), queue.Queue()
 logs = io.StringIO()
 stats = {'resolves': 0, 'posts': 0}

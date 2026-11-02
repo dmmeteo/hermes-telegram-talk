@@ -27,7 +27,6 @@ class Contract(unittest.TestCase):
                                    soul=f.file_soul(home), skill=f.file_skill(home))
         self.app = server.VoiceApp(f.BOT_TOKEN, {f.USER_ID, f.OTHER_USER_ID}, 'https://talk.fixture',
                                   resolve=self.upstream.resolve, post=self.upstream.post, talk=self.runtime)
-        server.STATIC_DIR = Path(__file__).resolve().parents[2] / 'static/talk'
         self.httpd = server.BoundedServer(('127.0.0.1', 0), server.make_handler(self.app))
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
         self.auth = f.sign_init_data(f.USER_ID, int(time.time()))
