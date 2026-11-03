@@ -16,6 +16,7 @@ from .pulse_model import ModelUnavailable
 logger = logging.getLogger("tg-voice")
 
 TICK_S = 300.0
+START_DELAY_S = 30.0  # the worker (and plugin discovery) starts after the server is already answering
 SELECT_ON_CALL_S = 8.0  # bound on a model selection made while a call is being set up
 MAX_SOURCES = 12  # sessions read per account per run
 MAX_CHECKS_PER_RUN = 6
@@ -43,15 +44,13 @@ class PulseEngine:
                 users.add(int(tail))
         return users
 
-    def start(self):
-        try:
-            self.users |= self.known_users()
-        except Exception as exc:  # the worker still runs for accounts whose calls end from now on
-            logger.warning("pulse engine could not list accounts (%s)", type(exc).__name__)
-        if self.users:
-            self.wake.set()  # first run right away: due follow-ups do not wait a whole tick after a restart
+    def start(self, loader=None, delay=START_DELAY_S):
+        """Start the worker. After `delay` it runs `loader` (server.py: load the plugin's ctx.llm through plugin
+        discovery) off the request path, then resumes every account with a Pulse record without waiting a tick.
+        Until the route is bound, call setup selects with the labelled fallback."""
         if self.thread is None:
-            self.thread = threading.Thread(target=self._loop, name="talk-pulse-engine", daemon=True)
+            self.thread = threading.Thread(target=self._loop, args=(loader, delay), name="talk-pulse-engine",
+                                           daemon=True)
             self.thread.start()
 
     def stop(self):
@@ -62,7 +61,21 @@ class PulseEngine:
         self.users.add(user_id)
         self.wake.set()
 
-    def _loop(self):
+    def _loop(self, loader, delay):
+        if self.stopped.wait(delay):
+            return
+        if loader is not None:
+            try:
+                route = loader()
+            except Exception as exc:  # no route: every step keeps degrading visibly
+                route = None
+                logger.warning("pulse model route could not be loaded (%s)", type(exc).__name__)
+            logger.info("pulse model route: %s", "plugin_llm:hermes-talk" if route is not None else "none (fallback)")
+        try:
+            self.users |= self.known_users()
+        except Exception as exc:  # the worker still runs for accounts whose calls end from now on
+            logger.warning("pulse engine could not list accounts (%s)", type(exc).__name__)
+        self.wake.set()  # first run right away: due follow-ups do not wait a whole tick after a restart
         while not self.stopped.is_set():
             self.wake.wait(TICK_S)
             self.wake.clear()

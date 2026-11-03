@@ -22,8 +22,10 @@ discover_plugins()` is the public loader that runs each enabled plugin's `regist
 
 All Pulse model calls go through hermes-talk's own `ctx.llm`, with no override and no task slot
 (`hermes_talk/pulse_model.py`). `register(ctx)` binds it; the voice server, which `hermes talk serve` starts under
-the same Hermes interpreter and home, calls `discover_plugins()` once at start so the binding exists in its
-process. No account, credential, billing meter, auxiliary slot or model role is added. When nothing is bound or a
+the same Hermes interpreter and home, calls `discover_plugins()` once from the Pulse worker, 30 s after it
+started serving (never before: discovery of every enabled plugin takes seconds, and a server that accepts but
+cannot answer broke the restart-adoption RPC check), so the binding exists in its process. Until then call setup
+uses the labelled fallback. No account, credential, billing meter, auxiliary slot or model role is added. When nothing is bound or a
 call fails, each step degrades and records it (`selection.by = "fallback"` with the reason, memory
 `by = "unavailable"`, follow-up `failures` with retry): deterministic ranking is never reported as the model's.
 
@@ -58,7 +60,7 @@ user opens a call; the nudge bar is kept as the selection's "balanced" bar), and
 
 ## Consequences
 
-- Loading plugins in the voice server runs every enabled plugin's `register(ctx)` there too, as the `hermes` CLI
+- Loading plugins in the voice server (from its Pulse worker) runs every enabled plugin's `register(ctx)` there too, as the `hermes` CLI
   already did before it exec'd the server. A plugin with side effects at register time would see a second
   process.
 - Model calls cost the profile's normal model usage: one selection when the eligible cards change, one memory

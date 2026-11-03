@@ -133,7 +133,8 @@ Pulse is Talk's briefing engine, ported for voice from Hermes Conduit notifier's
 
 - **Model route.** Every model step calls the plugin's own `ctx.llm` (Hermes' host-owned plugin LLM facade on the
   profile's active model and auth, no override, no new account or billing). `register(ctx)` binds it and the voice
-  server loads the profile's plugins once at start so the binding exists there. Without it each step degrades and
+  server's Pulse worker loads the profile's plugins once, 30 s after the server started answering, so the binding
+  exists there (call setup until then uses the fallback). Without it each step degrades and
   records so: selection `fallback` with the reason, memory `unavailable`, follow-up checks retried.
 - **Candidates and cards.** Each scanned session revision becomes a card fingerprinted by (kind, session,
   status, normalized title). A changed status supersedes the unread older card of the same session. Follow-ups

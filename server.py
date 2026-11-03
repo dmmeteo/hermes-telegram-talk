@@ -477,10 +477,9 @@ def main(argv=None):
         except OSError:
             parser.error("another Talk server already serves this profile")
         from hermes_talk import pulse_model
-        llm = pulse_model.load_host()  # this plugin's ctx.llm through the public plugin loader, or None
-        logger.info("pulse model route: %s", "plugin_llm:hermes-talk" if llm is not None else "none (deterministic)")
         app.talk = TalkRuntime(config, token, NativeHistory(home), home=home_path)
-        app.talk.engine.start()
+        # Plugin discovery (this plugin's ctx.llm) runs in the Pulse worker after start, never before serving.
+        app.talk.engine.start(loader=pulse_model.load_host)
     logger.info("serving %s on %s:%s for %s", args.base_path, args.host, args.port, app.origin)
     try:
         server.serve_forever()

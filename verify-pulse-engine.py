@@ -347,7 +347,9 @@ def restart_keeps_memory_schedule_selection_and_read_marks(w):
     assert w.talk.engine.run_once(A)["memory"]["kept"] == 0, "a restart does not reread or duplicate memory"
     engine = w.talk.engine
     assert engine.known_users() == {A, B}, "a restarted worker resumes every account with a Pulse record"
-    engine.start()  # the worker server.py starts: it resumes both accounts without waiting for a call to end
+    # The worker server.py starts (there after START_DELAY_S): it loads the route through the same loader, then
+    # resumes both accounts without waiting for a call to end.
+    engine.start(loader=pulse_model.load_host, delay=0)
     deadline = time.time() + 60
     while not {A, B} <= set(engine.last) and time.time() < deadline:
         time.sleep(0.1)

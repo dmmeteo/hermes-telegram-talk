@@ -4,8 +4,8 @@ Upstream Conduit Pulse makes every selection, memory and follow-up call through
 ``ctx.llm.complete_structured`` (pulse.py ``_memory_llm``). Talk does the same: the
 ``hermes-talk`` plugin's ``register(ctx)`` binds its own ``ctx.llm`` here, and the voice
 server, which ``hermes talk serve`` starts under the same Hermes interpreter and home, loads
-the profile's plugins through the public ``hermes_cli.plugins.discover_plugins`` so that
-binding happens in its process too. The host owns provider, model, auth, timeouts and
+the profile's plugins through the public ``hermes_cli.plugins.discover_plugins`` (from its Pulse
+worker, after it is already serving) so that binding happens in its process too. The host owns provider, model, auth, timeouts and
 fallback: the profile's own active model, no new account, credential, billing meter or
 model role. Talk passes no override, so the plugin trust gate stays fail-closed.
 
