@@ -228,7 +228,8 @@ class PulseEngine:
         if current.get("sig") == sig and current.get("by") == "model":
             return "model"
         if not self.model.available():
-            self._record_fallback(account, sig, "no model route", now)
+            if current.get("by") != "fallback" or current.get("sig") != sig:  # call setup writes nothing new
+                self._record_fallback(account, sig, "no model route", now)
             return "fallback"
         pool.sort(key=lambda c: (-pulse.importance(c, state["memory"], now), c["at"], c["ref"]))
         recent = sorted(({"title": c["title"], "outcome": c["state"] if not c.get("feedback")
