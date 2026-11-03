@@ -1354,7 +1354,9 @@ def rpc_tool_resume_idempotency(model):
         resumed = e.native(second["id"])
         assert second["state"] == "succeeded" and f"TASK: read {fixture}" in second["result"], second
         assert resumed.native_session_id == first.native_session_id, "the conversation's tasks resume one session"
-        assert len(requests_with(model, f"TASK: read {fixture}")) == 2, "the first turn ran once, then was recalled"
+        from scripted_model import _last_user
+        newest = [m for m in model.requests if f"TASK: read {fixture}" in _last_user(m)]
+        assert len(newest) == 2, "the first turn ran once (tool call, then its quote); the recall did not rerun it"
         return {"marker": marker, "job": job["id"], "admission": first.admission_id,
                 "native_session": first.native_session_id, "stored_source": (stored or {}).get("source"),
                 "tool_rows": len(tool_rows), "resubmission_admission": again["admission_id"], "conflict": conflict,
@@ -1418,22 +1420,26 @@ def rpc_cancel_no_late_effect(model):
 
 
 def rpc_budget_timeout(model):
+    """The native run_budget only warns the agent; Talk's whole-job backstop (budget + 60 s) stops the run natively."""
     e = gateway_env(model, run_budget_seconds=20)
     try:
         conv, vs = e.call()
         effect = e.work / "budget-effect"
         started = time.time()
-        _, body = e.task(conv, vs, f"slowshell 35 touch {effect}", "del_rpc_budget")
-        job = e.wait(body["job"]["id"], conv, vs, timeout=75)
+        _, body = e.task(conv, vs, f"slowshell 95 touch {effect}", "del_rpc_budget")
+        job = e.wait(body["job"]["id"], conv, vs, timeout=140)
         elapsed = time.time() - started
-        assert job["state"] in ("failed", "interrupted"), job
+        assert job["state"] == "failed" and "time budget" in job["error"], job
+        assert elapsed >= 75, f"stopped by Talk's backstop, not early: {elapsed:.1f}s"
         native = e.native(job["id"])
         settled = e.talk.agent.call("session.resume", session_id=native.native_session_id, omit_messages=True)
-        assert not settled["running"]
-        time.sleep(max(0, 38 - (time.time() - started)))
-        assert not effect.exists(), "the stopped run started no tool after its budget"
+        receipt = e.talk.agent.call("prompt.receipt", session_id=native.native_session_id,
+                                    admission_id=native.admission_id)
+        assert not settled["running"] and receipt["status"] == "terminal", receipt
+        time.sleep(max(0, 100 - (time.time() - started)))
+        assert not effect.exists(), "the stopped run started no tool after the backstop"
         return {"job": job["id"], "state": job["state"], "error": job["error"], "seconds": round(elapsed, 1),
-                "talk_backstop_s": 80, "late_effect": effect.exists()}
+                "receipt_outcome": receipt["outcome"], "talk_backstop_s": 80, "late_effect": effect.exists()}
     finally:
         e.close()
 

@@ -223,6 +223,23 @@ path. A plugin-side repair would have to edit the profile config, drop the per-t
 with a gateway RPC client. This repo rules out all three, so the manager has to choose. Talk is unchanged and
 still targets the single-query CLI (HomeLab core `e06df9c2`).
 
+#### Current Hermes: gateway-RPC transport (manager-authorized 2026-11-03)
+
+On a core that ships the public `hermes_cli.gateway_client`, Talk picks `hermes_talk/gateway_rpc.py` once at startup.
+Otherwise it uses the CLI above. A gateway error fails the task and never falls back. The client attaches to the
+profile's own gateway, starting it when none runs:
+- `session.create` with `run_budget`, or `session.resume` of the conversation's session.
+- `prompt.submit` with the job id as `submission_id` and `finite=True`. The same id with other text is refused
+  (`admission_conflict`), so a restart never starts a second run.
+- Talk follows `prompt.receipt`. It stops with `prompt.cancel` or `session.interrupt`, and counts a job as stopped
+  only once the receipt is terminal and the session is idle.
+
+A finite turn is the core's native single-query context: flagged actions resolve through `approvals.single_query_mode`.
+Talk never sets `unattended`. On these cores that flag is the `hermes -z` contract, which auto-approves flagged
+actions; a real-gateway check caught it deleting a directory under `approvals.mode: manual`. `python3
+verify-agent.py --rpc-target <pinned core source>` runs these checks against real gateway daemons with the scripted
+local model.
+
 The scripted model in `tests/agent/scripted_model.py` stands in for the provider only. Hermes' AIAgent, tools,
 approvals and SessionDB run unchanged against it.
 

@@ -21,7 +21,8 @@ at `26/26`) and `verify-frontend.py --offline`. For task, context or delegation 
 `python3 verify-agent.py --browser <out-dir>` `TALK_AGENT_BROWSER_OK`. Voice tasks run as native Hermes sessions:
 either `hermes chat` single-query processes or (manager-authorized 2026-11-03, for current cores whose CLI rejects
 `--run-budget`) a thin plugin-side client of the canonical public gateway RPC (`session.create` with `run_budget`,
-`session.interrupt`, the profile's own unattended approval policy). Never bypass the gateway, copy core internals, add an
+`session.interrupt`, finite single-query turns under the profile's own `approvals.single_query_mode`; never
+`unattended`, which on current cores is the `hermes -z` auto-approve contract). Never bypass the gateway, copy core internals, add an
 approval path or UI, use `--yolo`, change profile policy or run an in-process agent. For UI or lifecycle changes, also run
 `python3 verify-integrated.py --browser <out-dir>` (legacy and Talk Chromium, capped containers) and never weaken
 its assertions.

@@ -330,7 +330,13 @@ class JobBoard:
             job = self.jobs[job_id]
             if job.state != RUNNING:
                 return
-            if job.admission_id and self.agent.settled(job):
+            if not job.admission_id and job.submission_text and job.native_session_id:
+                try:  # an adoption whose resubmission failed: the same id and text stay idempotent
+                    self.agent.submit(job.id, job.native_session_id, job.submission_text,
+                                      lambda **f: self._persist(job_id, **f))
+                except Exception:
+                    pass
+            elif job.admission_id and self.agent.settled(job):
                 break
             if not timed_out and self.clock() > (job.started or 0) + self.tasks.run_budget_s + 60:
                 timed_out = True
