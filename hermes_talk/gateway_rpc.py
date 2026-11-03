@@ -18,6 +18,8 @@ from HERMES_HOME, never from a request. Talk adds no tool, approval path or poli
 - A submission whose answer was lost (a transport error, not a gateway refusal) is unknown, not refused:
   the job keeps its stored session and text and resubmits exactly them under the same id, which returns
   the admission the gateway took, if any. Only the gateway's own refusal (`AdmissionRefused`) fails it.
+  The gateway admits a submit only from a connection attached to its session, so a reopened connection
+  (after a drop or a Talk restart) first attaches with `session.resume`, as the gateway's own clients do.
 - Stop is `prompt.cancel` while queued and `session.interrupt` once started. A job counts as stopped only
   when the receipt is terminal and the session no longer runs, never because a request was accepted or
   the client lost its connection. `stop` says whether its requests reached the gateway, so the watcher
@@ -124,6 +126,7 @@ class GatewayAgent:
         self._client = None
         self._stack = None
         self._drain = None
+        self._attached = set()  # sessions this connection is attached to (a reopened one is attached to none)
         self.finals = {}
 
     def readiness(self):
@@ -165,6 +168,7 @@ class GatewayAgent:
     async def _close(self):
         client, stack, drain = self._client, self._stack, self._drain
         self._client = self._stack = self._drain = None
+        self._attached = set()
         if drain is not None:
             drain.cancel()
         if stack is not None:
@@ -177,7 +181,16 @@ class GatewayAgent:
         for attempt in (0, 1):
             client = await self._open()
             try:
-                return await client.rpc(method, _timeout=timeout, **params)
+                session_id = params.get("session_id")
+                if method == "prompt.submit" and session_id not in self._attached:
+                    # The gateway refuses a submit from a connection not attached to the session
+                    # (`permission_denied`); attaching changes nothing in the session.
+                    await client.rpc("session.resume", _timeout=timeout, session_id=session_id, omit_messages=True)
+                    self._attached.add(session_id)
+                result = await client.rpc(method, _timeout=timeout, **params)
+                if method in ("session.create", "session.resume") and isinstance(result, dict):
+                    self._attached.update(x for x in (session_id, result.get("session_id")) if x)
+                return result
             except GatewayRPCError:
                 raise  # the gateway's own answer
             except Exception:
