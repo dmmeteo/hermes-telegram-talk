@@ -226,13 +226,15 @@ still targets the single-query CLI (HomeLab core `e06df9c2`).
 #### Current Hermes: gateway-RPC transport (manager-authorized 2026-11-03)
 
 On a core that ships the public `hermes_cli.gateway_client`, Talk picks `hermes_talk/gateway_rpc.py` once at startup.
-Otherwise it uses the CLI above. A gateway error fails the task and never falls back. The client attaches to the
-profile's own gateway, starting it when none runs:
+Otherwise it uses the CLI above. A gateway refusal fails the task and nothing ever falls back. A lost answer is not a
+refusal: Talk resubmits the stored session, text and submission id, which returns the admission the gateway took.
+The client attaches to the profile's own gateway, starting it when none runs:
 - `session.create` with `run_budget`, or `session.resume` of the conversation's session.
 - `prompt.submit` with the job id as `submission_id` and `finite=True`. The same id with other text is refused
   (`admission_conflict`), so a restart never starts a second run.
-- Talk follows `prompt.receipt`. It stops with `prompt.cancel` or `session.interrupt`, and counts a job as stopped
-  only once the receipt is terminal and the session is idle.
+- Talk follows `prompt.receipt`. It stops with `prompt.cancel` or `session.interrupt`, retries a persisted cancel or
+  deadline with a bounded backoff while the gateway is unreachable, and counts a job as stopped only once the
+  receipt is terminal and the session is idle.
 
 A finite turn is the core's native single-query context: flagged actions resolve through `approvals.single_query_mode`.
 Talk never sets `unattended`. On these cores that flag is the `hermes -z` contract, which auto-approves flagged
