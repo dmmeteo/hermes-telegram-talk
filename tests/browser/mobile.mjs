@@ -108,7 +108,13 @@ try {
         window.__audios = [];
         window.AudioContext = function(...args) { const ctx = new NativeAudio(...args); window.__audios.push(ctx); return ctx; };
         window.__mediaDevices = navigator.mediaDevices;  // pinned, as above
-        navigator.mediaDevices.getUserMedia = () => new Promise((resolve, reject) => { window.__denyMic = () => reject(new DOMException('Synthetic denial', 'NotAllowedError')); });
+        // A denial answers every pending request and any later one: the restored document asks for the microphone
+        // only after its bootstrap returns, which may be after the check denies.
+        let denied = false;
+        const pending = [];
+        const deny = reject => reject(new DOMException('Synthetic denial', 'NotAllowedError'));
+        navigator.mediaDevices.getUserMedia = () => new Promise((resolve, reject) => { if (denied) deny(reject); else pending.push(reject); });
+        window.__denyMic = () => { denied = true; pending.splice(0).forEach(deny); };
       });
       const page = await context.newPage();
       const errors = [];
