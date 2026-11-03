@@ -44,8 +44,11 @@ Non-goals for this PoC:
     checkpoint.
   - `history.py` is Hermes `SessionDB` through its public methods, plus a synthetic in-memory twin.
   - `activity.py` scopes the profile's sessions to the user and gives each a truthful status.
-  - `pulse.py` is the Pulse engine's decisions: cards, fingerprints, importance, selection, item attribution and
+  - `pulse.py` is the Pulse engine's decisions: cards, fingerprints, fallback importance, item attribution and
     feedback parsing. `pulse_ledger.py` is its persistent per-account record (see "Pulse").
+  - `pulse_select.py`, `pulse_memory.py` and `pulse_followup.py` are the model steps ported from Conduit Pulse
+    (selection, memory extraction, follow-up checks); `pulse_engine.py` runs them and `pulse_model.py` is their
+    only model route, the plugin's host-owned `ctx.llm`.
   - `context.py` composes the instructions and mid-call context updates.
   - `jobs.py` is the task record, its state machine and the job board (dedupe, scheduling, receipts, restart).
   - `agent.py` runs a task as one native `hermes chat` process and decides task readiness.
@@ -122,18 +125,38 @@ the next bootstrap, and its old id answers 404.
 
 ## Pulse
 
-Pulse is Talk's briefing engine, adapted for voice from Hermes Conduit notifier's Pulse (MIT,
-`LICENSES/CONDUIT-NOTIFIER-LICENSE`; mechanisms ported, no code copied; inventory and adaptations in
+Pulse is Talk's briefing engine, ported for voice from Hermes Conduit notifier's Pulse at d25391f6 (MIT,
+`LICENSES/CONDUIT-NOTIFIER-LICENSE`; prompts and mechanisms ported and adapted; module map in
+[docs/adr/0002-pulse-engine-model-route.md](docs/adr/0002-pulse-engine-model-route.md), evidence model in
 [docs/adr/0001-pulse-per-item-evidence.md](docs/adr/0001-pulse-per-item-evidence.md)). One record per account
 (profile, bot, Telegram user) survives reopen, restart and `api/new`, and no other account can read or move it.
 
+- **Model route.** Every model step calls the plugin's own `ctx.llm` (Hermes' host-owned plugin LLM facade on the
+  profile's active model and auth, no override, no new account or billing). `register(ctx)` binds it and the voice
+  server loads the profile's plugins once at start so the binding exists there. Without it each step degrades and
+  records so: selection `fallback` with the reason, memory `unavailable`, follow-up checks retried.
 - **Candidates and cards.** Each scanned session revision becomes a card fingerprinted by (kind, session,
-  status, normalized title). A changed status supersedes the unread older card of the same session.
-- **Selection.** Importance is the status base (failed 0.9, replied 0.6, active 0.5, unknown 0.3), plus 0.3 for
-  a due follow-up and 0.05 for an unconfirmed mention, minus 0.05 per exposure nobody mentioned (at most 0.2), plus
-  the learned preference. The most important unread cards go first; ties drain the oldest first.
-- **Memory.** Feedback updates per-source counts and per-word topic weights (bounded) that form the learned
-  preference, and a list of recently told items used for deduplication.
+  status, normalized title). A changed status supersedes the unread older card of the same session. Follow-ups
+  that a check decided to tell become cards too.
+- **Selection.** The model picks the briefing (`pulse_select.py`, upstream `pulse_candidates` prompt): per
+  candidate bring_up, value 1-5, a one-word skip (done, covered, raised, rated, minor), a line and a why; it sees
+  what Pulse remembers, what it brought up lately and lessons from the user's feedback. Picks go by value up to
+  `activity_items`; the why is carried on the card's line. The selection is cached against the eligible cards'
+  fingerprints and refreshed by the engine; call setup refreshes it (at most 8 s) only when the cards changed.
+  Fallback only: status base (failed 0.9, replied 0.6, active 0.5, unknown 0.3), follow-up and unconfirmed boosts,
+  unheard-exposure fatigue and learned preference.
+- **Memory.** After a call ends (and every 5 min), the engine reads new lines of the account's Talk conversation
+  and of the profile sessions already scoped to the account. The model extracts commitments, promises,
+  intentions, interests, facts and watches (`pulse_memory.py`, upstream prompt). An item is kept only if its quoted
+  evidence is on a line said by the right speaker; a due date only if its words were said. Items keep provenance
+  (session, source, line, evidence), repeats refresh them, `replaces` retires the old one, `closed` resolves them.
+  Interests, intentions and facts decay by half-life unless said again. Feedback still updates per-source counts
+  and topic weights, and a told list serves deduplication.
+- **Follow-up checks.** Open promises, commitments and watches get model checks (`pulse_followup.py`, upstream
+  prompts): tell, done, drop or wait. First check after 30 min (promise, watch), one day or the due day's 09:00
+  (commitment); then 2 h, 6 h, 1 d, 2 d, 3 d, shortened by the model's hint; a failed call retries in 30 min
+  without counting; give up after 8 checks or 7 days (watch 30). "Tell" becomes a follow-up card: acknowledged in a
+  call it marks the item reminded, `dismiss` cancels the item. Pulse's own spoken follow-up is never re-extracted.
 - **Evidence per card, per call.** `candidate` (known), `exposed` (the voice model received it whole, in the
   instructions or an acknowledged context update), `mentioned` (a settled assistant turn of that call named it and
   was not spoken over), `acknowledged` (a settled user turn followed that mention in the same call, or feedback).
@@ -144,13 +167,15 @@ Pulse is Talk's briefing engine, adapted for voice from Hermes Conduit notifier'
 - **Feedback.** The model delegates `pulse P<n> useful|not useful|dismiss|later|more` (`api/pulse/feedback`).
   Useful and more acknowledge the card (more also speaks its details), not useful and dismiss close it, later
   snoozes it for three hours as a follow-up. A resubmitted delegation returns its first outcome.
-- **Follow-ups.** A snoozed card comes back once due, boosted and labelled. An acknowledged `active` card is
-  watched; its next status arrives labelled "follow-up on an earlier update".
+- **Snooze and watch.** A snoozed card comes back once due, boosted and labelled. An acknowledged `active` card
+  is watched; its next status arrives labelled "follow-up on an earlier update".
 - **Deduplication.** An unchanged session is never told twice. The same news (status and normalized title) from
   another session within ten minutes of an unread or told card is recorded as a duplicate and not offered.
 
-To change a typical behavior, such as a new status weight or feedback kind, edit `pulse.py` and add a case to
-`verify-pulse.py`; storage shape changes belong in `pulse_ledger.py`.
+To change a typical behavior: a prompt rule or skip reason in `pulse_select.py`/`pulse_memory.py`/
+`pulse_followup.py` (teach `tests/pulse/model_fixture.py` the new answer and add a step to
+`verify-pulse-engine.py`); a feedback kind or the evidence rules in `pulse.py` (a case in `verify-pulse.py`);
+storage shape in `pulse_ledger.py`; when the engine runs in `pulse_engine.py`.
 
 Secret-shaped strings are redacted from every section. These are `sk-…` keys, bot tokens, JWTs and
 `token=`/`password=` values.
@@ -333,6 +358,7 @@ python3 verify-integrated.py --browser <out-dir>        # legacy and Talk Chromi
 python3 verify-frontend.py --mobile <out-dir>            # Chromium and actual WebKit: cold/warm assets, rotation, retry and native audio unlock
 python3 verify-backend.py --offline     # full backend gate (below)
 python3 verify-pulse.py --offline       # Pulse per-item acceptance through the real routes, memory and SessionDB
+python3 verify-pulse-engine.py --offline  # Pulse engine parity: model selection, memory, follow-ups via ctx.llm (host runtime required)
 python3 verify-frontend.py --offline    # legacy 26 + frontend unit checks + HTTP contract on this backend
 python3 verify.py --offline             # legacy 26 signaling/security checks only
 python3 verify.py --browser <out-dir>   # legacy UI/lifecycle run in a capped --network none container
@@ -402,7 +428,10 @@ the package's SVG avatar. All identities and text remain synthetic.
 - [x] Scoped SOUL, allowlisted skills and truthful activity briefing within explicit budgets
 - [x] Pulse: per-item exposure, mention and acknowledgement; selection, memory, feedback, follow-ups and
   deduplication per account (`verify-pulse.py`, memory and real SessionDB, plus the Chromium browser job)
-- [ ] Pulse attribution and feedback with a real GPT-Live model (manager)
+- [x] Pulse engine: model selection, memory extraction and follow-up checks through the plugin's `ctx.llm`,
+  degrading visibly without it (`verify-pulse-engine.py`, real runtime, deterministic local model)
+- [ ] Pulse attribution and feedback with a real GPT-Live model, and the engine prompts on the profile's real
+  model (manager)
 - [x] Frozen frontend contract (`INTERFACE.md`) and synthetic fixtures
 - [x] Plugin registers and serves in a disposable Hermes home
 - [ ] Real GPT-Live call with composed context on the VPS (manager)
@@ -422,4 +451,5 @@ progress, speakable result on the same delegation id, call and task lifetimes ke
 `GPTLiveDelegationBridge.swift` and `VoiceBackgroundJobs.swift`. No other Conduit code is copied. Pulse adapts the
 mechanisms of Conduit notifier's Pulse at d25391f6382211dc22e90672c02ea2709112e3dc and the iOS `PulseFeed` at
 b7fd1cc81bf72c6ef8c35a87cd6b15a135fabd5c (both MIT; `LICENSES/CONDUIT-NOTIFIER-LICENSE`,
-`LICENSES/CONDUIT-LICENSE`). Its code is written for Talk; no upstream code was copied.
+`LICENSES/CONDUIT-LICENSE`). `pulse_memory.py`, `pulse_select.py` and `pulse_followup.py` port the notifier's
+prompts and decision rules (adapted, under that notice); the rest is written for Talk.

@@ -1,6 +1,8 @@
 # 0001 Pulse for Talk: per-item evidence and a voice adaptation of Conduit Pulse
 
-Status: accepted for the experiment branch `experiment/pulse-1103` (2026-11-03). Live release unchanged.
+Status: accepted for the experiment branch `experiment/pulse-1103` (2026-11-03); its Selection, Memory and Follow-ups
+rows and the "no separate selection inference" alternative are superseded by
+[0002](0002-pulse-engine-model-route.md). Live release unchanged.
 
 ## Context
 

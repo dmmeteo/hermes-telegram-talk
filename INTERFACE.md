@@ -60,7 +60,9 @@ These notes are backend-owned and add no field. Changing or removing a field abo
 - `events[]` may carry `interrupted: true` on an assistant event whose speech the user started talking over before
   it settled. Any other value, or the field on a user event, answers 400. Without the field nothing changes.
 - Activity lines in instructions and context updates begin with a per-call label: `- P<n> [status] title (...)`.
-  Labels continue across a call's context updates and restart at P1 in the next call.
+  Labels continue across a call's context updates and restart at P1 in the next call. A follow-up from Pulse
+  memory reads `- P<n> [followup] news (Pulse memory item m<id>, ...)`; a line the model selected may end its
+  parenthesis with `why now: ...`. Both are additive text inside the instructions; no wire field changed.
 - `POST api/pulse/feedback {initData,conversation_id,voice_session_id,delegation_item_id,request}` ->
   `{card:{handle,state,feedback}, channel:"speakable", reply}`. `request` is a client delegation of the form
   `pulse P<n> useful|not useful|dismiss|later|more`. It needs the live call (409 after it ended) and a label that

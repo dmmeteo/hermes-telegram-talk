@@ -1,3 +1,4 @@
 # Decisions
 
 - [0001 Pulse for Talk: per-item evidence and a voice adaptation of Conduit Pulse](0001-pulse-per-item-evidence.md)
+- [0002 Pulse engine: model selection, memory extraction and follow-up checks through the host's ctx.llm](0002-pulse-engine-model-route.md)

@@ -16,7 +16,9 @@ from .gateway_rpc import task_agent
 from .config import PRIVATE_NAMES
 from .context import compose, update
 from .jobs import DELEGATION_ID, OPEN, SUCCEEDED, UNDELIVERED, JobBoard
+from .pulse_engine import SELECT_ON_CALL_S, PulseEngine
 from .pulse_ledger import PulseLedger
+from .pulse_model import PulseModel
 from .receipts import DIRECTIVE, SINCE_KEY, Destination, ReportDesk, TelegramSender
 from .store import SOURCE, TalkError, TalkStore, VoiceScope, clip
 
@@ -70,12 +72,13 @@ class TalkRuntime:
     activity_scan_max = 1000
 
     def __init__(self, config, bot_token, history, soul=native_soul, skill=native_skill, clock=time.time,
-                 agent=None, home=None, sender=None):
+                 agent=None, home=None, sender=None, model=None):
         self.config = config
         self.bot_id = bot_token.split(":", 1)[0]
         self.history = history
         self.store = TalkStore(history, clock, config.voice_session_ttl_s, config.budgets.summary_chars)
         self.pulse = PulseLedger(history, clock)
+        self.engine = PulseEngine(self, model if model is not None else PulseModel())
         self.soul = soul
         self.skill = skill
         self.clock = clock
@@ -149,12 +152,26 @@ class TalkRuntime:
             return f"- Activity could not be read ({type(exc).__name__}). Say so if asked; do not guess."
         return "" if exhaustive else activity.NOT_EXHAUSTIVE
 
+    def pulse_refresh(self, user_id):
+        """Scan the profile's changed sessions into the account's cards outside a call (the engine's tick)."""
+        account = self.account(user_id)
+        talk = self.pulse.talk_sessions(account)
+        if not talk:
+            return
+        try:
+            state = self.store.owned(account, talk[-1], bound=True)
+        except TalkError:
+            return  # that conversation is no longer the account's current one; the next call scans
+        self._scan(account, user_id, talk[-1], state)
+
     def _cards(self, account, limit, exclude=(), first_handle=1):
         """(cards, waiting, lines): the selected Pulse cards and their briefing lines, numbered from first_handle."""
         now = self.clock()
-        cards, waiting = self.pulse.select(account, limit, now, exclude)
+        self.engine.select(account, timeout=SELECT_ON_CALL_S)
+        cards, waiting, by = self.pulse.choose(account, limit, now, exclude)
         lines = [redact(pulse.line(card, f"P{first_handle + i}", activity.when(card["at"])))
                  for i, card in enumerate(cards)]
+        logger.info("pulse selection by=%s cards=%d waiting=%d", by, len(cards), waiting)
         return cards, waiting, lines
 
     def _job_items(self, account, conversation_id, exclude_voice_session=None):
@@ -217,6 +234,7 @@ class TalkRuntime:
         skills = [(name, redact(self.skill(name) or "")) for name in c.skills]
         turns = [(role, redact(text)) for role, text in self.history.recent(conversation_id, c.budgets.recent_turns)]
         note = self._scan(account, user_id, conversation_id, state)
+        self.pulse.remember_talk(account, conversation_id)
         limit = c.budgets.activity_items if c.activity_enabled else 0
         cards, total, lines = self._cards(account, limit) if limit else ([], 0, [])
         job_items = self._job_items(account, conversation_id)
@@ -289,7 +307,9 @@ class TalkRuntime:
                 "reply": reply}
 
     def end(self, user_id, conversation_id, voice_session_id):
-        return self.store.end(self.account(user_id), conversation_id, voice_session_id)
+        ended = self.store.end(self.account(user_id), conversation_id, voice_session_id)
+        self.engine.poke(user_id)  # the call went quiet: read it for memory and run due follow-ups
+        return ended
 
     def _task_prompt(self, job):
         """(prompt, resume): the request once, after the bounded voice turns that preceded it."""

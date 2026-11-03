@@ -8,7 +8,7 @@ that carried it. Feedback is keyed by its delegation id, so a resubmitted delega
 import json
 import threading
 
-from . import pulse
+from . import pulse, pulse_select
 
 MAX_ITEMS = 500
 MAX_SEEN = 2000
@@ -38,6 +38,10 @@ class PulseLedger:
         if not isinstance(state, dict) or state.get("account") != account.key:
             state = {"account": account.key, "v": 1, "items": {}, "seen": {}, "calls": {}, "feedback": {},
                      "memory": {"sources": {}, "topics": {}, "told": []}, "scan": None}
+        memory = state["memory"]
+        for name, empty in (("items", {}), ("read", {}), ("talk", []), ("next_id", 1)):
+            memory.setdefault(name, empty)
+        state.setdefault("selection", None)
         return state
 
     def _save(self, account, state):
@@ -117,10 +121,40 @@ class PulseLedger:
 
     def select(self, account, limit, now, exclude=()):
         """(cards, waiting): copies of the most important unread cards, none of the excluded fingerprints."""
+        cards, waiting, _ = self.choose(account, limit, now, exclude)
+        return cards, waiting
+
+    def choose(self, account, limit, now, exclude=()):
+        """(cards, waiting, by): the model's selection when it covers exactly the eligible cards now, else the
+        deterministic ranking (by "fallback"). A model pick carries its decision (why, value, line)."""
         with self.lock:
             state = self._load(account)
-            items = [dict(i) for i in state["items"].values() if i["fp"] not in exclude]
-            return pulse.select(items, state["memory"], now, limit)
+            pool = [dict(i) for i in state["items"].values() if pulse.eligible(i, now)]
+            selection = state.get("selection")
+            if selection and selection.get("by") == "model" and selection["sig"] == pulse_select.signature(pool):
+                decisions = selection["decisions"]
+                by_fp = {c["fp"]: c for c in pool}
+                chosen = [dict(by_fp[fp], pick=decisions.get(fp)) for fp in selection["order"]
+                          if fp in by_fp and fp not in exclude][:limit]
+                withheld = sum(1 for c in pool if (decisions.get(c["fp"]) or {}).get("decision")
+                               in (pulse_select.SKIPPED, pulse_select.NOT_PICKED))
+                return chosen, max(len(chosen), len(pool) - withheld - len(set(exclude) & set(by_fp))), "model"
+            cards, waiting = pulse.select([dict(c, pick=None) for c in pool if c["fp"] not in exclude],
+                                          state["memory"], now, limit)
+            return cards, waiting, "fallback"
+
+    def update(self, account, change):
+        """Run change(state) under the account's lock and save; returns its result. Engine steps use this."""
+        with self.lock:
+            state = self._load(account)
+            result = change(state)
+            self._trim(state)
+            self._save(account, state)
+            return result
+
+    def snapshot(self, account):
+        with self.lock:
+            return json.loads(json.dumps(self._load(account)))
 
     def exposed(self, account, voice_session_id, fps, via, now):
         """Record that the voice model of this call received these cards whole; returns their call handles."""
@@ -201,6 +235,10 @@ class PulseLedger:
         card["log"] = (card["log"] + [{"step": "acknowledged", "call": voice_session_id, "by": by, "at": now}])[-LOG:]
         if card["status"] == "active":
             card["followup"] = {"state": "watch", "due": None, "at": now}
+        item = state["memory"]["items"].get(str(card["ref"])[1:]) if card.get("kind") == "followup" else None
+        if item is not None and item.get("card") == card["fp"]:
+            item["reminded"], item["card"] = now, None
+            item["log"] = (item["log"] + [{"told": voice_session_id, "by": by, "at": now}])[-8:]
         told = state["memory"]["told"]
         told.append({"fp": card["fp"], "ref": card["ref"], "key": pulse.content_key(card["status"], card["title"]),
                      "at": card["at"], "told": now})
@@ -236,6 +274,10 @@ class PulseLedger:
                     self._acknowledge(state, card, voice_session_id, "feedback", now)
             elif kind in ("not_useful", "dismiss"):
                 card["state"] = "dismissed"
+                item = memory["items"].get(str(card["ref"])[1:]) if card.get("kind") == "followup" else None
+                if item is not None and item.get("card") == fp and kind == "dismiss":
+                    item["state"], item["card"] = "cancelled", None
+                    item["outcome"] = {"by": "feedback", "decision": "dismiss", "call": voice_session_id, "at": now}
             else:
                 card["state"] = "snoozed"
                 card["followup"] = {"state": "scheduled", "due": now + snooze_s, "at": now}
@@ -243,6 +285,20 @@ class PulseLedger:
             self._trim(state)
             self._save(account, state)
             return kind, dict(card)
+
+    def talk_sessions(self, account):
+        with self.lock:
+            return list(self._load(account)["memory"]["talk"])
+
+    def remember_talk(self, account, conversation_id):
+        """Note the account's Talk conversation as a memory source (newest last)."""
+        with self.lock:
+            state = self._load(account)
+            talk = state["memory"]["talk"]
+            if talk[-1:] == [conversation_id]:
+                return
+            state["memory"]["talk"] = ([c for c in talk if c != conversation_id] + [conversation_id])[-8:]
+            self._save(account, state)
 
     def cards(self, account):
         with self.lock:

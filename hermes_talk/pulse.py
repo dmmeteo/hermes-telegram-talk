@@ -141,5 +141,10 @@ def line(card, handle, when):
         notes.append("follow-up on an earlier update")
     if card["state"] == "mentioned":
         notes.append("mentioned before, not confirmed heard")
+    pick = card.get("pick") or {}
+    if pick.get("why"):
+        notes.append(f"why now: {pick['why']}")
     note = f" ({'; '.join(notes)})" if notes else ""
+    if card.get("kind") == "followup":
+        return f"- {handle} [followup] {card['title']} (Pulse memory item {card['ref']}, {when}){note}"
     return f"- {handle} [{card['status']}] {card['title']} ({card['source']} session {card['ref']}, {when}){note}"
