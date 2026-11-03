@@ -6,7 +6,10 @@ client of it: `hermes_cli.gateway_client.connect_gateway` attaches to this HERME
 from HERMES_HOME, never from a request. Talk adds no tool, approval path or policy:
 
 - `session.create(run_budget=...)` opens a native session with Hermes' own per-run wall-clock budget, or
-  `session.resume` continues the conversation's stored one.
+  `session.resume` continues the conversation's stored one. Its `toolsets` pick names `tasks.toolsets` plus every
+  registered toolset contained in them (`launch_toolsets`): the gateway grants a composite such as
+  `hermes-telegram` on its surface only when its default-off members are named too, and refuses the bare
+  composite (`invalid_params`, field `toolsets`). The tools are exactly those of `tasks.toolsets`, never more.
 - `prompt.submit(submission_id=<job id>, finite=True)` admits the request once. The job id is the
   idempotency key: the same submission returns the same admission, and the gateway refuses the id with
   other text (`admission_conflict`), so a restart never starts a second run. A finite turn is the core's
@@ -29,10 +32,13 @@ A gateway error fails or delays the task; it never falls back to a local process
 """
 import asyncio
 import contextlib
+import logging
 import threading
 from pathlib import Path
 
 from .agent import APPROVING, TASK_APPROVAL_MODES, Outcome, Readiness, _profile_config
+
+logger = logging.getLogger(__name__)
 
 TRANSPORT = "gateway"
 RPC_TIMEOUT_S = 30.0
@@ -109,6 +115,25 @@ def receipt_outcome(receipt, session_id):
         return Outcome(130, "", "The run was interrupted before it finished.", session_id)
     reason = result.get("error") or result.get("failure_reason") or f"Hermes reported the run {outcome or 'unknown'}."
     return Outcome(1, "", str(reason), session_id)
+
+
+def launch_toolsets(names):
+    """`session.create`'s toolsets for `names`: the names, then each registered toolset whose tools they cover.
+
+    Adds no tool: every added toolset resolves to a subset of the tools `names` already resolve to."""
+    import toolsets
+    wanted = {tool for name in names for tool in toolsets.resolve_toolset(name)}
+    members = [name for name in sorted(toolsets.get_all_toolsets()) if name not in names
+               and (tools := set(toolsets.resolve_toolset(name))) and tools <= wanted]
+    return list(names) + members
+
+
+def _refusal_label(exc):
+    """The gateway refusal's bounded reason code and field, for the log; never its detail or payload."""
+    data = exc.data if isinstance(getattr(exc, "data", None), dict) else {}
+    bounded = [v if isinstance(v, str) and v.replace("_", "").replace(".", "").isalnum() and len(v) <= 80 else "?"
+               for v in (str(exc), data.get("field", ""))]
+    return f"{bounded[0]}" + (f" (field {bounded[1]})" if bounded[1] else "")
 
 
 class GatewayAgent:
@@ -214,9 +239,15 @@ class GatewayAgent:
         if resume:
             snapshot = self.call("session.resume", session_id=resume, omit_messages=True)
         else:
-            snapshot = self.call("session.create", cwd=str(self.tasks.workdir), toolsets=list(self.tasks.toolsets),
-                                 max_turns=self.tasks.max_turns, run_budget=float(self.tasks.run_budget_s),
-                                 timeout=60.0)
+            from hermes_cli.gateway_client import GatewayRPCError
+            try:
+                snapshot = self.call("session.create", cwd=str(self.tasks.workdir),
+                                     toolsets=launch_toolsets(self.tasks.toolsets), max_turns=self.tasks.max_turns,
+                                     run_budget=float(self.tasks.run_budget_s), timeout=60.0)
+            except GatewayRPCError as exc:
+                # The gateway's own refusal: no session exists and nothing ran.
+                logger.warning("the Hermes gateway refused a task session: %s", _refusal_label(exc))
+                raise AdmissionRefused(f"session.create refused: {_refusal_label(exc)}") from exc
         session_id = snapshot["session_id"]
         # Stored before submission: a restart resubmits exactly this text under the same submission id.
         persist(native_session_id=session_id, submission_text=prompt)

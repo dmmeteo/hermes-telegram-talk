@@ -595,7 +595,7 @@ def plugin_native_install(model):
     native = lambda *args: subprocess.run([hermes, *args], cwd=root, env=env, capture_output=True, text=True, timeout=120)
     proc = None
     profile = user_home / ".hermes" / "profiles" / "synthetic"
-    target = profile / "plugins" / "hermes-telegram-talk"
+    target = profile / "plugins" / "hermes-talk"
     try:
         out = native("profile", "create", "synthetic", "--no-alias", "--no-skills")
         assert out.returncode == 0, out.stderr[-600:]
@@ -606,9 +606,9 @@ def plugin_native_install(model):
             (shutil.copytree if src.is_dir() else shutil.copy2)(src, target / name)
         for path in [target, *target.rglob("*")]:
             path.chmod(path.stat().st_mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
-        (profile / "config.yaml").write_text(model_config(model, "plugins:\n  enabled:\n    - hermes-telegram-talk\n"))
+        (profile / "config.yaml").write_text(model_config(model, "plugins:\n  enabled:\n    - hermes-talk\n"))
         listed = [line.split() for line in native("-p", "synthetic", "plugins", "list", "--plain", "--no-bundled").stdout.splitlines()]
-        assert ["enabled", "user", "0.2.0", "hermes-telegram-talk"] in listed, listed
+        assert ["enabled", "user", "0.2.0", "hermes-talk"] in listed, listed
         work = root / "work"
         work.mkdir()
         data = talk_data(work)
@@ -1592,7 +1592,46 @@ def rpc_stop_survives_outage(model):
         e.close()
 
 
-RPC_CHECKS = (rpc_tool_resume_idempotency, rpc_destructive_denial, rpc_cancel_no_late_effect, rpc_budget_timeout,
+def rpc_composite_toolsets(model):
+    """A composite `tasks.toolsets` pick (`hermes-telegram`) through the pinned gateway's real create policy.
+
+    The bare composite is what the gateway refuses (`invalid_params`, field `toolsets`): its default-off members
+    are not granted on this surface unless named. Talk's launch pick names them and adds no tool."""
+    import toolsets
+    from gateway.session_policy import build_policy
+    from hermes_cli.config import load_config
+    from hermes_state_runtime import RuntimeStoreError
+    e = gateway_env(model, toolsets=["hermes-telegram"])
+    try:
+        conv, vs = e.call()
+        marker = "FIXTURE-" + secrets.token_hex(8)
+        fixture = e.work / "fixture.txt"
+        fixture.write_text(marker + "\n")
+        status, body = e.task(conv, vs, f"read {fixture}", "del_rpc_composite")
+        assert status == 200 and body["created"], body
+        job = e.wait(body["job"]["id"], conv, vs)
+        assert job["state"] == "succeeded" and marker in job["result"], job
+        stored = e.native(job["id"])
+        assert stored.native_session_id and stored.admission_id, stored
+        config = load_config()
+        bare = {"cwd": str(e.work), "toolsets": ["hermes-telegram"], "max_turns": 8, "run_budget": 120.0}
+        try:
+            build_policy(bare, config, private_secrets={}, workspace_posture=True)
+            raise AssertionError("the real create policy accepted the bare composite: this check no longer discriminates")
+        except RuntimeStoreError as exc:
+            assert (exc.reason, exc.field) == ("invalid_params", "toolsets"), (exc.reason, exc.field)
+        from hermes_talk.gateway_rpc import launch_toolsets
+        pick = launch_toolsets(["hermes-telegram"])
+        granted = build_policy({**bare, "toolsets": pick}, config, private_secrets={}, workspace_posture=True)
+        tools = lambda names: {t for n in names for t in toolsets.resolve_toolset(n)}
+        assert tools(pick) == tools(["hermes-telegram"]) == tools(granted.toolsets), "the pick adds or loses tools"
+        return {"bare_refusal": {"reason": "invalid_params", "field": "toolsets"}, "pick": pick,
+                "granted_toolsets": list(granted.toolsets), "job_state": job["state"]}
+    finally:
+        e.close()
+
+
+RPC_CHECKS = (rpc_composite_toolsets, rpc_tool_resume_idempotency, rpc_destructive_denial, rpc_cancel_no_late_effect, rpc_budget_timeout,
               rpc_restart_adoption, rpc_lost_admission_ack, rpc_genuine_refusal, rpc_stop_survives_outage,
               background_result_delivery, persistent_two_call_history, delegation_id_dedup,
               receipt_ack_no_double_speech, telegram_default_receipt, telegram_alternate_destination,
