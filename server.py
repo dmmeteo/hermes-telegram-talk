@@ -438,7 +438,7 @@ def main(argv=None):
     parser.add_argument("--port", type=int, default=8791)
     parser.add_argument("--origin", default="https://her.dmmeteo.dev")
     parser.add_argument("--base-path", default="/tg-voice/")
-    parser.add_argument("--config", help="Hermes Talk YAML; without it the server stays the original voice test")
+    parser.add_argument("--config", help="Hermes Telegram Talk YAML; without it the server stays the original voice test")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     token = os.environ.get("TG_VOICE_BOT_TOKEN", "").strip()

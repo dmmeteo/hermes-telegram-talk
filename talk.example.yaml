@@ -1,4 +1,4 @@
-# Hermes Talk configuration example. Copy next to the profile (not into this repo) and edit.
+# Hermes Telegram Talk configuration example. Copy next to the profile (not into this repo) and edit.
 # Every value here is public. Secrets never go in this file: the bot token and allowlist come from
 # TG_VOICE_BOT_TOKEN / TG_VOICE_ALLOWED_USER_IDS, and GPT-Live credentials from the profile's Codex sign-in.
 profile:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hermes Talk agent gate: voice tasks through the real Hermes agent, with synthetic data only.
+"""Hermes Telegram Talk agent gate: voice tasks through the real Hermes agent, with synthetic data only.
 
   python3 verify-agent.py --require-hermes [--receipts DIR]
   python3 verify-agent.py --browser OUT_DIR    Chromium delegation job (real app.js, server and tasks)
@@ -538,7 +538,7 @@ def plugin_native_install(model):
     native = lambda *args: subprocess.run([hermes, *args], cwd=root, env=env, capture_output=True, text=True, timeout=120)
     proc = None
     profile = user_home / ".hermes" / "profiles" / "synthetic"
-    target = profile / "plugins" / "hermes-talk"
+    target = profile / "plugins" / "hermes-telegram-talk"
     try:
         out = native("profile", "create", "synthetic", "--no-alias", "--no-skills")
         assert out.returncode == 0, out.stderr[-600:]
@@ -549,9 +549,9 @@ def plugin_native_install(model):
             (shutil.copytree if src.is_dir() else shutil.copy2)(src, target / name)
         for path in [target, *target.rglob("*")]:
             path.chmod(path.stat().st_mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
-        (profile / "config.yaml").write_text(model_config(model, "plugins:\n  enabled:\n    - hermes-talk\n"))
+        (profile / "config.yaml").write_text(model_config(model, "plugins:\n  enabled:\n    - hermes-telegram-talk\n"))
         listed = [line.split() for line in native("-p", "synthetic", "plugins", "list", "--plain", "--no-bundled").stdout.splitlines()]
-        assert ["enabled", "user", "0.2.0", "hermes-talk"] in listed, listed
+        assert ["enabled", "user", "0.2.0", "hermes-telegram-talk"] in listed, listed
         work = root / "work"
         work.mkdir()
         data = talk_data(work)

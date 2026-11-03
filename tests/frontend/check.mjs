@@ -1,9 +1,18 @@
 import vm from 'node:vm';
 import {readFileSync} from 'node:fs';
 import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
 const source = readFileSync(process.argv[2] || 'static/talk/app.js','utf8');
 const tests = [];
 const test = (name, run) => tests.push({name,run});
+test('Talk assets have content-qualified URLs distinct from the legacy cache', () => {
+  const html = readFileSync('static/talk/index.html', 'utf8');
+  for (const name of ['app.js', 'app.css']) {
+    const hash = createHash('sha256').update(readFileSync(`static/talk/${name}`)).digest('hex').slice(0, 16);
+    assert(html.includes(`"${name}?v=${hash}"`), `${name} URL must change with its bytes`);
+    assert(!html.includes(`"${name}"`), `${name} must not reuse the legacy cache key`);
+  }
+});
 function fixture() {
   const nodes = new Map();
   function element(id) {

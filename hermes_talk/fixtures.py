@@ -99,7 +99,7 @@ def main():
     from .config import parse_config
     from .history import MemoryHistory
     from .talk import TalkRuntime
-    parser = argparse.ArgumentParser(description="Synthetic Hermes Talk fixture server")
+    parser = argparse.ArgumentParser(description="Synthetic Hermes Telegram Talk fixture server")
     parser.add_argument("--port", type=int, default=8792)
     args = parser.parse_args()
     home = write_home(tempfile.mkdtemp(prefix="talk-fixture-"))

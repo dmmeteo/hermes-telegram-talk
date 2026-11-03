@@ -1,4 +1,4 @@
-# Hermes Talk v2 shared interface
+# Hermes Telegram Talk v2 shared interface
 Base path /tg-voice/, same origin HTTPS. Every authenticated request carries initData validated server-side. No user-chosen profile/bot. JSON UTF-8; fixed application-owned routes only.
 POST api/bootstrap {initData} -> {conversation_id, profile:{id,display_name,avatar_url}, appearance:{listen_color,speak_color}, greeting_enabled, limits:{event_batch_max}}. Must not return SOUL, skill bodies, raw history or credentials. UI may display avatar/name, but no transcript/status dashboard.
 POST api/session {initData,sdp,conversation_id} -> {sdp,type:"answer",voice_session_id,conversation_id}. Backend composes SOUL/skills/resume/activity instructions and history before creating subscription call. No browser-supplied provider URL, instructions, model or billing. Keep existing WebRTC transport.

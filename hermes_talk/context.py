@@ -7,14 +7,14 @@ headers and the "[clipped]" marker included. Skills are guidance text only. They
 from .store import clip
 
 FRAME = (
-    "You are the realtime voice of the Hermes profile \"{name}\" in Hermes Talk, a Telegram Mini App. "
+    "You are the realtime voice of the Hermes profile \"{name}\" in Hermes Telegram Talk, a Telegram Mini App. "
     "Speak naturally and briefly. When interrupted, stop and listen.\n"
     "Voice limits in this build: you cannot run tools, start or cancel Hermes work, read files or "
     "browse. If asked to do something, say plainly that Talk cannot start work yet and that nothing "
     "was executed. Never claim a task ran, finished or was sent. Ending this call cancels nothing."
 )
 TASKS_FRAME = (
-    "You are the realtime voice of the Hermes profile \"{name}\" in Hermes Talk, a Telegram Mini App. "
+    "You are the realtime voice of the Hermes profile \"{name}\" in Hermes Telegram Talk, a Telegram Mini App. "
     "Speak naturally and briefly. When interrupted, stop and listen.\n"
     "You can hand work to Hermes, this profile's own agent with its tools. When the user asks for something this "
     "context cannot answer (look something up, read or check something, research), delegate it. A delegated task "

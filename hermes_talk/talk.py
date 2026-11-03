@@ -1,4 +1,4 @@
-"""Hermes Talk runtime: the authenticated operations behind the /tg-voice/ API.
+"""Hermes Telegram Talk runtime: the authenticated operations behind the /tg-voice/ API.
 
 Every method takes a Telegram user id that server.py already verified from
 signed initData and the allowlist. Profile and bot come from configuration
@@ -25,7 +25,7 @@ SECRETS = [re.compile(p) for p in (
 )]
 CANCEL = re.compile(r"(?i)^\s*(?:please\s+)?(?:cancel|stop)\s+(?:hermes\s+)?task\s*#?\s*(\d{1,4})\b")
 TASK_PROMPT = (
-    "[Hermes Talk voice task {number}. It was delegated from a Telegram voice call and nobody watches this run "
+    "[Hermes Telegram Talk voice task {number}. It was delegated from a Telegram voice call and nobody watches this run "
     "live. Use your tools as needed. Nobody can approve a flagged action during this run: if one is blocked, say "
     "so instead of working around it. End with a short plain-language result that can be read aloud.]"
 )

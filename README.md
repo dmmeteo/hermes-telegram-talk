@@ -1,6 +1,6 @@
-# Hermes Talk (PoC v2)
+# Hermes Telegram Talk (PoC v2)
 
-Hermes Talk is a Telegram Mini App voice surface for one Hermes profile. Its menu label is "Talk".
+Hermes Telegram Talk is a Telegram Mini App voice surface for one Hermes profile. Its menu label is "Talk".
 It runs as an independent Hermes plugin next to the unchanged stock Telegram adapter. It makes no
 core edits and uses no custom adapter. The experiment asks one thing: is hands-free voice with a
 profile's own persona and conversation memory useful inside Telegram on a phone?
@@ -52,6 +52,17 @@ Non-goals for this PoC:
 - The upstream exchange is adapted from Hermes Conduit (MIT, `LICENSES/CONDUIT-LICENSE`).
 
 ### Where data lives
+
+The plugin is named `hermes-telegram-talk`. The Python package `hermes_talk`, the `talk serve`
+command, `/tg-voice/` routes, and menu label `Talk` retain their existing names. The stored
+`Telegram Voice` title, `telegram-voice` source, `hermes_talk:*` metadata keys, account binding,
+`talk:*` receipts, conversation summaries, and activity cursors remain compatible. Renaming the
+installed plugin does not create a new conversation or reset its read cursor.
+
+The Talk HTML uses content-qualified `app.js?v=...` and `app.css?v=...` URLs. Their values are the
+first 16 hex characters of each asset's SHA256. Update them when either asset changes. The offline
+frontend check verifies these values. This separates the current UI from legacy assets already
+cached under the unversioned URLs, including caches that override the origin's `no-cache` header.
 
 Everything lives in the profile's own `state.db`, written through `SessionDB` methods. None of it is
 written with SQL.
@@ -186,7 +197,7 @@ Typical changes:
 
 ```sh
 # Install: copy plugin.yaml, __init__.py, server.py, hermes_talk/, static/ and LICENSES/ to
-# $HERMES_HOME/plugins/hermes-talk and add hermes-talk to plugins.enabled (see "Native install" below).
+# $HERMES_HOME/plugins/hermes-telegram-talk and add hermes-telegram-talk to plugins.enabled (see "Native install" below).
 export HERMES_HOME=/home/me/.hermes/profiles/pewds
 export TG_VOICE_BOT_TOKEN=...            # from the existing Pewds credential source; never on argv
 export TG_VOICE_ALLOWED_USER_IDS=...     # numeric Telegram ids, comma separated
@@ -214,6 +225,7 @@ python3 verify-integrated.py --offline --require-host   # canonical gate: backen
 python3 verify-agent.py --require-hermes                 # voice tasks through the real Hermes agent (scripted model)
 python3 verify-agent.py --browser <out-dir>              # Chromium delegation job: real app.js, server and tasks
 python3 verify-integrated.py --browser <out-dir>        # legacy and Talk Chromium inventories, capped containers
+python3 verify-frontend.py --mobile <out-dir>            # Chromium and actual WebKit: cold/warm assets, rotation, retry and native audio unlock
 python3 verify-backend.py --offline     # full backend gate (below)
 python3 verify-frontend.py --offline    # legacy 26 + frontend unit checks + HTTP contract on this backend
 python3 verify.py --offline             # legacy 26 signaling/security checks only
@@ -258,6 +270,9 @@ Prerequisite runtimes: Python 3 for the gate, a Hermes install for stage 3, Dock
 inventories (`django-admin-repl-verify-browser:pw1.63.0`, Playwright 1.63 with Chromium, overridable as
 `TALK_BROWSER_IMAGE`) and Node for the frontend unit checks (from `PATH`, else the local
 `node:22.22.3-bookworm-slim` image as `TALK_NODE_IMAGE`). Containers run with `--network none`.
+The mobile gate also requires the matching WebKit binary. `TALK_TEST_AVATAR=/absolute/public-avatar.jpg`
+optionally supplies a public test image through a read-only file mount. Otherwise the fixture uses
+the package's SVG avatar. All identities and text remain synthetic.
 
 ## Status
 
