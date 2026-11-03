@@ -207,6 +207,22 @@ Every task route is rate limited per user and accepts 32 KiB.
 | Embedded `AIAgent` in the Talk process | No public builder (private recipes in `hermes_cli/oneshot.py`, `cron/scheduler.py`); an in-process agent with no approval context auto-approves flagged commands | Not taken: unsafe by default and couples the voice server to agent work |
 | `hermes chat` single-query process per task | Documented CLI (`--query-file`, `--format stream-json`, `--resume`, `--run-budget`, `--source`); single-query approvals fail closed; SIGINT ends with `error: Interrupted`; about 190 MB and 7 s per run here | **Taken** |
 
+#### Current Hermes (gateway CLI): blocked
+
+Hermes core `bf0203a7` routes `hermes chat` through a thin client for the canonical gateway (`hermes_cli/gateway_chat.py`).
+That client refuses voice tasks before they start: `Unsupported gateway CLI options: --run-budget` (exit 2), and
+points to `agent.run_budget_seconds` in the profile's `config.yaml`. The gateway's own `session.create` accepts
+`run_budget`, but the client has no flag that forwards it. Three other differences from the single-query process
+above also break the existing task contract:
+- SIGINT to the client prints `Detached; accepted work continues at the gateway.` and does not send `session.interrupt`.
+- A finite `-q` turn that reaches an approval gate detaches. It does not fail closed.
+- Only `--oneshot` is unattended.
+
+So Talk's stop/escalate cancel, its deadline backstop and its single-query approval guarantee no longer hold on that
+path. A plugin-side repair would have to edit the profile config, drop the per-task budget, or replace `hermes chat`
+with a gateway RPC client. This repo rules out all three, so the manager has to choose. Talk is unchanged and
+still targets the single-query CLI (HomeLab core `e06df9c2`).
+
 The scripted model in `tests/agent/scripted_model.py` stands in for the provider only. Hermes' AIAgent, tools,
 approvals and SessionDB run unchanged against it.
 
