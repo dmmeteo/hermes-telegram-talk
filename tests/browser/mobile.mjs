@@ -50,6 +50,9 @@ try {
           window.__clicks = [];
           document.addEventListener('click', event => window.__clicks.push({id: event.target.id, trusted: event.isTrusted}), {capture: true});
           window.__gum = 0;
+          // Keep the wrapper reachable: WebKit may collect an unreferenced navigator.mediaDevices wrapper, and with it
+          // this expando, before the app asks for the microphone (then the native call answers and __gum stays 0).
+          window.__mediaDevices = navigator.mediaDevices;
           navigator.mediaDevices.getUserMedia = async () => { window.__gum++; throw new DOMException('Synthetic denial', 'NotAllowedError'); };
         });
         const page = await context.newPage();
@@ -104,6 +107,7 @@ try {
         const NativeAudio = AudioContext;
         window.__audios = [];
         window.AudioContext = function(...args) { const ctx = new NativeAudio(...args); window.__audios.push(ctx); return ctx; };
+        window.__mediaDevices = navigator.mediaDevices;  // pinned, as above
         navigator.mediaDevices.getUserMedia = () => new Promise((resolve, reject) => { window.__denyMic = () => reject(new DOMException('Synthetic denial', 'NotAllowedError')); });
       });
       const page = await context.newPage();
@@ -136,6 +140,7 @@ try {
       await until(() => page.locator('#error').innerText().then(text => text.includes('Telegram')), 'missing-auth state');
       assert(await page.evaluate(() => getComputedStyle(document.querySelector('header')).display === 'flex' && document.documentElement.scrollWidth <= innerWidth), 'desktop layout');
       await page.addInitScript(() => {
+        window.__mediaDevices = navigator.mediaDevices;  // pinned, as above
         navigator.mediaDevices.getUserMedia = async () => { throw new DOMException('Synthetic denial', 'NotAllowedError'); };
       });
       await page.goto(`${origin}/tg-voice/?desktop#tgWebAppData=${encodeURIComponent((await state()).initData)}`);
