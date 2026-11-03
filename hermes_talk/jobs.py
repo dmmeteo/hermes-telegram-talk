@@ -131,8 +131,8 @@ def job_key(job_id):
     return JOB_PREFIX + job_id
 
 
-def delegation_key(scope, generation, delegation_id):
-    return f"hermes_talk:delegation:{scope}:{generation}:{delegation_id}"
+def delegation_key(scope, conversation_id, generation, delegation_id):
+    return f"hermes_talk:delegation:{scope}:{conversation_id}:{generation}:{delegation_id}"
 
 
 class JobBoard:
@@ -176,9 +176,9 @@ class JobBoard:
     def submit(self, scope, conversation_id, voice_session_id, generation, delegation_id, request):
         """(job, created). A repeated delegation of the same call returns its existing job and starts nothing."""
         with self.lock:
-            key = delegation_key(scope, generation, delegation_id)
+            key = delegation_key(scope, conversation_id, generation, delegation_id)
             existing = self.jobs.get(self.history.get_meta(key) or "")
-            if existing is not None and existing.scope == scope:
+            if existing is not None and existing.scope == scope and existing.conversation_id == conversation_id:
                 return existing, False
             if sum(1 for j in self.jobs.values() if j.scope == scope and j.state in OPEN) >= self.tasks.max_open_per_user:
                 raise TalkError(429, "Too many Hermes tasks are already open. Wait for one to finish or cancel one.")
@@ -269,7 +269,9 @@ class JobBoard:
         return job
 
     def by_number(self, scope, conversation_id, number):
-        for job in self.jobs.values():
+        with self.lock:
+            jobs = list(self.jobs.values())
+        for job in jobs:
             if job.scope == scope and job.conversation_id == conversation_id and job.number == number:
                 return job
         raise TalkError(404, "That task is not available.")
@@ -303,13 +305,16 @@ class JobBoard:
                     self._save(job.delivered(via, self.clock()))
 
     def of_conversation(self, scope, conversation_id, limit=10):
-        jobs = [j for j in self.jobs.values() if j.scope == scope and j.conversation_id == conversation_id]
+        with self.lock:
+            jobs = [j for j in self.jobs.values() if j.scope == scope and j.conversation_id == conversation_id]
         return sorted(jobs, key=lambda j: j.number)[-limit:]
 
     def wait_idle(self, timeout):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if not any(j.state in OPEN for j in self.jobs.values()):
+            with self.lock:
+                jobs = list(self.jobs.values())
+            if not any(j.state in OPEN for j in jobs):
                 return True
             time.sleep(0.2)
         return False

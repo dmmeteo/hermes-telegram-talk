@@ -308,6 +308,8 @@ async function poll(current) {
   try { data = await post("tasks", callFields(current)); } catch (_) { schedulePoll(current, 5000); return; }
   if (call !== current) return;
   for (const job of Array.isArray(data.jobs) ? data.jobs : []) {
+    if (job.voice_session_id === current.voiceId && current.delegations.has(job.delegation_item_id)
+      && !current.jobs.has(job.id)) current.jobs.set(job.id, job.delegation_item_id);
     const delegationId = current.jobs.get(job.id);
     if (!delegationId || job.delegation_item_id !== delegationId || job.voice_session_id !== current.voiceId
       || !FINISHED.includes(job.state) || current.spoken.has(job.id)) continue;

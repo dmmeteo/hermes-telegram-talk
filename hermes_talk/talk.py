@@ -191,22 +191,28 @@ class TalkRuntime:
             raise TalkError(503, readiness.reason or NOT_READY.reason)
         return self.account(user_id)
 
+    def _board_for(self, user_id):
+        """Cancel and acknowledge stay possible when readiness lapses; only ownership is required."""
+        if self.board is None:
+            raise TalkError(503, "Tasks are off in the Talk config.")
+        return self.account(user_id)
+
     def task(self, user_id, conversation_id, voice_session_id, delegation_item_id, request):
         """Start a native task for a delegation of the live call, or cancel one ("cancel task N")."""
-        account = self._tasks_for(user_id)
+        cancel = CANCEL.match(request) if isinstance(request, str) else None
+        account = self._board_for(user_id) if cancel else self._tasks_for(user_id)
         if not isinstance(delegation_item_id, str) or not DELEGATION_ID.fullmatch(delegation_item_id):
             raise TalkError(400, "Malformed delegation id.")
         limit = self.config.tasks.request_chars
         if not isinstance(request, str) or not request.strip() or len(request) > limit:
             raise TalkError(400, f"A task request must be 1..{limit} characters.")
         record = self.store.voice_session(account, conversation_id, voice_session_id, live=True)
-        cancel = CANCEL.match(request)
         if cancel:
             job = self.board.by_number(account.key, conversation_id, int(cancel.group(1)))
             job = self.board.cancel(account.key, conversation_id, job.id)
             return {"job": job.public(), "created": False, "channel": "speakable",
                     "reply": f"Hermes task {job.number} " + ("is being cancelled." if job.state in OPEN else f"already {job.state}.")}
-        job, created = self.board.submit(account.key, conversation_id, voice_session_id, record["generation"],
+        job, created = self.board.submit(account.key, conversation_id, voice_session_id, record.get("generation", 0),
                                          delegation_item_id, " ".join(request.split()))
         reply = (f"Hermes is working on this as background task {job.number}. Its result will follow on this "
                  "delegation; do not guess it." if created and job.state in OPEN else
@@ -222,12 +228,12 @@ class TalkRuntime:
                 "tasks": {"available": self.readiness(user_id).ready}}
 
     def cancel(self, user_id, conversation_id, job_id):
-        account = self._tasks_for(user_id)
+        account = self._board_for(user_id)
         self.store.owned(account, conversation_id)
         return {"job": self.board.cancel(account.key, conversation_id, job_id).public()}
 
     def ack(self, user_id, conversation_id, voice_session_id, job_id):
-        account = self._tasks_for(user_id)
+        account = self._board_for(user_id)
         self.store.voice_session(account, conversation_id, voice_session_id)
         return {"job": self.board.ack(account.key, conversation_id, voice_session_id, job_id).public()}
 

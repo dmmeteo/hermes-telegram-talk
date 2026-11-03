@@ -64,6 +64,8 @@ def readiness(tasks, home, command=None, env=None):
     except Exception as exc:
         return Readiness(False, f"The profile config could not be read ({type(exc).__name__}).")
     approvals = config.get("approvals") or {}
+    if not isinstance(approvals, dict):
+        return Readiness(False, "The profile approvals setting is not a mapping. Talk refuses to start tasks.")
     if str(approvals.get("mode", "manual")).strip().lower() != "manual":
         return Readiness(False, "The profile approval mode is not manual, so a voice task could be approved "
                                 "without the user. Talk refuses to start tasks.")

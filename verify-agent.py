@@ -486,8 +486,12 @@ def voice_disconnect_vs_cancel(model):
         deadline = time.time() + 30
         while not e.native(job_id).pid and time.time() < deadline:
             time.sleep(0.1)
+        from hermes_talk.agent import Readiness
+        ready = e.talk.agent.readiness
+        e.talk.agent.readiness = lambda: Readiness(False, "synthetic: readiness lapsed")
         status, cancelled = e.post("task/cancel", {"conversation_id": conv, "job_id": job_id})
-        assert status == 200, cancelled
+        assert status == 200, f"cancel must not depend on readiness: {cancelled}"
+        e.talk.agent.readiness = ready
         job = e.wait(job_id, conv, vs2, timeout=40)
         native = e.native(job_id)
         from hermes_talk.agent import alive
