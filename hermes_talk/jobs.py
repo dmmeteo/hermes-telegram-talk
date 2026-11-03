@@ -1,8 +1,10 @@
 """Background Hermes tasks started from a voice call: a typed job record and its state machine.
 
 A job is keyed by its voice scope, the provider's delegation item id and the call generation that
-received it. It runs as one native Hermes turn (see agent.py) and is stored in the profile's own
-state.db meta table through SessionDB.get_meta/set_meta, so it survives a Talk restart.
+received it. It runs as one native Hermes turn and is stored in the profile's own state.db meta table
+through SessionDB.get_meta/set_meta, so it survives a Talk restart. The turn is a `hermes chat` process
+(agent.py), or on cores that serve it an admission of the profile's canonical gateway (gateway_rpc.py),
+which a restarted Talk adopts from its durable receipt.
 
 States: accepted -> running -> succeeded | failed | cancelled | interrupted. An accepted job has not
 started a process and may still be started after a restart; a running job whose process is gone is
@@ -66,6 +68,8 @@ class Job:
     pid_start: str = None
     output: str = None
     native_session_id: str = None
+    admission_id: str = None
+    submission_text: str = None
     result: str = ""
     error: str = ""
     cancel_requested: bool = False
@@ -166,6 +170,10 @@ class JobBoard:
             if job is not None:
                 self.jobs[job.id] = job
 
+    @property
+    def gateway(self):
+        return getattr(self.agent, "transport", "cli") == "gateway"
+
     def _save(self, job):
         self.jobs[job.id] = job
         self.history.set_meta(job_key(job.id), dump(job))
@@ -199,7 +207,9 @@ class JobBoard:
             for job in list(self.jobs.values()):
                 if job.state != RUNNING:
                     continue
-                if alive(job.pid, job.pid_start):
+                if self.gateway:
+                    self._adopt_gateway(job)
+                elif alive(job.pid, job.pid_start):
                     self._save(replace(job, notes=job.notes + ("adopted after restart",)))
                     threading.Thread(target=self._watch, args=(job.id, None), daemon=True).start()
                 else:
@@ -243,8 +253,33 @@ class JobBoard:
                     slots -= 1
                     busy.add(job.conversation_id)
 
+    def _adopt_gateway(self, job):
+        """A gateway job outlives Talk: follow its admission, or admit it once if Talk stopped before the receipt."""
+        if not job.native_session_id:
+            self._settle(job.id, restarted=True)  # the session is stored before submission, so nothing was admitted
+            return
+        job = self._save(replace(job, notes=job.notes + ("adopted after restart",)))
+        if not job.admission_id:
+            if not job.submission_text:
+                self._settle(job.id, restarted=True)
+                return
+            try:
+                # The same submission id and text: the gateway returns the earlier admission if it took one.
+                self.agent.submit(job.id, job.native_session_id, job.submission_text,
+                                  lambda **f: self._persist(job.id, **f))
+            except Exception as exc:
+                logger.warning("a task could not be re-adopted from the gateway: %s", type(exc).__name__)
+                return threading.Thread(target=self._watch_gateway, args=(job.id,), daemon=True).start()
+        threading.Thread(target=self._watch_gateway, args=(job.id,), daemon=True).start()
+
+    def _persist(self, job_id, **fields):
+        with self.lock:
+            return self._save(replace(self.jobs[job_id], **fields))
+
     def _launch(self, job):
         """True when a native process now runs the job; otherwise the job has failed and nothing ran."""
+        if self.gateway:
+            return self._launch_gateway(job)
         try:
             prompt, resume = self.prompt_for(job)
         except Exception as exc:
@@ -264,6 +299,48 @@ class JobBoard:
         self._save(replace(job, pid=process.pid, pid_start=process_start(process.pid), output=output))
         threading.Thread(target=self._watch, args=(job.id, process), daemon=True).start()
         return True
+
+    def _launch_gateway(self, job):
+        """True when the gateway admitted the job; otherwise it has failed and nothing was admitted."""
+        try:
+            prompt, resume = self.prompt_for(job)
+        except Exception as exc:
+            self._finish(job.to(FAILED, finished=self.clock(),
+                                error=f"The task could not be prepared ({type(exc).__name__}). Nothing ran."))
+            return False
+        job = self._save(job.to(RUNNING, started=self.clock()))
+        try:
+            self.agent.start(job.id, prompt, resume, lambda **f: self._persist(job.id, **f))
+        except Exception as exc:
+            job = self.jobs[job.id]
+            if job.admission_id is None:
+                # Not admitted under this submission id (a resubmission would return it): nothing ran.
+                self._finish(job.to(FAILED, finished=self.clock(),
+                                    error=f"The Hermes gateway did not take the task ({type(exc).__name__})."))
+                return False
+        if self.jobs[job.id].cancel_requested:
+            threading.Thread(target=self.agent.stop, args=(self.jobs[job.id],), daemon=True).start()
+        threading.Thread(target=self._watch_gateway, args=(job.id,), daemon=True).start()
+        return True
+
+    def _watch_gateway(self, job_id):
+        """Follow the admission until the gateway reports it settled; a lost connection is not an outcome."""
+        timed_out = False
+        while True:
+            job = self.jobs[job_id]
+            if job.state != RUNNING:
+                return
+            if job.admission_id and self.agent.settled(job):
+                break
+            if not timed_out and self.clock() > (job.started or 0) + self.tasks.run_budget_s + 60:
+                timed_out = True
+                threading.Thread(target=self.agent.stop, args=(job,), daemon=True).start()
+            time.sleep(0.5)
+        try:
+            with self.lock:
+                self._settle(job_id, timed_out=timed_out)
+        finally:
+            self.pump()
 
     def _watch(self, job_id, process):
         timed_out = False
@@ -288,7 +365,10 @@ class JobBoard:
         job = self.jobs[job_id]
         if job.state != RUNNING:
             return
-        outcome = read_outcome(job.output) if job.output else None
+        if self.gateway:
+            outcome = self.agent.outcome(job) if job.admission_id else None
+        else:
+            outcome = read_outcome(job.output) if job.output else None
         now = self.clock()
         if outcome is not None and outcome.session_id:
             job = replace(job, native_session_id=outcome.session_id)
@@ -312,7 +392,8 @@ class JobBoard:
         else:
             job = job.to(FAILED, finished=now, error=clip(self.redact(outcome.error or "Hermes reported a failure."), 300))
         self._finish(job, full)
-        self.agent.discard_output(job.output)
+        if not self.gateway:
+            self.agent.discard_output(job.output)
 
     def owned(self, scope, conversation_id, job_id):
         if not isinstance(job_id, str) or not JOB_ID.fullmatch(job_id):
@@ -339,7 +420,8 @@ class JobBoard:
             if job.state != RUNNING or job.cancel_requested:
                 return job
             job = self._save(replace(job, cancel_requested=True))
-        threading.Thread(target=self.agent.stop, args=(job.pid, job.pid_start), daemon=True).start()
+        stop = (self.agent.stop, (job,)) if self.gateway else (self.agent.stop, (job.pid, job.pid_start))
+        threading.Thread(target=stop[0], args=stop[1], daemon=True).start()
         return job
 
     def ack(self, scope, conversation_id, voice_session_id, job_id):

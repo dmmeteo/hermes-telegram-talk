@@ -9,6 +9,7 @@ Script, keyed on the newest user message:
   "recall"        -> the user/assistant turns the agent received, in order
   "slow <s>"      -> wait <s> seconds before answering (cancel/interrupt checks)
   "shell <cmd>"   -> a terminal tool call (approval checks)
+  "slowshell <s> <cmd>" -> wait <s> seconds, then a terminal tool call (no late side effect after a stop)
   "big <n>"       -> a result of about <n> characters between BIG-START and BIG-END markers
   anything else   -> "SCRIPTED-ANSWER: <request>"
 """
@@ -59,6 +60,10 @@ def plan(messages):
         return ("tool", "read_file", {"path": rest.strip()})
     if word == "shell" and rest:
         return ("tool", "terminal", {"command": rest.strip()})
+    if word == "slowshell" and rest:
+        delay, _, command = rest.partition(" ")
+        time.sleep(float(delay))
+        return ("tool", "terminal", {"command": command.strip()})
     if word == "slow":
         time.sleep(float(rest or "5"))
         return ("text", "SCRIPTED-SLOW-DONE")

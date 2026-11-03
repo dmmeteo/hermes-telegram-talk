@@ -11,7 +11,8 @@ import time
 from dataclasses import asdict
 
 from . import activity
-from .agent import NativeAgent, Readiness
+from .agent import Readiness
+from .gateway_rpc import task_agent
 from .config import PRIVATE_NAMES
 from .context import compose, update
 from .jobs import DELEGATION_ID, OPEN, SUCCEEDED, UNDELIVERED, JobBoard
@@ -71,7 +72,7 @@ class TalkRuntime:
         self.clock = clock
         self.board = self.desk = None
         if config.tasks.enabled:
-            self.agent = agent or NativeAgent(config.tasks, home)
+            self.agent = agent or task_agent(config.tasks, home)
             r = config.receipts
             if not r.enabled:
                 history.set_meta(SINCE_KEY, "")  # turning reports back on later reports nothing from this gap

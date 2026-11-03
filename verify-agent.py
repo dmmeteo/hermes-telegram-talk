@@ -3,6 +3,7 @@
 
   python3 verify-agent.py --require-hermes [--receipts DIR]
   python3 verify-agent.py --browser OUT_DIR    Chromium delegation job (real app.js, server and tasks)
+  python3 verify-agent.py --rpc-target SDK [--receipts DIR]   gateway-RPC transport against a pinned core source
 
 Each check runs the real Talk server over HTTP against a disposable HERMES_HOME. Tasks run as real
 `hermes chat` processes from the Hermes runtime (HERMES_TALK_HERMES_PYTHON, else the first
@@ -10,6 +11,10 @@ Each check runs the real Talk server over HTTP against a disposable HERMES_HOME.
 execution, approval policy and SessionDB. Only the inference provider is replaced, by the labelled
 scripted model in tests/agent/scripted_model.py. Nothing calls a paid or live provider. Without a
 runtime the gate prints SKIPPED, and --require-hermes makes that a failure.
+
+--rpc-target runs the same Talk server against a pinned Hermes core source tree (put first on the
+runtime's path) whose public hermes_cli.gateway_client selects the gateway-RPC transport. Each check's
+disposable home gets its own real gateway daemon, started by that client and reaped afterwards.
 """
 import argparse
 import glob
@@ -157,13 +162,49 @@ class Env:
         if board is not None and not keep:
             for job in list(board.jobs.values()):
                 if job.state == "running":
-                    board.agent.stop(job.pid, job.pid_start)
+                    board.agent.stop(job) if board.gateway else board.agent.stop(job.pid, job.pid_start)
             board.wait_idle(20)
+        if board is not None and board.gateway:
+            board.agent.close()
         self.httpd.shutdown()
         self.httpd.server_close()
         self.history.close()
         if not keep:
+            reap_gateways(self.root)
             shutil.rmtree(self.root, ignore_errors=True)
+
+
+def gateway_pids(root):
+    """Gateway daemons a test home under root started (none outside the gateway-RPC mode)."""
+    found = []
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            cmd = (proc / "cmdline").read_bytes().split(b"\0")
+            env = (proc / "environ").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        home = next((v[12:].decode(errors="replace") for v in env if v.startswith(b"HERMES_HOME=")), "")
+        if b"gateway" in cmd and home.startswith(str(root)):
+            found.append(int(proc.name))
+    return found
+
+
+def reap_gateways(root):
+    for sig, grace in ((signal.SIGTERM, 10), (signal.SIGKILL, 5)):
+        pids = gateway_pids(root)
+        for pid in pids:
+            try:
+                os.kill(pid, sig)
+            except OSError:
+                pass
+        deadline = time.time() + grace
+        while pids and time.time() < deadline:
+            pids = gateway_pids(root)
+            time.sleep(0.2)
+        if not pids:
+            return
 
 
 def requests_with(model, text):
@@ -1272,7 +1313,185 @@ CHECKS = (native_tool_roundtrip, background_result_delivery, context_update_inje
           partial_append_recovery, bounded_native_spool)
 
 
-def run_inner(receipts, only):
+def gateway_env(model, **kw):
+    e = Env(model, **kw)
+    assert e.talk.agent.transport == "gateway", "the pinned core's public gateway client selects the RPC transport"
+    return e
+
+
+def rpc_tool_resume_idempotency(model):
+    e = gateway_env(model)
+    try:
+        conv, vs = e.call()
+        marker = "FIXTURE-" + secrets.token_hex(8)
+        fixture = e.work / "fixture.txt"
+        fixture.write_text(marker + "\n")
+        status, body = e.task(conv, vs, f"read {fixture}", "del_rpc_tool")
+        assert status == 200 and body["created"], body
+        job = e.wait(body["job"]["id"], conv, vs)
+        assert job["state"] == "succeeded" and marker in job["result"], job
+        first = e.native(job["id"])
+        assert first.native_session_id and first.admission_id and first.pid is None, first
+        snapshot = e.talk.agent.call("session.resume", session_id=first.native_session_id)
+        tool_rows = [m for m in snapshot["messages"] if m.get("role") == "tool" and marker in str(m.get("content"))]
+        assert tool_rows and not snapshot["running"], "the native session holds the real read_file result"
+        stored = e.history.db.get_session(snapshot["stored_session_id"])
+        assert first.submission_text is None, "the submitted text is dropped once the admission is stored"
+        prompt = e.talk._task_prompt(e.native(job["id"]))[0]
+        again = e.talk.agent.call("prompt.submit", session_id=first.native_session_id, text=prompt,
+                                  submission_id=job["id"], finite=True)
+        assert again["admission_id"] == first.admission_id, "the job id is the gateway's idempotency key"
+        from hermes_cli.gateway_client import GatewayRPCError
+        try:
+            e.talk.agent.call("prompt.submit", session_id=first.native_session_id, text="other text",
+                              submission_id=job["id"], finite=True)
+            raise AssertionError("a reused submission id with other text must be refused")
+        except GatewayRPCError as exc:
+            conflict = str(exc)
+        assert "admission_conflict" in conflict, conflict
+        status, body = e.task(conv, vs, "recall", "del_rpc_recall")
+        second = e.wait(body["job"]["id"], conv, vs)
+        resumed = e.native(second["id"])
+        assert second["state"] == "succeeded" and f"TASK: read {fixture}" in second["result"], second
+        assert resumed.native_session_id == first.native_session_id, "the conversation's tasks resume one session"
+        assert len(requests_with(model, f"TASK: read {fixture}")) == 2, "the first turn ran once, then was recalled"
+        return {"marker": marker, "job": job["id"], "admission": first.admission_id,
+                "native_session": first.native_session_id, "stored_source": (stored or {}).get("source"),
+                "tool_rows": len(tool_rows), "resubmission_admission": again["admission_id"], "conflict": conflict,
+                "resumed_session": resumed.native_session_id, "launch_request": snapshot["info"].get("launch_request")}
+    finally:
+        e.close()
+
+
+def rpc_destructive_denial(model):
+    seen = {}
+    for mode in ("manual", "smart"):
+        e = gateway_env(model, profile_extra=f"approvals:\n  mode: {mode}\n")
+        try:
+            assert e.talk.agent.readiness().ready, e.talk.agent.readiness()
+            conv, vs = e.call()
+            victim = e.work / "precious"
+            victim.mkdir()
+            (victim / "keep.txt").write_text("synthetic\n")
+            _, body = e.task(conv, vs, f"shell rm -rf {victim}", "del_rpc_rm_" + mode)
+            job = e.wait(body["job"]["id"], conv, vs)
+            assert (victim / "keep.txt").exists(), f"{mode}: the unattended task deleted nothing"
+            assert job["state"] == "succeeded" and "BLOCKED" in job["result"], job
+            seen[mode] = job["result"][:300]
+        finally:
+            e.close()
+    for key, value in (("unattended_mode", "approve"), ("single_query_mode", "approve")):
+        e = gateway_env(model, profile_extra=f"approvals:\n  mode: manual\n  {key}: {value}\n")
+        try:
+            assert not e.talk.agent.readiness().ready, key
+        finally:
+            e.close()
+    return {"blocked": seen, "approving_profiles_refused": ["unattended_mode", "single_query_mode"]}
+
+
+def rpc_cancel_no_late_effect(model):
+    e = gateway_env(model)
+    try:
+        conv, vs = e.call()
+        effect = e.work / "late-effect"
+        _, body = e.task(conv, vs, f"slowshell 6 touch {effect}", "del_rpc_cancel")
+        job_id = body["job"]["id"]
+        deadline = time.time() + 60
+        while not requests_with(model, f"TASK: slowshell 6 touch {effect}") and time.time() < deadline:
+            time.sleep(0.1)
+        assert e.native(job_id).admission_id, e.native(job_id)
+        status, cancelled = e.post("task/cancel", {"conversation_id": conv, "job_id": job_id})
+        assert status == 200 and cancelled["job"]["state"] == "running", "cancel is requested, not yet settled"
+        job = e.wait(job_id, conv, vs, timeout=60)
+        assert job["state"] == "cancelled", job
+        native = e.native(job_id)
+        settled = e.talk.agent.call("session.resume", session_id=native.native_session_id, omit_messages=True)
+        receipt = e.talk.agent.call("prompt.receipt", session_id=native.native_session_id,
+                                    admission_id=native.admission_id)
+        assert not settled["running"] and receipt["status"] == "terminal", (settled["running"], receipt)
+        time.sleep(9)
+        assert not effect.exists(), "no tool ran after the stop"
+        return {"job": job_id, "receipt_outcome": receipt["outcome"], "running_after": settled["running"],
+                "late_effect": effect.exists()}
+    finally:
+        e.close()
+
+
+def rpc_budget_timeout(model):
+    e = gateway_env(model, run_budget_seconds=20)
+    try:
+        conv, vs = e.call()
+        effect = e.work / "budget-effect"
+        started = time.time()
+        _, body = e.task(conv, vs, f"slowshell 35 touch {effect}", "del_rpc_budget")
+        job = e.wait(body["job"]["id"], conv, vs, timeout=75)
+        elapsed = time.time() - started
+        assert job["state"] in ("failed", "interrupted"), job
+        native = e.native(job["id"])
+        settled = e.talk.agent.call("session.resume", session_id=native.native_session_id, omit_messages=True)
+        assert not settled["running"]
+        time.sleep(max(0, 38 - (time.time() - started)))
+        assert not effect.exists(), "the stopped run started no tool after its budget"
+        return {"job": job["id"], "state": job["state"], "error": job["error"], "seconds": round(elapsed, 1),
+                "talk_backstop_s": 80, "late_effect": effect.exists()}
+    finally:
+        e.close()
+
+
+def rpc_restart_adoption(model):
+    root = Path(tempfile.mkdtemp(prefix="talk-rpc-restart-"))
+    home, work = root / "profiles" / "synthetic", root / "work"
+    work.mkdir(parents=True)
+    fx.write_home(home)
+    (home / "config.yaml").write_text(model_config(model))
+    data = talk_data(work, receipts={"enabled": False})
+    (root / "talk.yaml").write_text(json.dumps(data))
+    conv, vs = prepare_call(home, data)
+    env = {**os.environ, "HERMES_HOME": str(home), "TG_VOICE_BOT_TOKEN": fx.BOT_TOKEN, "TELEGRAM_PROXY": BLACKHOLE,
+           "TG_VOICE_ALLOWED_USER_IDS": f"{fx.USER_ID},{fx.OTHER_USER_ID}"}
+    port = free_port()
+    procs = [serve(root, port, env)]
+    call = {"initData": init(), "conversation_id": conv, "voice_session_id": vs}
+    try:
+        status, body = request(port, "task", {**call, "delegation_item_id": "del_rpc_r1", "request": "slow 8"})
+        assert status == 200, body
+        job_id = body["job"]["id"]
+        deadline = time.time() + 60
+        while not requests_with(model, "TASK: slow 8") and time.time() < deadline:
+            time.sleep(0.2)
+        procs[0].send_signal(signal.SIGKILL)
+        procs[0].wait(10)
+        running = stored_job(home, job_id)
+        assert running.state == "running" and running.admission_id and running.pid is None, running
+        assert gateway_pids(root), "the gateway keeps the admitted work after Talk dies"
+        procs.append(serve(root, port, env))
+        deadline = time.time() + 90
+        while time.time() < deadline:
+            job = {j["id"]: j for j in request(port, "tasks", {**call, "initData": init()})[1]["jobs"]}[job_id]
+            if job["state"] in TERMINAL:
+                break
+            time.sleep(0.3)
+        adopted = stored_job(home, job_id)
+        assert adopted.state == "succeeded" and "adopted after restart" in adopted.notes, adopted
+        assert "SCRIPTED-SLOW-DONE" in adopted.result, adopted
+        assert len(requests_with(model, "TASK: slow 8")) == 1, "the adopted run was not started twice"
+        return {"job": job_id, "admission": adopted.admission_id, "state": adopted.state, "server_restarts": 1}
+    finally:
+        for p in procs:
+            if p.poll() is None:
+                p.terminate()
+                p.wait(10)
+        reap_gateways(root)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+RPC_CHECKS = (rpc_tool_resume_idempotency, rpc_destructive_denial, rpc_cancel_no_late_effect, rpc_budget_timeout,
+              rpc_restart_adoption, background_result_delivery, persistent_two_call_history, delegation_id_dedup,
+              receipt_ack_no_double_speech, telegram_default_receipt, telegram_alternate_destination,
+              telegram_ambiguous_send, cross_user_denial, unauthenticated_job_denial)
+
+
+def run_inner(receipts, only, rpc_target=None):
     global TELEGRAM
     from scripted_model import ScriptedModel
     from synthetic_telegram import SyntheticTelegram
@@ -1281,7 +1500,10 @@ def run_inner(receipts, only):
     os.environ["TELEGRAM_PROXY"] = BLACKHOLE
     model = ScriptedModel()
     failures = 0
-    selected = [fn for fn in CHECKS if not only or fn.__name__ in only]
+    if rpc_target:
+        import hermes_cli
+        assert Path(hermes_cli.__file__).resolve().is_relative_to(Path(rpc_target).resolve()), hermes_cli.__file__
+    selected = [fn for fn in (RPC_CHECKS if rpc_target else CHECKS) if not only or fn.__name__ in only]
     for fn in selected:
         started = time.time()
         try:
@@ -1340,11 +1562,12 @@ def main():
     parser.add_argument("--require-hermes", action="store_true")
     parser.add_argument("--browser", metavar="OUT_DIR")
     parser.add_argument("--receipts", metavar="DIR")
+    parser.add_argument("--rpc-target", metavar="SDK")
     parser.add_argument("--only", action="append", default=[])
     parser.add_argument("--inner", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.inner:
-        return run_inner(args.receipts, args.only)
+        return run_inner(args.receipts, args.only, args.rpc_target)
     runtime = hermes_python()
     if not runtime:
         print("SKIPPED agent checks: no Hermes runtime found; set HERMES_TALK_HERMES_PYTHON")
@@ -1353,15 +1576,21 @@ def main():
         return run_browser(args.browser, runtime)
     scratch = tempfile.mkdtemp(prefix="talk-agent-gate-")
     try:
-        cmd = [runtime, str(ROOT / "verify-agent.py"), "--inner"]
+        cmd = [runtime, "-B", str(ROOT / "verify-agent.py"), "--inner"]
         cmd += ["--receipts", str(Path(args.receipts).resolve())] if args.receipts else []
         for name in args.only:
             cmd += ["--only", name]
-        result = subprocess.run(cmd, cwd=scratch, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1",
-                                                       "HERMES_HOME": scratch}, timeout=1500)
+        env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "HERMES_HOME": scratch}
+        if args.rpc_target:
+            sdk = Path(args.rpc_target).resolve()
+            cmd += ["--rpc-target", str(sdk)]
+            # A synthetic HOME and temp dir: the pinned source stays read-only and no user state is touched.
+            env.update(PYTHONPATH=str(sdk), HOME=scratch, TMPDIR=scratch)
+        result = subprocess.run(cmd, cwd=scratch, env=env, timeout=1500)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
-    print("TALK_AGENT_OK" if result.returncode == 0 else "TALK_AGENT_FAILED")
+    tag = "TALK_AGENT_RPC_" if args.rpc_target else "TALK_AGENT_"
+    print(tag + ("OK" if result.returncode == 0 else "FAILED"))
     return result.returncode
 
 
