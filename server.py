@@ -448,8 +448,11 @@ def main(argv=None):
         allowed = allowed_ids_from(os.environ.get("TG_VOICE_ALLOWED_USER_IDS"))
     except ValueError as exc:
         parser.error(str(exc))
-    talk = None
+    app = VoiceApp(token, allowed, args.origin, args.base_path)
+    # Bound before any job or report recovery: a second server that cannot serve must not recover anything.
+    server = BoundedServer((args.host, args.port), make_handler(app))
     if args.config:
+        import fcntl
         from hermes_talk.config import load_config
         from hermes_talk.history import NativeHistory
         from hermes_talk.talk import TalkRuntime
@@ -461,9 +464,14 @@ def main(argv=None):
         profile = home_path.name if home_path.parent.name == "profiles" else "default"
         if profile != config.profile_id:
             parser.error(f"profile.id in the Talk config must be {profile!r}, the HERMES_HOME profile")
-        talk = TalkRuntime(config, token, NativeHistory(home), home=home_path)
-    app = VoiceApp(token, allowed, args.origin, args.base_path, talk=talk)
-    server = BoundedServer((args.host, args.port), make_handler(app))
+        lock_dir = home_path / "plugin-data" / "hermes-talk"
+        lock_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        serve_lock = open(lock_dir / "serve.lock", "a")
+        try:
+            fcntl.flock(serve_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            parser.error("another Talk server already serves this profile")
+        app.talk = TalkRuntime(config, token, NativeHistory(home), home=home_path)
     logger.info("serving %s on %s:%s for %s", args.base_path, args.host, args.port, app.origin)
     try:
         server.serve_forever()

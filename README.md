@@ -150,7 +150,8 @@ When `tasks.enabled` is true, the voice model's client delegations become Hermes
 
 Job states are accepted, running, succeeded, failed, cancelled and interrupted. A running job is stored before its
 process starts. A job whose process could not start fails at once and takes no slot, so queued jobs behind it still
-start. After a Talk restart a live process is adopted and finishes normally. A dead one is settled from its
+start. One Talk server serves a profile: `server.py` binds its port and takes `plugin-data/hermes-talk/serve.lock`
+before recovering anything, and a second one exits. After a Talk restart a live process is adopted and finishes normally. A dead one is settled from its
 output record, or marked interrupted and never rerun.
 
 The native process runs behind `hermes_talk/spool.py`, which owns its stdout pipe and keeps only the session event
@@ -188,7 +189,7 @@ formats, chunks and attaches files the way `hermes send` does. Talk stores no to
 Report states are pending, sending, sent, failed and uncertain, separate from the job state and the voice receipt.
 The report and its destination are stored before the send. A send is claimed (pending to sending, stored) first; a
 claim found after a restart becomes uncertain and is not resent. Telegram's sendMessage has no idempotency key, so a
-timeout or any unclassified error is uncertain too, never retried. Only errors that show nothing left (connection
+timeout or any unclassified error is uncertain too, never retried. A send whose attachment upload reported a warning is uncertain too. Only errors that show nothing left (connection
 refused, rate limit) go back to pending, at most `receipts.attempts` times, with the same stored text; the task never
 reruns. A sent report records the Bot API message id.
 

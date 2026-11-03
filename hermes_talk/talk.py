@@ -15,7 +15,7 @@ from .agent import NativeAgent, Readiness
 from .config import PRIVATE_NAMES
 from .context import compose, update
 from .jobs import DELEGATION_ID, OPEN, SUCCEEDED, UNDELIVERED, JobBoard
-from .receipts import DIRECTIVE, Destination, ReportDesk, TelegramSender
+from .receipts import DIRECTIVE, SINCE_KEY, Destination, ReportDesk, TelegramSender
 from .store import SOURCE, TalkError, TalkStore, VoiceScope, clip
 
 logger = logging.getLogger("tg-voice")
@@ -73,6 +73,8 @@ class TalkRuntime:
         if config.tasks.enabled:
             self.agent = agent or NativeAgent(config.tasks, home)
             r = config.receipts
+            if not r.enabled:
+                history.set_meta(SINCE_KEY, "")  # turning reports back on later reports nothing from this gap
             if r.enabled:
                 self.desk = ReportDesk(history, sender or TelegramSender(bot_token, r.send_timeout_s), clock,
                                        home or self.agent.home, r.max_chars, r.attempts, r.backoff_s, redact)
@@ -254,13 +256,20 @@ class TalkRuntime:
         one's stored result ("result of task N")."""
         cancel = CANCEL.match(request) if isinstance(request, str) else None
         recall = RESULT.match(request) if isinstance(request, str) else None
-        account = self._board_for(user_id) if cancel or recall else self._tasks_for(user_id)
+        account = self._board_for(user_id)
         if not isinstance(delegation_item_id, str) or not DELEGATION_ID.fullmatch(delegation_item_id):
             raise TalkError(400, "Malformed delegation id.")
         limit = self.config.tasks.request_chars
         if not isinstance(request, str) or not request.strip() or len(request) > limit:
             raise TalkError(400, f"A task request must be 1..{limit} characters.")
         record = self.store.voice_session(account, conversation_id, voice_session_id, live=True)
+        # A resubmitted delegation (its first response was lost) gets its job back even if readiness changed since.
+        known = self.board.existing(account.key, conversation_id, record.get("generation", 0), delegation_item_id)
+        if known is not None and not (cancel or recall):
+            return {"job": self._public_job(known), "created": False, "channel": "commentary",
+                    "reply": f"This was already sent to Hermes as task {known.number}; it is {known.state}."}
+        if not (cancel or recall):
+            self._tasks_for(user_id)
         if cancel:
             job = self.board.by_number(account.key, conversation_id, int(cancel.group(1)))
             job = self.board.cancel(account.key, conversation_id, job.id)

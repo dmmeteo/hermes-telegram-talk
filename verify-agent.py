@@ -449,6 +449,12 @@ def restart_job_reconciliation(model):
             time.sleep(0.3)
         adopted = stored_job(home, adopted_id)
         assert adopted.state == "succeeded" and "adopted after restart" in adopted.notes, adopted
+        second = subprocess.run([sys.executable, str(ROOT / "server.py"), "--config", str(root / "talk.yaml"),
+                                 "--origin", fx.ORIGIN, "--port", str(free_port())], cwd=root, env=env,
+                                capture_output=True, text=True, timeout=60)
+        assert second.returncode != 0 and "another Talk server already serves this profile" in second.stderr, \
+            second.stderr[-400:]
+        assert stored_job(home, adopted_id) == adopted, "the refused second server recovered nothing"
         assert len(requests_with(model, "TASK: slow 8")) == 1, "the adopted run was not started twice"
 
         status, body = request(port, "task", {**call, "initData": init(), "delegation_item_id": "del_r2",
@@ -469,6 +475,7 @@ def restart_job_reconciliation(model):
         time.sleep(2)
         assert len(requests_with(model, "TASK: slow 60")) == 1, "an interrupted job is never rerun"
         return {"adopted": adopted_id, "adopted_state": adopted.state, "interrupted": lost_id,
+                "second_server_on_profile": "refused before recovery",
                 "interrupted_error": job["error"], "server_restarts": 2}
     finally:
         for p in procs:
@@ -903,7 +910,12 @@ def telegram_ambiguous_send(model):
         time.sleep(1)
         after = stored_report(e, a["job"]["id"])
         assert after.state == "uncertain" and not TELEGRAM.calls, "a restart never resends an uncertain report"
+        from hermes_talk import receipts
+        partial = receipts.classify({"error": "No deliverable text or media remained after processing MEDIA tags",
+                                     "warnings": ["Failed to send media /x/report.md: Timed out"]})
+        assert partial[0] == "uncertain", partial
         return {"timeout": uncertain.state, "hang": hung.error, "chat_not_found": failed.state,
+                "attachment_timeout": partial[0],
                 "refused_then_ok": {"state": retried.state, "attempts": retried.attempts},
                 "exhausted": exhausted.error, "after_restart_calls": 0,
                 "policy": "only refused/rate-limited sends retry, at most receipts.attempts times"}
@@ -958,6 +970,13 @@ def telegram_restart_dedup(model):
         e = Env(model, root=root)
         time.sleep(1)
         assert not TELEGRAM.calls, "a second restart sends nothing"
+        since = e.talk.desk.since
+        e.close(keep=True)
+        e = Env(model, root=root, receipts={"enabled": False})
+        assert e.talk.desk is None and e.history.get_meta(receipts.SINCE_KEY) == ""
+        e.close(keep=True)
+        e = Env(model, root=root)
+        assert e.talk.desk.since > since and not TELEGRAM.calls, "re-enabling reports does not report the gap"
         return {"duplicate_completion_sends": 1, "crash_mid_send": "uncertain, not resent",
                 "pending_after_restart": "sent once", "terminal_without_report": "reported once",
                 "finished_before_reports_existed": "no report", "second_restart_sends": 0}
@@ -1112,8 +1131,13 @@ def ambiguous_task_submission(model):
             time.sleep(0.05)
         accepted = list(e.talk.board.jobs.values())
         assert len(accepted) == 1 and accepted[0].delegation_id == "del_lost", "the dropped response's task was accepted"
+        from hermes_talk.agent import Readiness
+        ready = e.talk.agent.readiness
+        e.talk.agent.readiness = lambda: Readiness(False, "synthetic: readiness lapsed")
         status, again = e.task(conv, vs, unique, "del_lost")
-        assert status == 200 and not again["created"] and again["job"]["id"] == accepted[0].id, again
+        e.talk.agent.readiness = ready
+        assert status == 200 and not again["created"] and again["job"]["id"] == accepted[0].id, \
+            f"a resubmission finds its job even when readiness lapsed: {again}"
         e.wait(accepted[0].id, conv, vs)
         assert len(requests_with(model, "TASK: " + unique)) == 1, "resubmitting the same delegation ran nothing twice"
         return {"server": {"response_dropped_after_accept": True, "resubmitted_created": again["created"],
@@ -1131,7 +1155,7 @@ def bounded_native_spool(model):
     from hermes_talk.agent import NativeAgent
     fixture = ROOT / "tests" / "agent" / "noisy_native.py"
     results = {}
-    for mode in ("flood", "oversized"):
+    for mode in ("flood", "oversized", "wide"):
         e = Env(model)
         try:
             agent = NativeAgent(e.config.tasks, e.home, command=[sys.executable, str(fixture)],
@@ -1158,7 +1182,11 @@ def bounded_native_spool(model):
             assert not Path(job.output).exists(), "the spool is removed once the job is stored"
             report = settled_report(e, job_id)
             attached = Path(TELEGRAM.calls[-1]["media"][0]).read_text() if TELEGRAM.calls[-1]["media"] else ""
-            assert "NOISY-RESULT-END" in attached, "the large final result is kept whole for the report"
+            if mode == "wide":
+                assert "ж" * 1000 in attached and "more characters of this result were not kept" in attached, \
+                    "a 1.4 MB non-ASCII result is cut at 1 MiB and marked, not lost"
+            else:
+                assert "NOISY-RESULT-END" in attached, "the large final result is kept whole for the report"
             results[mode] = {"spool_peak_bytes": peak, "stdout_bytes": "about 24 MiB" + (" plus a 9 MiB line" if mode == "oversized" else ""),
                              "artifact_bytes": artifact.stat().st_size, "result_kept": True, "report": report.state}
         finally:

@@ -4,7 +4,7 @@
 
 The command inherits this process's stdin (the task prompt) and its process group, so it outlives
 the Talk server like before. Only its stdout passes through here: the session event and the final
-result event are kept (the result text up to TEXT_MAX characters, marked when cut), every other
+result event are kept (the result text up to TEXT_MAX UTF-8 bytes, marked when cut), every other
 line is counted and dropped. OUTPUT is rewritten atomically and never grows past a few MiB, however
 much the run prints. Files the run itself writes are not limited. The exit code is the command's.
 """
@@ -19,12 +19,21 @@ TEXT_MAX = 1024 * 1024
 ERROR_MAX = 4000
 
 
+def cut(text, limit):
+    """text within limit UTF-8 bytes, never splitting a character; (kept, characters dropped)."""
+    raw = text.encode("utf-8", "replace")
+    if len(raw) <= limit:
+        return text, 0
+    kept = raw[:limit].decode("utf-8", "ignore")
+    return kept, len(text) - len(kept)
+
+
 def write(path, record):
     tmp = f"{path}.tmp"
-    with open(tmp, "w", encoding="utf-8") as handle:
+    with open(tmp, "w", encoding="utf-8", errors="replace") as handle:
         for key in ("system", "result", "spool"):
             if record.get(key) is not None:
-                handle.write(json.dumps(record[key]) + "\n")
+                handle.write(json.dumps(record[key], ensure_ascii=False) + "\n")
     os.replace(tmp, path)
 
 
@@ -41,11 +50,11 @@ def keep(record, raw):
         record["system"] = {"type": "system", "session_id": str(event["session_id"])}
         return True
     if event.get("type") == "result":
-        text = str(event.get("text") or "")
-        kept = {"type": "result", "exit_code": event.get("exit_code"), "text": text[:TEXT_MAX],
-                "error": str(event.get("error") or "")[:ERROR_MAX], "session_id": str(event.get("session_id") or "")}
-        if len(text) > TEXT_MAX:
-            kept["text_cut"] = len(text) - TEXT_MAX
+        text, dropped = cut(str(event.get("text") or ""), TEXT_MAX)
+        kept = {"type": "result", "exit_code": event.get("exit_code"), "text": text,
+                "error": cut(str(event.get("error") or ""), ERROR_MAX)[0], "session_id": str(event.get("session_id") or "")}
+        if dropped:
+            kept["text_cut"] = dropped
         record["result"] = kept
         return True
     return False

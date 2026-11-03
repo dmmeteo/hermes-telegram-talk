@@ -114,6 +114,9 @@ def classify(result):
         return SENT, str(result.get("message_id") or ""), "; ".join(result.get("warnings") or [])[:300]
     error = str((result or {}).get("error") if isinstance(result, dict) else result or "no result")[:300]
     lowered = error.lower()
+    if isinstance(result, dict) and result.get("warnings"):
+        # Part of the send (an attachment upload) failed in a way that may still have reached Telegram.
+        return UNCERTAIN, None, (error + "; " + "; ".join(map(str, result["warnings"])))[:300]
     if any(m in lowered for m in NOT_SENT_FINAL):
         return FAILED, None, error
     if any(m in lowered for m in NOT_SENT_RETRYABLE):
@@ -189,7 +192,8 @@ class ReportDesk:
             if full is not None:
                 self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
                 path = self.dir / f"hermes-task-{job.number}-{job.id[-8:]}.md"
-                path.write_text(f"# Hermes task {job.number}\n\nRequest: {job.request}\n\n{full}\n", encoding="utf-8")
+                path.write_text(f"# Hermes task {job.number}\n\nRequest: {self.redact(job.request)}\n\n{full}\n",
+                                encoding="utf-8", errors="replace")
                 attachment = str(path)
             destination = job.report_to or asdict(Destination.private(int(job.scope.rsplit(":", 1)[1]),
                                                                       job.scope.rsplit(":", 2)[1][2:]))

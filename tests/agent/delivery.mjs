@@ -94,6 +94,26 @@ test('ambiguous_task_submission', 'a definitive refusal is said once as not exec
   assert.equal(f.timers.length, 0);
   assert.equal(f.run('posts.length'), 1);
 });
+test('ambiguous_task_submission', 'a refusal of the resubmission is not a non-execution claim', async () => {
+  const f = fixture();
+  f.run(`replies.task = [new Error('Network error.'), failure(503)];
+    emit({type: 'delegation.created', item: {type: 'delegation', id: 'del_r503', target: 'client', content: [{type: 'input_text', text: 'x'}]}});`);
+  await f.settle(); await f.fire(1000);
+  const said = f.run('texts().join(" | ")');
+  assert.match(said, /not confirmed whether Hermes received this task/);
+  assert.ok(!said.includes('Nothing was executed'), said);
+});
+test('ambiguous_task_submission', 'cancel and result replies about another task are spoken, not treated as unconfirmed', async () => {
+  const f = fixture();
+  f.run(`replies.task = [{job: {id: 'jb_${'c'.repeat(24)}', delegation_item_id: 'del_original', number: 1}, created: false,
+      channel: 'speakable', reply: 'Hermes task 1 (synthetic) finished. Result: STORED-RESULT'}];
+    emit({type: 'delegation.created', item: {type: 'delegation', id: 'del_recall', target: 'client', content: [{type: 'input_text', text: 'result of task 1'}]}});`);
+  await f.settle();
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(sent.map(m => [m.delegation_item_id, m.channel, m.content[0].text]))')),
+    [['del_recall', 'speakable', 'Hermes task 1 (synthetic) finished. Result: STORED-RESULT']]);
+  assert.equal(f.run('posts.filter(p => p.route === "task").length'), 1);
+  assert.equal(f.run('current.jobs.size'), 0, 'the named job is not adopted for this delegation');
+});
 test('partial_append_recovery', 'a closed channel queues nothing and acks nothing; the next open poll delivers once', async () => {
   const f = fixture();
   f.run(`current.jobs.set('${job().id}', 'del_1'); current.delegations.add('del_1'); channel.readyState = 'closing';

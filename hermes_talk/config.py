@@ -172,7 +172,7 @@ def _receipts(data, tasks):
         destinations.append(ReportDestination(name, int(match.group(1)),
                                               int(match.group(2)) if match.group(2) else None, tuple(users)))
     return Receipts(enabled=True, destinations=tuple(destinations),
-                    max_chars=_int(data.get("max_chars", 700), "receipts.max_chars", 200, 3500),
+                    max_chars=_int(data.get("max_chars", 700), "receipts.max_chars", 200, 1800),
                     attempts=_int(data.get("attempts", 3), "receipts.attempts", 1, 5))
 
 

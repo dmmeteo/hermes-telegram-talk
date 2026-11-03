@@ -302,19 +302,21 @@ async function delegate(current, item) {
       if (REFUSED.includes(error.status)) refused = error;
     }
     if (call !== current) return;
-    if (refused) {
+    // A refusal of a resubmission does not show that the first, unanswered submission did not run.
+    if (refused && attempt === 0) {
       append(current, `Hermes could not take this task. ${refused.serverMessage || refused.message} Nothing was executed.`,
         "speakable", item.id);
       return;
     }
-    if (data && typeof data.reply === "string" && data.job?.delegation_item_id === item.id) {
-      current.jobs.set(data.job.id, item.id);
+    if (data && typeof data.reply === "string" && typeof data.job?.id === "string") {
+      // "cancel task N" and "result of task N" answer with the job they name, not one for this delegation.
+      if (data.job.delegation_item_id === item.id) current.jobs.set(data.job.id, item.id);
       append(current, data.reply, data.channel === "speakable" ? "speakable" : "commentary", item.id);
       schedulePoll(current, 500);
       return;
     }
     if (attempt === 0) append(current, "Checking whether Hermes received this task.", "commentary", item.id);
-    if (attempt >= 2) {
+    if (attempt >= 2 || refused) {
       append(current, "It is not confirmed whether Hermes received this task. If it did, its result will still arrive "
         + "here or in Telegram. Do not say that it ran or that nothing ran.", "speakable", item.id);
       schedulePoll(current, 500);

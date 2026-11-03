@@ -23,7 +23,8 @@ CHILD_ENV_DROP = ("TG_VOICE_BOT_TOKEN", "TG_VOICE_ALLOWED_USER_IDS", "HERMES_YOL
                   "HERMES_INTERACTIVE", "HERMES_SESSION_SOURCE")
 APPROVING = {"approve", "off", "allow", "yes", "true"}
 CANCEL_GRACE_S = 8.0
-OUTPUT_MAX_BYTES = 4 * 1024 * 1024
+# Above the largest line spool.py writes (1 MiB of text, at most 6 bytes per character once JSON-escaped).
+OUTPUT_MAX_BYTES = 8 * 1024 * 1024
 SPOOL = Path(__file__).resolve().parent / "spool.py"
 
 
@@ -129,8 +130,8 @@ def read_outcome(path):
     except OSError:
         return None
     if result is None:
-        return Outcome(1, "", "The run's final output line exceeded the spool limit.", session_id, 0, oversized) \
-            if oversized else None
+        return Outcome(1, "", f"The run ended without a readable final result; {oversized} output line(s) exceeded "
+                              "the spool limit.", session_id, 0, oversized) if oversized else None
     code = result.get("exit_code")
     return Outcome(exit_code=code if type(code) is int else 1, text=str(result.get("text") or ""),
                    error=str(result.get("error") or ""), session_id=str(result.get("session_id") or session_id),
@@ -160,11 +161,12 @@ class NativeAgent:
         """Start the native run behind its spool; returns (process, output path). The caller persists the pid."""
         self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         output = self.dir / f"{job_id}.jsonl"
+        data = prompt.encode("utf-8", "replace")
         process = subprocess.Popen([sys.executable, str(SPOOL), str(output), "--", *self.argv(resume)],
                                    cwd=str(self.tasks.workdir), env=self.env, stdin=subprocess.PIPE,
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         try:
-            process.stdin.write(prompt.encode("utf-8"))
+            process.stdin.write(data)
         except OSError:
             pass
         finally:

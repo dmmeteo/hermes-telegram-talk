@@ -13,6 +13,7 @@ The chat report of a finished job is a third, separate state (receipts.py); repo
 destination bound when the job was accepted.
 """
 import json
+import logging
 import re
 import secrets
 import threading
@@ -21,6 +22,8 @@ from dataclasses import asdict, dataclass, field, replace
 
 from .agent import alive, process_start, read_outcome
 from .store import TalkError, clip
+
+logger = logging.getLogger("tg-voice")
 
 ACCEPTED, RUNNING, SUCCEEDED, FAILED, CANCELLED, INTERRUPTED = (
     "accepted", "running", "succeeded", "failed", "cancelled", "interrupted")
@@ -174,8 +177,11 @@ class JobBoard:
         self.handles.pop(job.id, None)
         job = self._save(job)
         if self.desk is not None:
-            self.desk.prepare(job, job.error if full is None else full)
-            self.desk.dispatch(job.id)
+            try:
+                self.desk.prepare(job, job.error if full is None else full)
+                self.desk.dispatch(job.id)
+            except Exception as exc:  # the job's own outcome is stored; a report failure must not strand the queue
+                logger.warning("report for a finished task could not be prepared: %s", type(exc).__name__)
         return job
 
     def reconcile(self):
@@ -184,7 +190,10 @@ class JobBoard:
             with self.lock:
                 for job in self.jobs.values():
                     if job.terminal and self.desk.get(job.id) is None and (job.finished or 0) >= self.desk.since:
-                        self.desk.prepare(job, job.result if job.state == SUCCEEDED else job.error)
+                        try:
+                            self.desk.prepare(job, job.result if job.state == SUCCEEDED else job.error)
+                        except Exception as exc:
+                            logger.warning("report for a finished task could not be prepared: %s", type(exc).__name__)
             self.desk.reconcile()
         with self.lock:
             for job in list(self.jobs.values()):
@@ -196,6 +205,12 @@ class JobBoard:
                 else:
                     self._settle(job.id, restarted=True)
         self.pump()
+
+    def existing(self, scope, conversation_id, generation, delegation_id):
+        """The job a delegation of this call already created, if any."""
+        with self.lock:
+            job = self.jobs.get(self.history.get_meta(delegation_key(scope, conversation_id, generation, delegation_id)) or "")
+        return job if job is not None and job.scope == scope and job.conversation_id == conversation_id else None
 
     def submit(self, scope, conversation_id, voice_session_id, generation, delegation_id, request, report_to=None):
         """(job, created). A repeated delegation of the same call returns its existing job and starts nothing."""
@@ -263,9 +278,11 @@ class JobBoard:
                 timed_out = True
                 threading.Thread(target=self.agent.stop, args=(job.pid, job.pid_start), daemon=True).start()
             time.sleep(0.25)
-        with self.lock:
-            self._settle(job_id, timed_out=timed_out)
-        self.pump()
+        try:
+            with self.lock:
+                self._settle(job_id, timed_out=timed_out)
+        finally:
+            self.pump()
 
     def _settle(self, job_id, timed_out=False, restarted=False):
         job = self.jobs[job_id]
