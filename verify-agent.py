@@ -13,6 +13,7 @@ runtime the gate prints SKIPPED, and --require-hermes makes that a failure.
 """
 import argparse
 import glob
+import hashlib
 import http.client
 import json
 import os
@@ -695,6 +696,74 @@ def limits_and_approvals(model):
             "child_env": "no HERMES_YOLO_MODE, bot token or allowlist", "auto_approving_profile": 503}
 
 
+# The target profile's approvals shape: smart, with single_query_mode left at the native default (deny).
+SMART_APPROVALS = "approvals:\n  mode: smart\n  timeout: 60\n  cron_mode: deny\n"
+GUARDIAN_PROMPT = "You are a security reviewer for an AI coding agent."
+
+
+def smart_approval_profile(model):
+    # The smart classifier's auxiliary call is routed to the scripted model, so any classifier run is recorded.
+    guardian = (f"auxiliary:\n  approval:\n    provider: custom\n    model: scripted-deterministic-model\n"
+                f"    base_url: {model.base_url}\n    api_key: synthetic-local-key\n")
+    e = Env(model, profile_extra=SMART_APPROVALS + guardian)
+    config = e.home / "config.yaml"
+    before = hashlib.sha256(config.read_bytes()).hexdigest()
+
+    def guardian_calls():
+        with model.lock:
+            seen = model.requests + model.title_requests
+        return sum(1 for messages in seen if any(GUARDIAN_PROMPT in str(m.get("content")) for m in messages))
+
+    try:
+        assert e.talk.agent.readiness().ready, e.talk.agent.readiness()
+        conv, vs = e.call()
+        assert e.post("bootstrap", {})[1]["tasks"] == {"available": True}, "a smart profile offers tasks"
+        victim = e.work / "victim"
+        victim.mkdir()
+        (victim / "keep.txt").write_text("keep")
+        guardian_before = guardian_calls()
+        _, body = e.task(conv, vs, f"shell rm -rf {victim}")
+        blocked = e.wait(body["job"]["id"], conv, vs)
+        assert blocked["state"] == "succeeded" and "BLOCKED" in blocked["result"], blocked
+        assert "single-query mode (-q) runs without a user present" in blocked["result"], blocked
+        assert (victim / "keep.txt").read_text() == "keep", "the flagged command never ran"
+        assert guardian_calls() == guardian_before, "the smart classifier was not consulted"
+        control = subprocess.run([sys.executable, "-c", "from tools.approval_smart import _smart_approve;"
+                                  "print(_smart_approve('rm -rf /nonexistent-talk-probe', 'recursive delete'))"],
+                                 env=e.talk.agent.env, cwd=str(e.work),
+                                 capture_output=True, text=True, timeout=120)
+        assert guardian_calls() == guardian_before + 1, ("control: a direct classifier call reaches the scripted "
+                                                         f"model, so a hidden one would be seen: {control.stderr[-400:]}")
+        after = hashlib.sha256(config.read_bytes()).hexdigest()
+        assert after == before, "the profile config is unchanged"
+    finally:
+        e.close()
+    refused = {}
+    e = Env(model)
+    try:
+        conv, vs = e.call()
+        for name, approvals in (("off", "mode: 'off'"), ("yaml_off", "mode: off"), ("unknown", "mode: auto"),
+                                ("bool_true", "mode: true"), ("smart_sq_approve", "mode: smart\n  single_query_mode: approve"),
+                                ("smart_sq_off", "mode: smart\n  single_query_mode: 'off'"), ("not_mapping", None)):
+            block = "approvals: [smart]\n" if approvals is None else f"approvals:\n  {approvals}\n"
+            (e.home / "config.yaml").write_text(model_config(model, block))
+            readiness = e.talk.agent.readiness()
+            assert not readiness.ready, (name, readiness)
+            refused[name] = readiness.reason
+        status, body = e.task(conv, vs, "shell echo hi")
+        assert status == 503 and not e.talk.board.jobs, body
+        for name, approvals in (("manual", "approvals:\n  mode: manual\n"), ("default", "")):
+            (e.home / "config.yaml").write_text(model_config(model, approvals))
+            assert e.talk.agent.readiness().ready, name
+    finally:
+        e.close()
+    return {"smart_ready": True, "dangerous_single_query_denied": "BLOCKED by native single-query deny; target kept",
+            "blocked_result": blocked["result"][:400], "smart_classifier_calls_during_task": 0,
+            "classifier_control_calls": 1, "classifier_control_verdict": control.stdout.strip()[-40:],
+            "profile_config_sha256": {"before": before, "after": after}, "refused": refused,
+            "manual_and_default_ready": True, "unsafe_mode_task_status": status}
+
+
 def receipt_ack_no_double_speech(model):
     e = Env(model)
     try:
@@ -1197,7 +1266,7 @@ def bounded_native_spool(model):
 CHECKS = (native_tool_roundtrip, background_result_delivery, context_update_injection, persistent_two_call_history,
           pulse_visibility_and_cursor, cross_user_denial, cross_profile_denial, restart_job_reconciliation,
           voice_disconnect_vs_cancel, delegation_id_dedup, plugin_native_install, unauthenticated_job_denial,
-          limits_and_approvals, receipt_ack_no_double_speech, telegram_default_receipt,
+          limits_and_approvals, smart_approval_profile, receipt_ack_no_double_speech, telegram_default_receipt,
           telegram_alternate_destination, telegram_closed_call_delivery, telegram_ambiguous_send,
           telegram_restart_dedup, queue_start_failure, large_old_unread_result, ambiguous_task_submission,
           partial_append_recovery, bounded_native_spool)

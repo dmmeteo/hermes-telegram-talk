@@ -5,7 +5,7 @@
     "LICENSES/CONDUIT-LICENSE": "0d4605059a86488f24fae7601a404abe36d305d6b56d7f5e01225507c8c8e3b0",
     "hermes_talk/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "hermes_talk/activity.py": "cbaf19fcbba7f0a527b161ca66b7cbf0e22756b59eba48d51b4ee682801a9776",
-    "hermes_talk/agent.py": "d55a86b59687dfc0f95ccf5ba0cc7121c1a62d8e03243a73554bc815623d7398",
+    "hermes_talk/agent.py": "ad3317848c6f0ebaafb1bdc3b973d7db8dc466eb4b2fabee63df6c0a73899167",
     "hermes_talk/assets/avatar.svg": "23c225ebdc39efb2bdb7d06296ae03596af5fae603c3de30b185d096057bbc5b",
     "hermes_talk/config.py": "fc780df2ed9c41f29e08dd26f36c958ea7a4e0c03d128fbc684f4a711f3aaecd",
     "hermes_talk/context.py": "197e42571064304a97dd0f8c3863b821e413aaa08115a59d162215dd27022119",

@@ -4,8 +4,10 @@ The process is the profile's own CLI agent under the same HERMES_HOME, so it loa
 model, provider, toolsets, skills, memory and approval policy itself. Talk adds no tool and no
 approval path. Single-query mode has nobody to answer an approval, and Hermes blocks flagged actions
 there unless the profile set approvals.single_query_mode: approve; readiness() refuses that and any
-other bypass. Output goes to a per-job file, so a job keeps running across a Talk restart and is
-adopted, or reconciled from its file, afterwards.
+other bypass. Hermes resolves that single-query deny before its smart classifier, so approvals.mode
+manual and smart deny flagged actions alike here; off and unrecognised modes are refused. Output goes
+to a per-job file, so a job keeps running across a Talk restart and is adopted, or reconciled from
+its file, afterwards.
 """
 import json
 import os
@@ -22,6 +24,7 @@ CHILD_ENV_DROP = ("TG_VOICE_BOT_TOKEN", "TG_VOICE_ALLOWED_USER_IDS", "HERMES_YOL
                   "HERMES_EXEC_ASK", "HERMES_GATEWAY_SESSION", "HERMES_SESSION_PLATFORM", "HERMES_CRON_SESSION",
                   "HERMES_INTERACTIVE", "HERMES_SESSION_SOURCE")
 APPROVING = {"approve", "off", "allow", "yes", "true"}
+TASK_APPROVAL_MODES = {"manual", "smart"}
 CANCEL_GRACE_S = 8.0
 # Above the largest line spool.py writes (1 MiB of text, at most 6 bytes per character once JSON-escaped).
 OUTPUT_MAX_BYTES = 8 * 1024 * 1024
@@ -70,9 +73,10 @@ def readiness(tasks, home, command=None, env=None):
     approvals = config.get("approvals") or {}
     if not isinstance(approvals, dict):
         return Readiness(False, "The profile approvals setting is not a mapping. Talk refuses to start tasks.")
-    if str(approvals.get("mode", "manual")).strip().lower() != "manual":
-        return Readiness(False, "The profile approval mode is not manual, so a voice task could be approved "
-                                "without the user. Talk refuses to start tasks.")
+    mode = approvals.get("mode", "manual")
+    if not isinstance(mode, str) or mode.strip().lower() not in TASK_APPROVAL_MODES:
+        return Readiness(False, "The profile approval mode is not manual or smart, so a voice task could be "
+                                "approved without the user. Talk refuses to start tasks.")
     if str(approvals.get("single_query_mode", "deny")).strip().lower() in APPROVING:
         return Readiness(False, "The profile auto-approves flagged actions in single-query runs. "
                                 "Talk refuses to start tasks.")

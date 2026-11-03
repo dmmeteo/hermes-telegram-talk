@@ -164,8 +164,9 @@ cancel` and a spoken "cancel task N" delegation do.
 
 Readiness is checked on every bootstrap and task. Tasks are unavailable, and the voice is told it cannot start work,
 unless the profile has a model, every `tasks.toolsets` name exists, the Hermes command is installed, approvals are
-`manual`, and `approvals.single_query_mode` is not approving. In single-query mode Hermes itself blocks every flagged
-action with nobody to approve it; Talk adds no approval path and never passes `--yolo`. Full tool parity with an
+`manual` or `smart`, and `approvals.single_query_mode` is not approving. In single-query mode Hermes itself blocks every
+flagged action with nobody to approve it, before any smart classifier runs, so `smart` behaves like `manual` for tasks;
+`off` and unrecognised modes are refused. Talk adds no approval path and never passes `--yolo`. Full tool parity with an
 attended chat is not claimed: anything that needs approval fails and the result says so.
 
 ### Task reports in Telegram
