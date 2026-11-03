@@ -1491,8 +1491,110 @@ def rpc_restart_adoption(model):
         shutil.rmtree(root, ignore_errors=True)
 
 
+def _fault(agent, inject):
+    """Wrap the real client's calls: inject(method, params, real) decides; the pinned gateway itself is untouched."""
+    real = agent.call
+
+    def call(method, timeout=30.0, **params):
+        return inject(method, params, lambda: real(method, timeout, **params))
+    agent.call = call
+    return real
+
+
+def rpc_lost_admission_ack(model):
+    """The real gateway admits the prompt, then the acknowledgement is lost: Talk reconciles the same admission."""
+    e = gateway_env(model)
+    try:
+        seen = {}
+
+        def inject(method, params, real):
+            if method == "prompt.submit" and "lost" not in seen:
+                seen["lost"] = real()  # the pinned gateway really admits it
+                e.talk.agent.close()  # the connection drops before the answer arrives
+                raise ConnectionResetError("synthetic: acknowledgement lost after admission")
+            if method == "prompt.submit":
+                seen.setdefault("resubmissions", []).append(params["submission_id"])
+            return real()
+        _fault(e.talk.agent, inject)
+        conv, vs = e.call()
+        _, body = e.task(conv, vs, "slow 4", "del_rpc_lost_ack")
+        job_id = body["job"]["id"]
+        assert body["created"] and body["job"]["state"] in ("accepted", "running"), body
+        assert seen["lost"].get("admission_id"), "the real gateway admitted the prompt before the loss"
+        job = e.wait(job_id, conv, vs, timeout=90)
+        native = e.native(job_id)
+        assert job["state"] == "succeeded" and "SCRIPTED-SLOW-DONE" in job["result"], job
+        assert native.admission_id == seen["lost"]["admission_id"], "the same admission was reconciled, not a new one"
+        assert seen.get("resubmissions") and set(seen["resubmissions"]) == {job_id}, seen
+        assert len(requests_with(model, "TASK: slow 4")) == 1, "the admitted run ran once"
+        return {"job": job_id, "admission": native.admission_id, "lost_ack_admission": seen["lost"]["admission_id"],
+                "resubmissions": len(seen["resubmissions"]), "native_runs": 1, "state": job["state"]}
+    finally:
+        e.close()
+
+
+def rpc_genuine_refusal(model):
+    """A gateway answer that refuses the submission still fails the task, and nothing ran."""
+    e = gateway_env(model)
+    try:
+        def inject(method, params, real):
+            if method == "prompt.submit":
+                params["session_id"] = "synthetic-unknown-session"  # the real gateway refuses this
+            return real()
+        _fault(e.talk.agent, inject)
+        conv, vs = e.call()
+        _, body = e.task(conv, vs, "slow 1 refused", "del_rpc_refused")
+        job = e.wait(body["job"]["id"], conv, vs, timeout=60)
+        assert job["state"] == "failed" and "did not take" in job["error"], job
+        assert not requests_with(model, "TASK: slow 1 refused"), "nothing ran"
+        return {"job": job["id"], "state": job["state"], "error": job["error"]}
+    finally:
+        e.close()
+
+
+def rpc_stop_survives_outage(model):
+    """A cancel whose stop requests hit a transport outage is retried; the run stops with no late effect."""
+    e = gateway_env(model)
+    try:
+        outage = {"until": 0.0, "failed": []}
+
+        def inject(method, params, real):
+            if time.time() < outage["until"]:
+                outage["failed"].append(method)
+                e.talk.agent.close()
+                raise ConnectionResetError("synthetic: gateway unreachable")
+            return real()
+        _fault(e.talk.agent, inject)
+        conv, vs = e.call()
+        effect = e.work / "outage-effect"
+        _, body = e.task(conv, vs, f"slowshell 14 touch {effect}", "del_rpc_outage")
+        job_id = body["job"]["id"]
+        deadline = time.time() + 60
+        while not requests_with(model, f"TASK: slowshell 14 touch {effect}") and time.time() < deadline:
+            time.sleep(0.1)
+        assert e.native(job_id).admission_id, e.native(job_id)
+        outage["until"] = time.time() + 4
+        status, cancelled = e.post("task/cancel", {"conversation_id": conv, "job_id": job_id})
+        assert status == 200 and cancelled["job"]["state"] == "running", cancelled
+        job = e.wait(job_id, conv, vs, timeout=60)
+        assert outage["failed"], "the stop met the outage"
+        assert job["state"] == "cancelled", job
+        native = e.native(job_id)
+        settled = e.talk.agent.call("session.resume", session_id=native.native_session_id, omit_messages=True)
+        receipt = e.talk.agent.call("prompt.receipt", session_id=native.native_session_id,
+                                    admission_id=native.admission_id)
+        assert not settled["running"] and receipt["status"] == "terminal", (settled["running"], receipt)
+        time.sleep(16)
+        assert not effect.exists(), "no tool ran after the recovered stop"
+        return {"job": job_id, "failed_during_outage": sorted(set(outage["failed"])), "receipt_outcome": receipt["outcome"],
+                "running_after": settled["running"], "late_effect": effect.exists()}
+    finally:
+        e.close()
+
+
 RPC_CHECKS = (rpc_tool_resume_idempotency, rpc_destructive_denial, rpc_cancel_no_late_effect, rpc_budget_timeout,
-              rpc_restart_adoption, background_result_delivery, persistent_two_call_history, delegation_id_dedup,
+              rpc_restart_adoption, rpc_lost_admission_ack, rpc_genuine_refusal, rpc_stop_survives_outage,
+              background_result_delivery, persistent_two_call_history, delegation_id_dedup,
               receipt_ack_no_double_speech, telegram_default_receipt, telegram_alternate_destination,
               telegram_ambiguous_send, cross_user_denial, unauthenticated_job_denial)
 

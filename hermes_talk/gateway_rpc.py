@@ -15,9 +15,13 @@ from HERMES_HOME, never from a request. Talk adds no tool, approval path or poli
   `unattended`, which on these cores is the `hermes -z` contract that auto-approves flagged actions,
   and readiness refuses a profile that would approve them.
 - `prompt.receipt` is the durable admission state that a watcher, and a restarted Talk, follow.
+- A submission whose answer was lost (a transport error, not a gateway refusal) is unknown, not refused:
+  the job keeps its stored session and text and resubmits exactly them under the same id, which returns
+  the admission the gateway took, if any. Only the gateway's own refusal (`AdmissionRefused`) fails it.
 - Stop is `prompt.cancel` while queued and `session.interrupt` once started. A job counts as stopped only
   when the receipt is terminal and the session no longer runs, never because a request was accepted or
-  the client lost its connection.
+  the client lost its connection. `stop` says whether its requests reached the gateway, so the watcher
+  retries a persisted cancel or deadline after an outage.
 
 A gateway error fails or delays the task; it never falls back to a local process.
 """
@@ -31,6 +35,11 @@ from .agent import APPROVING, TASK_APPROVAL_MODES, Outcome, Readiness, _profile_
 TRANSPORT = "gateway"
 RPC_TIMEOUT_S = 30.0
 INTERRUPTED_OUTCOMES = frozenset({"cancelled", "interrupted", "terminated"})
+
+
+class AdmissionRefused(RuntimeError):
+    """The gateway itself answered that it did not take the submission (unlike a lost answer)."""
+    refused = True
 
 
 def client_available():
@@ -201,9 +210,15 @@ class GatewayAgent:
         return self.submit(job_id, session_id, prompt, persist)
 
     def submit(self, job_id, session_id, prompt, persist):
-        receipt = self.call("prompt.submit", session_id=session_id, text=prompt, submission_id=job_id, finite=True)
+        """Raises AdmissionRefused on the gateway's own refusal; any other error leaves the admission unknown."""
+        from hermes_cli.gateway_client import GatewayRPCError
+        try:
+            receipt = self.call("prompt.submit", session_id=session_id, text=prompt, submission_id=job_id,
+                                finite=True)
+        except GatewayRPCError as exc:
+            raise AdmissionRefused(str(exc)[:200]) from exc
         if not isinstance(receipt, dict) or not receipt.get("admission_id"):
-            raise RuntimeError("the gateway admitted nothing")
+            raise AdmissionRefused("the gateway admitted nothing")
         persist(admission_id=receipt["admission_id"], submission_text=None)
         return receipt
 
@@ -235,9 +250,11 @@ class GatewayAgent:
         return None if receipt is None else receipt_outcome(receipt, job.native_session_id)
 
     def stop(self, job):
-        """Ask the gateway to stop the job's run. Whether it stopped is only what a later receipt says."""
+        """Ask the gateway to stop the job's run; True when the requests reached it, False to retry later.
+
+        Whether it stopped is only what a later terminal receipt and idle session say."""
         if not (job.native_session_id and job.admission_id):
-            return
+            return False
         try:
             receipt = self.call("prompt.receipt", session_id=job.native_session_id, admission_id=job.admission_id)
             if receipt.get("status") == "queued":
@@ -248,4 +265,5 @@ class GatewayAgent:
                 self.call("session.interrupt", session_id=job.native_session_id,
                           execution_generation=receipt["execution_generation"])
         except Exception:
-            pass  # the watcher keeps following the receipt; a failed request changes nothing
+            return False  # unreachable or refused: the persisted stop intent is retried by the watcher
+        return True

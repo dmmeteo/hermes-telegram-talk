@@ -40,6 +40,7 @@ DELIVERY_CHANNELS = ("delegation", "context", "instructions")
 JOB_ID = re.compile(r"jb_[A-Za-z0-9_-]{16,64}")
 DELEGATION_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 JOB_PREFIX = "hermes_talk:job:"
+STOP_RETRY_MIN_S, STOP_RETRY_MAX_S, STOP_RECHECK_S = 1.0, 8.0, 10.0  # gateway stop: retry backoff, re-request
 SPOKEN_STATE = {SUCCEEDED: "finished", FAILED: "failed", CANCELLED: "was cancelled",
                 INTERRUPTED: "was interrupted when Talk restarted; it was not rerun"}
 
@@ -259,17 +260,11 @@ class JobBoard:
             self._settle(job.id, restarted=True)  # the session is stored before submission, so nothing was admitted
             return
         job = self._save(replace(job, notes=job.notes + ("adopted after restart",)))
-        if not job.admission_id:
-            if not job.submission_text:
-                self._settle(job.id, restarted=True)
-                return
-            try:
-                # The same submission id and text: the gateway returns the earlier admission if it took one.
-                self.agent.submit(job.id, job.native_session_id, job.submission_text,
-                                  lambda **f: self._persist(job.id, **f))
-            except Exception as exc:
-                logger.warning("a task could not be re-adopted from the gateway: %s", type(exc).__name__)
-                return threading.Thread(target=self._watch_gateway, args=(job.id,), daemon=True).start()
+        if not job.admission_id and not job.submission_text:
+            self._settle(job.id, restarted=True)
+            return
+        # Without an admission the watcher resubmits the same id and text: the gateway returns the earlier
+        # admission if it took one, and only its own refusal fails the job.
         threading.Thread(target=self._watch_gateway, args=(job.id,), daemon=True).start()
 
     def _persist(self, job_id, **fields):
@@ -313,34 +308,55 @@ class JobBoard:
             self.agent.start(job.id, prompt, resume, lambda **f: self._persist(job.id, **f))
         except Exception as exc:
             job = self.jobs[job.id]
-            if job.admission_id is None:
-                # Not admitted under this submission id (a resubmission would return it): nothing ran.
+            submitted = job.native_session_id and job.submission_text
+            if job.admission_id is None and (getattr(exc, "refused", False) or not submitted):
+                # The gateway refused it, or nothing was submitted (no session stored): nothing ran.
                 self._finish(job.to(FAILED, finished=self.clock(),
                                     error=f"The Hermes gateway did not take the task ({type(exc).__name__})."))
                 return False
-        if self.jobs[job.id].cancel_requested:
-            threading.Thread(target=self.agent.stop, args=(self.jobs[job.id],), daemon=True).start()
+            if job.admission_id is None:
+                # The answer was lost, not refused: the gateway may run it. The watcher resubmits the stored
+                # session, text and submission id, which returns that admission instead of a second run.
+                logger.warning("a task's admission is unknown after %s; reconciling", type(exc).__name__)
         threading.Thread(target=self._watch_gateway, args=(job.id,), daemon=True).start()
         return True
 
     def _watch_gateway(self, job_id):
-        """Follow the admission until the gateway reports it settled; a lost connection is not an outcome."""
+        """Follow the admission until the gateway reports it settled; a lost connection is not an outcome.
+
+        This one thread per job also drives its stop: a persisted cancel or a passed deadline is requested
+        here, retried with a bounded backoff while the gateway is unreachable, and re-requested while the run
+        has not settled. The job counts as stopped only once a terminal receipt and an idle session say so."""
         timed_out = False
+        retry_at, backoff = 0.0, STOP_RETRY_MIN_S
         while True:
             job = self.jobs[job_id]
             if job.state != RUNNING:
                 return
             if not job.admission_id and job.submission_text and job.native_session_id:
-                try:  # an adoption whose resubmission failed: the same id and text stay idempotent
+                try:  # unknown admission (lost answer or restart): the same id and text stay idempotent
                     self.agent.submit(job.id, job.native_session_id, job.submission_text,
                                       lambda **f: self._persist(job_id, **f))
-                except Exception:
-                    pass
-            elif job.admission_id and self.agent.settled(job):
+                except Exception as exc:
+                    if getattr(exc, "refused", False):
+                        with self.lock:
+                            job = self.jobs[job_id]
+                            if job.state == RUNNING and not job.admission_id:
+                                self._finish(job.to(FAILED, finished=self.clock(),
+                                                    error="The Hermes gateway did not take the task."))
+                        self.pump()
+                        return
+                job = self.jobs[job_id]
+            if job.admission_id and self.agent.settled(job):
                 break
             if not timed_out and self.clock() > (job.started or 0) + self.tasks.run_budget_s + 60:
                 timed_out = True
-                threading.Thread(target=self.agent.stop, args=(job,), daemon=True).start()
+            now = time.monotonic()
+            if (timed_out or job.cancel_requested) and job.admission_id and now >= retry_at:
+                # Single-flight (this thread only) and bounded: never more often than the backoff allows.
+                delivered = self.agent.stop(job)
+                backoff = STOP_RETRY_MIN_S if delivered else min(backoff * 2, STOP_RETRY_MAX_S)
+                retry_at = time.monotonic() + (STOP_RECHECK_S if delivered else backoff)
             time.sleep(0.5)
         try:
             with self.lock:
@@ -381,7 +397,10 @@ class JobBoard:
             self.bind(job, outcome.session_id)
         limit = self.tasks.result_chars
         full = None
-        if timed_out:
+        if self.gateway and job.admission_id and outcome is None:
+            # The gateway no longer knows the admission: neither a stop nor a result is proven.
+            job = job.to(INTERRUPTED, finished=now, error="The Hermes gateway lost this task's run; its outcome is unknown.")
+        elif timed_out:
             job = job.to(FAILED, finished=now, error="The task ran past its time budget and was stopped.")
         elif job.cancel_requested:
             job = job.to(CANCELLED, finished=now)
@@ -426,8 +445,8 @@ class JobBoard:
             if job.state != RUNNING or job.cancel_requested:
                 return job
             job = self._save(replace(job, cancel_requested=True))
-        stop = (self.agent.stop, (job,)) if self.gateway else (self.agent.stop, (job.pid, job.pid_start))
-        threading.Thread(target=stop[0], args=stop[1], daemon=True).start()
+        if not self.gateway:  # a gateway job's watcher drives the persisted stop intent, with retries
+            threading.Thread(target=self.agent.stop, args=(job.pid, job.pid_start), daemon=True).start()
         return job
 
     def ack(self, scope, conversation_id, voice_session_id, job_id):
