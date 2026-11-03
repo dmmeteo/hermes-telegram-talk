@@ -10,12 +10,13 @@ import re
 import time
 from dataclasses import asdict
 
-from . import activity
+from . import activity, pulse
 from .agent import Readiness
 from .gateway_rpc import task_agent
 from .config import PRIVATE_NAMES
 from .context import compose, update
 from .jobs import DELEGATION_ID, OPEN, SUCCEEDED, UNDELIVERED, JobBoard
+from .pulse_ledger import PulseLedger
 from .receipts import DIRECTIVE, SINCE_KEY, Destination, ReportDesk, TelegramSender
 from .store import SOURCE, TalkError, TalkStore, VoiceScope, clip
 
@@ -38,6 +39,13 @@ TASK_PROMPT = (
     "language of the conversation.]"
 )
 NOT_READY = Readiness(False, "Tasks are not available for this account.")
+SNOOZE_S = 3 * 3600
+FEEDBACK_REPLIES = {
+    "useful": "Noted that update {handle} was useful; Pulse will favor similar ones.",
+    "not_useful": "Noted that update {handle} was not useful; Pulse will offer fewer like it.",
+    "dismiss": "Update {handle} is dismissed and will not be offered again.",
+    "later": "Update {handle} will be offered again in about three hours.",
+}
 
 
 def redact(text):
@@ -67,6 +75,7 @@ class TalkRuntime:
         self.bot_id = bot_token.split(":", 1)[0]
         self.history = history
         self.store = TalkStore(history, clock, config.voice_session_ttl_s, config.budgets.summary_chars)
+        self.pulse = PulseLedger(history, clock)
         self.soul = soul
         self.skill = skill
         self.clock = clock
@@ -111,26 +120,42 @@ class TalkRuntime:
         conversation_id, _ = self.store.new(self.account(user_id), conversation_id)
         return self._public(user_id, conversation_id, avatar_url)
 
-    def _briefing(self, user_id, conversation_id, state, since=None):
-        """(candidate rows, unread total, note) for the next call; nothing is marked read here."""
+    def _scan(self, account, user_id, conversation_id, state):
+        """Read the profile's changed sessions into the account's Pulse cards; returns a note for the briefing."""
         c = self.config
         if not c.activity_enabled or c.budgets.activity_items == 0:
-            return [], 0, ""
+            return ""
         now = self.clock()
-        cursor = state.get("activity_cursor")
+        legacy = state.get("activity_cursor")
+        since = self.pulse.scan_from(account, list(activity.cursor_key(legacy)) if legacy is not None else None)
         if since is None:
-            since = activity.cursor_key(cursor) if cursor is not None else (now - c.activity_window_s, "")
+            since = (now - c.activity_window_s, "")
         try:
             rows, exhaustive = self.history.activity_rows(SOURCE, since[0], self.activity_scan_max)
-            pending = activity.unread(rows, since=since, user_id=user_id, owner_user_id=c.activity_owner_user_id,
-                                      sources=c.activity_sources, exclude_ids={conversation_id})
-            candidates = []
-            for row in pending[: c.budgets.activity_items]:
-                last_role, last_kind = self.history.last_turn(row["id"])
-                candidates.append({**row, "last_role": last_role, "last_kind": last_kind})
+            mine = activity.unread(rows, since=since, user_id=user_id, owner_user_id=c.activity_owner_user_id,
+                                   sources=c.activity_sources, exclude_ids={conversation_id})
+            known = self.pulse.known(account)
+            scanned = []
+            for row in mine:
+                prior = known.get(row["id"])
+                if prior is not None and prior[0] == row["last_active"]:
+                    last_role, last_kind = prior[1], prior[2]
+                else:
+                    last_role, last_kind = self.history.last_turn(row["id"])
+                full = {**row, "last_role": last_role, "last_kind": last_kind}
+                scanned.append({**full, "status": activity.status(full, now), "title": activity.title(full)})
+            self.pulse.refresh(account, scanned, exhaustive, now)
         except Exception as exc:  # a briefing is never worth the call
-            return [], 0, f"- Activity could not be read ({type(exc).__name__}). Say so if asked; do not guess."
-        return candidates, len(pending), "" if exhaustive else activity.NOT_EXHAUSTIVE
+            return f"- Activity could not be read ({type(exc).__name__}). Say so if asked; do not guess."
+        return "" if exhaustive else activity.NOT_EXHAUSTIVE
+
+    def _cards(self, account, limit, exclude=(), first_handle=1):
+        """(cards, waiting, lines): the selected Pulse cards and their briefing lines, numbered from first_handle."""
+        now = self.clock()
+        cards, waiting = self.pulse.select(account, limit, now, exclude)
+        lines = [redact(pulse.line(card, f"P{first_handle + i}", activity.when(card["at"])))
+                 for i, card in enumerate(cards)]
+        return cards, waiting, lines
 
     def _job_items(self, account, conversation_id, exclude_voice_session=None):
         """(id, line, synopsis) task outcomes not yet handed to the voice model, oldest first, then open tasks."""
@@ -191,35 +216,77 @@ class TalkRuntime:
         soul = redact(self.soul() or "")
         skills = [(name, redact(self.skill(name) or "")) for name in c.skills]
         turns = [(role, redact(text)) for role, text in self.history.recent(conversation_id, c.budgets.recent_turns)]
-        candidates, total, note = self._briefing(user_id, conversation_id, state)
-        now = self.clock()
-        lines = [redact(activity.line(row, now)) for row in candidates]
+        note = self._scan(account, user_id, conversation_id, state)
+        limit = c.budgets.activity_items if c.activity_enabled else 0
+        cards, total, lines = self._cards(account, limit) if limit else ([], 0, [])
+        job_items = self._job_items(account, conversation_id)
         instructions, report = compose(c, soul, [s for s in skills if s[1]], redact(state.get("summary") or ""),
                                        turns, lines, total, note, self.readiness(user_id).ready,
-                                       self._job_items(account, conversation_id), self._reports_note(user_id))
-        # Only items the final text carries whole can be marked read once the assistant speaks.
-        k = report["activity_items"]
-        watermark = list(activity.key(candidates[k - 1])) if k else None
+                                       job_items, self._reports_note(user_id))
+        # Only cards the final text carries whole are exposed; none counts as heard until the call shows it.
+        carried = [card["fp"] for card in cards[: report["activity_items"]]]
         report["job_ids"] = [i for i in report["job_ids"] if not i.startswith("open:")]
+        report["job_numbers"] = self._job_numbers(account, conversation_id, report["job_ids"])
         logger.info("context frame=instructions sources=%s", json.dumps(
             {key: report[key] for key in ("frame", "soul", "skills", "summary", "recent", "jobs", "activity",
                                           "greeting", "activity_items")}, sort_keys=True))
-        return conversation_id, instructions, watermark, report
+        return conversation_id, instructions, carried, report
 
     def session_config(self, instructions):
         return {"model": self.config.model, "instructions": instructions,
                 "audio": {"output": {"voice": self.config.voice}}, "delegation": {"type": "client"}}
 
-    def started(self, user_id, conversation_id, watermark, job_ids=()):
-        return self.store.start_voice_session(self.account(user_id), conversation_id, watermark, job_ids)
+    def _job_numbers(self, account, conversation_id, job_ids):
+        if self.board is None or not job_ids:
+            return {}
+        wanted = set(job_ids)
+        return {j.id: j.number for j in self.board.of_conversation(account.key, conversation_id) if j.id in wanted}
+
+    def started(self, user_id, conversation_id, cards, job_ids=(), job_numbers=None):
+        account = self.account(user_id)
+        voice_session_id = self.store.start_voice_session(account, conversation_id, None, job_ids, job_numbers)
+        if cards:
+            self.pulse.exposed(account, voice_session_id, cards, "instructions", self.clock())
+        return voice_session_id
 
     def events(self, user_id, conversation_id, voice_session_id, events):
         b = self.config.budgets
-        accepted, spoke = self.store.ingest(self.account(user_id), conversation_id, voice_session_id, events,
-                                            b.event_batch_max, b.event_text_chars)
-        if spoke and self.board is not None:
-            self.board.mark_delivered(spoke, "instructions")
+        account = self.account(user_id)
+        accepted, turns, record = self.store.ingest(account, conversation_id, voice_session_id, events,
+                                                    b.event_batch_max, b.event_text_chars)
+        if turns:
+            self.pulse.observe(account, voice_session_id, turns, self.clock())
+            numbers = {int(n): job_id for job_id, n in (record.get("job_numbers") or {}).items()}
+            said = set()
+            for _, _, role, text, interrupted in turns:
+                if role == "assistant" and not interrupted:
+                    said |= pulse.tasks_mentioned(text, set(numbers))
+            if said and self.board is not None:
+                self.board.mark_delivered([numbers[n] for n in sorted(said)], "instructions")
         return {"accepted_ids": accepted, "conversation_id": conversation_id}
+
+    def pulse_feedback(self, user_id, conversation_id, voice_session_id, delegation_item_id, request):
+        """The user's reaction to one card of the live call, delegated as "pulse P<n> <kind>"; idempotent per delegation."""
+        account = self.account(user_id)
+        if not isinstance(delegation_item_id, str) or not DELEGATION_ID.fullmatch(delegation_item_id):
+            raise TalkError(400, "Malformed delegation id.")
+        parsed = pulse.parse_feedback(request) if isinstance(request, str) and len(request) <= 200 else None
+        if parsed is None:
+            raise TalkError(400, "Pulse feedback must be \"pulse P<number> useful|not useful|dismiss|later|more\".")
+        self.store.voice_session(account, conversation_id, voice_session_id, live=True)
+        number, kind = parsed
+        outcome, card = self.pulse.feedback(account, voice_session_id, delegation_item_id, number, kind,
+                                            self.clock(), SNOOZE_S)
+        if outcome is None:
+            raise TalkError(404, f"Update P{number} is not part of this call.")
+        handle = f"P{number}"
+        if outcome == "more":
+            reply = redact(f"Update {handle}: [{card['status']}] {card['title']} ({card['source']} session "
+                           f"{card['ref']}, {activity.when(card['at'])}). That is everything Pulse holds about it.")
+        else:
+            reply = FEEDBACK_REPLIES[outcome].format(handle=handle)
+        return {"card": {"handle": handle, "state": card["state"], "feedback": outcome}, "channel": "speakable",
+                "reply": reply}
 
     def end(self, user_id, conversation_id, voice_session_id):
         return self.store.end(self.account(user_id), conversation_id, voice_session_id)
@@ -314,33 +381,33 @@ class TalkRuntime:
         return {"job": self._public_job(self.board.ack(account.key, conversation_id, voice_session_id, job_id))}
 
     def context(self, user_id, conversation_id, voice_session_id):
-        """An explicit mid-call refresh: task outcomes and Pulse items the live call has not received yet."""
+        """An explicit mid-call refresh: task outcomes and Pulse cards the live call has not received yet."""
         account = self.account(user_id)
         record = self.store.voice_session(account, conversation_id, voice_session_id, live=True)
         state = self.store.owned(account, conversation_id, bound=True)
-        keys = [activity.cursor_key(k) for k in (state.get("activity_cursor"), record.get("briefing_watermark"),
-                                                 record.get("context_watermark")) if k is not None]
-        since = max(keys) if keys else None
-        candidates, total, note = self._briefing(user_id, conversation_id, state, since)
-        now = self.clock()
-        lines = [redact(activity.line(row, now)) for row in candidates]
+        note = self._scan(account, user_id, conversation_id, state)
+        handled, count = self.pulse.handles(account, voice_session_id)
+        limit = self.config.budgets.activity_items if self.config.activity_enabled else 0
+        cards, total, lines = self._cards(account, limit, set(handled), count + 1) if limit else ([], 0, [])
         carried = set(record.get("job_ids") or ())
         items = [i for i in self._job_items(account, conversation_id, voice_session_id)
                  if not i[0].startswith("open:") and i[0] not in carried]
         revision = record.get("revision", 0) + 1
         text, job_ids, k = update(revision, items, lines, total, note, self.config.budgets.activity_chars
                                   + self.config.budgets.tasks_chars)
-        watermark = list(activity.key(candidates[k - 1])) if k else None
         if not text:
             return {"revision": None, "text": "", "sources": {"jobs": 0, "activity": 0}}
-        revision = self.store.save_snapshot(account, conversation_id, voice_session_id, watermark, job_ids)
+        revision = self.store.save_snapshot(account, conversation_id, voice_session_id,
+                                            [card["fp"] for card in cards[:k]], job_ids)
         sources = {"jobs": len(job_ids), "activity": k}
         logger.info("context frame=session.context.append revision=%s sources=%s", revision, json.dumps(sources))
         return {"revision": revision, "text": text, "sources": sources}
 
     def context_ack(self, user_id, conversation_id, voice_session_id, revision):
         account = self.account(user_id)
-        job_ids = self.store.ack_snapshot(account, conversation_id, voice_session_id, revision)
+        job_ids, cards = self.store.ack_snapshot(account, conversation_id, voice_session_id, revision)
+        if cards:
+            self.pulse.exposed(account, voice_session_id, cards, f"context:{revision}", self.clock())
         if job_ids and self.board is not None:
             self.board.mark_delivered(job_ids, "context")
         return {"ok": True}

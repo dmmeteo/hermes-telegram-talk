@@ -407,12 +407,17 @@ def activity_briefing_is_scoped_truthful_and_cursored(h):
     _, unchanged = h.call(cid)
     assert "Synthetic broken job" in unchanged, "unread until the assistant actually spoke"
     h.ok("events", {"conversation_id": cid, "voice_session_id": vs,
-                    "events": [ev("a1", 0, "assistant", "two updates since last time")]})
+                    "events": [ev("a1", 0, "assistant", "two updates since last time"), ev("u1", 1, "user", "ok")]})
+    _, greeted = h.call(cid)
+    assert "Synthetic broken job" in greeted and "Synthetic deploy check" in greeted, "a greeting told nothing"
+    h.ok("events", {"conversation_id": cid, "voice_session_id": vs,
+                    "events": [ev("a2", 2, "assistant", "The synthetic broken job failed."), ev("u2", 3, "user", "ok")]})
     h.clock.now += 60
     h.seed("Synthetic new job", turns=[("user", "go")], age_s=0)
     _, later = h.call(cid)
     later_brief = later.split("## Activity since the last visit\n", 1)[1]
     assert "[active] Synthetic new job" in later_brief and "Synthetic broken job" not in later_brief
+    assert "Synthetic deploy check" in later_brief, "an update the assistant never named stays unread"
 
 
 @check
@@ -425,32 +430,40 @@ def a_cut_briefing_never_skips_older_unread_items(h):
         h2.seed("Synthetic newest job", turns=[("user", "go"), ("assistant", "ok")], end_reason="done", age_s=700)
         data, first = h2.call()
         assert "[failed] Synthetic oldest failure" in first and "Synthetic middle job" in first
-        assert "Synthetic newest job" not in first and "1 newer update(s) not listed yet" in first
+        assert "Synthetic newest job" not in first and "1 more update(s) not listed yet" in first
         h2.ok("events", {"conversation_id": data["conversation_id"], "voice_session_id": data["voice_session_id"],
-                         "events": [ev("a1", 0, "assistant", "two updates")]})
+                         "events": [ev("a1", 0, "assistant", "Synthetic oldest failure failed; Synthetic middle job "
+                                                             "is done."), ev("u1", 1, "user", "thanks")]})
         _, second = h2.call()
+        second = second.split("## Activity since the last visit\n", 1)[1]
         assert "Synthetic newest job" in second and "Synthetic oldest failure" not in second
     finally:
         h2.close()
 
 
 def visit(h, user=fx.USER_ID):
-    """One call in which the assistant actually speaks; returns its instructions."""
+    """One call in which the assistant greets, names every update it was given and the user answers."""
     data, instructions = h.call(user=user)
+    titles = re.findall(r"^- P\d+ \[\w+\] (.+?) \(\w+ session ", instructions, re.M)
+    events = [ev("greet", 0, "assistant", "hello there")]
+    if titles:
+        events += [ev("told", 1, "assistant", "Updates: " + "; ".join(titles) + "."), ev("reply", 2, "user", "thanks")]
     h.ok("events", {"conversation_id": data["conversation_id"], "voice_session_id": data["voice_session_id"],
-                    "events": [ev("greet", 0, "assistant", "hello there")]}, user)
+                    "events": events}, user)
     return instructions
 
 
 def delivered(instructions, prefix, count):
     """Indices whose complete briefing line is in the instructions."""
     return {i for i in range(count)
-            if re.search(rf"^- \[\w+\] {prefix} {i} \(cli session \S+, [0-9-]+ [0-9:]+ UTC\)$", instructions, re.M)}
+            if re.search(rf"^- P\d+ \[\w+\] {prefix} {i} \(cli session \S+, [0-9-]+ [0-9:]+ UTC\)( \([^()]*\))?$",
+                         instructions, re.M)}
 
 
 def activity_harness(h, **budgets):
     return Harness(h.native, fx.config_data(context={"skills": ["talk-brief", "not-allowed"],
-                                                     "budgets": {"instructions_chars": 1500, **budgets}}))
+                                                     "budgets": {"instructions_chars": 1500, "recent_turns": 0,
+                                                                 **budgets}}))
 
 
 @check
@@ -507,7 +520,7 @@ def backlog_beyond_one_scan_page_is_read_oldest_first(h):
                     age_s=5000 - i * 10)
         first = visit(h2)
         assert delivered(first, "Synthetic backlog", 30) == {0, 1}, delivered(first, "Synthetic backlog", 30)
-        assert "28 newer update(s) not listed yet" in first
+        assert "28 more update(s) not listed yet" in first
         assert delivered(visit(h2), "Synthetic backlog", 30) == {2, 3}
     finally:
         h2.close()

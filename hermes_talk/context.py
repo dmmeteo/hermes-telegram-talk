@@ -19,8 +19,8 @@ TASKS_FRAME = (
     "You can hand work to Hermes, this profile's own agent with its tools. When the user asks for something this "
     "context cannot answer (look something up, read or check something, research), delegate it. A delegated task "
     "runs in the background: say you handed it to Hermes and keep talking. Its result arrives later on that "
-    "delegation or as context. Report only what it says, and never claim a task ran, finished or was sent before "
-    "then. To cancel a task, delegate exactly \"cancel task <number>\". Hermes cannot ask anyone to approve an "
+    "delegation or as context. Report only what it says, name the task by its number (\"task 3\") when you "
+    "report it, and never claim a task ran, finished or was sent before then. To cancel a task, delegate exactly \"cancel task <number>\". Hermes cannot ask anyone to approve an "
     "action during a task; such an action is blocked and reported. Ending this call cancels nothing; open tasks "
     "keep running."
 )
@@ -29,6 +29,12 @@ MIN_SECTION = 40
 ACTIVITY_HEADER = "## Activity since the last visit\n"
 TASKS_HEADER = "## Hermes tasks\n"
 UPDATE_HEADER = "## Context update {revision}\n"
+PULSE_RULES = (
+    "## Pulse updates\n"
+    "Activity lines are Pulse updates P1, P2 and so on. Name an update by its title, never by its label. Unmentioned "
+    "updates stay unread and return next time. When the user reacts to one, delegate exactly \"pulse P<n> useful\", "
+    "\"not useful\", \"dismiss\", \"later\" or \"more\" and say the reply."
+)
 
 
 def _fit(text, limit):
@@ -51,8 +57,8 @@ def _activity(lines, total, note, limit):
         rest = total - k
         tail = []
         if rest:
-            tail.append(f"- {rest} newer update(s) not listed yet; they will be offered next time." if k else
-                        f"- {rest} update(s) since the last visit are not listed yet; they will be offered next time.")
+            tail.append(f"- {rest} more update(s) not listed yet; they will be offered next time." if k else
+                        f"- {rest} unread update(s) are not listed yet; they will be offered next time.")
         if note:
             tail.append(note)
         if not lines[:k] + tail:
@@ -144,8 +150,13 @@ def compose(config, soul, skills, summary, turns, activity_lines, activity_total
     if room - 2 >= MIN_SECTION:
         activity, report["activity_items"] = _activity(activity_lines, activity_total, activity_note,
                                                        min(b.activity_chars, room - 2))
+    report["pulse_rules"] = 0
     if activity:
         parts.append(activity)
+        room -= len(activity) + 2
+        if report["activity_items"] and room - 2 >= len(PULSE_RULES):
+            parts.append(PULSE_RULES)
+            report["pulse_rules"] = len(PULSE_RULES)
     report["activity"] = len(activity)
     if greeting:
         parts.append(greeting)

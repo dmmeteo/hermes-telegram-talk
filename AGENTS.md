@@ -1,7 +1,8 @@
 # Agents
 
 Hermes Telegram Talk PoC v2. Keep it small: `plugin.yaml`, `__init__.py`, `server.py`, `hermes_talk/`,
-`verify-integrated.py`, `verify-agent.py`, `verify-backend.py`, `verify-frontend.py`, `verify.py`, `browser/`, `tests/` and `static/`. `static/`, `tests/frontend/`, `tests/browser/`
+`verify-integrated.py`, `verify-agent.py`, `verify-backend.py`, `verify-frontend.py`, `verify-pulse.py`, `verify.py`, `browser/`, `tests/`,
+`static/` and `docs/adr/` (indexed decisions). `static/`, `tests/frontend/`, `tests/browser/`
 and `DESIGN.md` belong to the frontend owner.
 
 Boundaries:
@@ -17,7 +18,9 @@ Boundaries:
 
 Before committing: `python3 verify-integrated.py --offline --require-host` must print
 `TALK_INTEGRATED_OFFLINE_OK`. It includes `verify-backend.py --offline` (`BACKEND OK`, with `verify.py --offline`
-at `26/26`) and `verify-frontend.py --offline`. For task, context or delegation changes, `python3 verify-agent.py --require-hermes` must print `TALK_AGENT_OK` and
+at `26/26`), `verify-frontend.py --offline` and `verify-pulse.py --offline` (`TALK_PULSE_OK`, memory and host).
+Pulse read state is per card and per call: being in the instructions is exposure, never hearing; only a named,
+answered mention or feedback acknowledges a card (see README "Pulse" and `docs/adr/0001-pulse-per-item-evidence.md`). For task, context or delegation changes, `python3 verify-agent.py --require-hermes` must print `TALK_AGENT_OK` and
 `python3 verify-agent.py --browser <out-dir>` `TALK_AGENT_BROWSER_OK`. Voice tasks run as native Hermes sessions:
 either `hermes chat` single-query processes or (manager-authorized 2026-11-03, for current cores whose CLI rejects
 `--run-budget`) a thin plugin-side client of the canonical public gateway RPC (`session.create` with `run_budget`,

@@ -37,6 +37,9 @@ marker = "BROWSER-FIXTURE-" + os.urandom(6).hex()
 config = parse_config(f.config_data(tasks={"enabled": True, "user_ids": [f.USER_ID], "toolsets": ["file"],
                                            "workdir": str(work), "run_budget_seconds": 120}), home)
 history = NativeHistory(home)
+pulse_session = history.create_session("Synthetic browser pulse", "cli")
+history.append(pulse_session, [{"role": "assistant", "content": "synthetic pulse ready", "platform_message_id": "bp1",
+                                "timestamp": time.time()}])
 talk = TalkRuntime(config, f.BOT_TOKEN, history, home=home)
 offers, answers, sessions = queue.Queue(), queue.Queue(), []
 
@@ -88,7 +91,9 @@ class Fixture(BaseHTTPRequestHandler):
         if self.path == "/state":
             jobs = [{**j.public(), "delivered_via": j.delivered_via, "acks": j.acks,
                      "native_session_id": j.native_session_id} for j in talk.board.jobs.values()]
-            return self.send(200, {"jobs": jobs, "sessions": sessions,
+            cards = [{k: c.get(k) for k in ("title", "state", "exposures", "mentions", "interrupted", "feedback",
+                                            "acknowledged")} for c in talk.pulse.cards(talk.account(f.USER_ID))]
+            return self.send(200, {"jobs": jobs, "sessions": sessions, "pulse": cards,
                                    "runs": [str(m[-1].get("content"))[-200:] for m in model.requests
                                             if m and m[-1].get("role") == "user"]})
         self.send(404, {})

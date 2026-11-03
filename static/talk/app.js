@@ -16,6 +16,7 @@ const APPEND_MAX_BYTES = 500;
 const FINISHED = ["succeeded", "failed", "cancelled", "interrupted"];
 // Statuses that prove the server refused the task before accepting it; anything else may have been accepted.
 const REFUSED = [400, 401, 403, 404, 409, 413, 415, 429, 503];
+const PULSE_FEEDBACK = /^\s*pulse\s+(?:feedback\s+)?(?:card\s+)?p\s*\d{1,3}\b/i;
 
 function initData() {
   return webApp?.initData || new URLSearchParams(location.hash.slice(1)).get("tgWebAppData") || "";
@@ -221,8 +222,11 @@ function settle(current, event) {
   if (characters.length > 16000 || owner.pending.length + chunks.length > 128 || owner.sequence + chunks.length > 1000000) {
     stop("Conversation is too long to save. Close and reopen Hermes Telegram Talk."); return;
   }
+  // Spoken over by the user before it settled: its text is not evidence that any Pulse update was told.
+  const interrupted = turn.role === "assistant" && current.interrupted;
   for (const chunk of chunks) owner.pending.push({voiceId: current.voiceId, event: {
     id: crypto.randomUUID(), sequence: owner.sequence++, role: turn.role, text: chunk,
+    ...(interrupted ? {interrupted: true} : {}),
   }});
   void flush(owner);
 }
@@ -234,8 +238,11 @@ function onMessage(current, message) {
   if (!event || typeof event !== "object") return;
   if (["session.started", "session.updated"].includes(event.type)) { current.handshake = true; advance(current); }
   if (["input_transcript.added", "output_transcript.added"].includes(event.type)) current.lastSettled = null;
+  if (event.type === "output_transcript.added") current.answering = true;
+  if (event.type === "input_transcript.added" && current.answering) current.interrupted = true;
   if (event.type === "turn.done") {
     settle(current, event);
+    if (event.turn?.role === "assistant") { current.answering = false; current.interrupted = false; }
     if (event.turn?.role === "assistant" && current.greetingSent) current.greetingDone = true;
   }
   if (event.type === "session.closed") stop("Voice connection closed. Tap Retry to reconnect.");
@@ -243,7 +250,8 @@ function onMessage(current, message) {
   if (event.type === "delegation.created" && event.item?.target === "client"
     && typeof event.item.id === "string" && !current.delegations.has(event.item.id)) {
     current.delegations.add(event.item.id);
-    if (current.conversation?.tasks) void delegate(current, event.item);
+    if (PULSE_FEEDBACK.test(delegationText(event.item))) void feedback(current, event.item);
+    else if (current.conversation?.tasks) void delegate(current, event.item);
     else current.channel.send(JSON.stringify({type: "delegation.context.append", delegation_item_id: event.item.id,
       channel: "speakable", content: [{type: "input_text", text: "Tasks are unavailable in Hermes Telegram Talk. Nothing was executed."}]}));
   }
@@ -286,9 +294,30 @@ function callFields(current) {
   return {initData: current.auth, conversation_id: current.conversation.id, voice_session_id: current.voiceId};
 }
 
-async function delegate(current, item) {
-  const asked = (Array.isArray(item.content) ? item.content : [])
+function delegationText(item) {
+  return (Array.isArray(item.content) ? item.content : [])
     .filter(part => part?.type === "input_text" && typeof part.text === "string").map(part => part.text).join("").trim();
+}
+
+// Feedback is idempotent per delegation on the server, so a lost answer is resubmitted with the same id.
+async function feedback(current, item) {
+  const request = Array.from(delegationText(item)).slice(0, 200).join("");
+  for (let attempt = 0; attempt < 3 && call === current && current.voiceId; attempt += 1) {
+    try {
+      const data = await post("pulse/feedback", {...callFields(current), delegation_item_id: item.id, request});
+      if (typeof data.reply === "string" && data.reply) append(current, data.reply, "speakable", item.id);
+      return;
+    } catch (error) {
+      if (REFUSED.includes(error.status)) {
+        append(current, "Pulse could not record that reaction. Nothing changed.", "speakable", item.id); return;
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000 * 2 ** attempt));
+    }
+  }
+}
+
+async function delegate(current, item) {
+  const asked = delegationText(item);
   const request = Array.from(asked || current.lastUserText || "").slice(0, 2000).join("");
   if (!request || !current.voiceId) {
     append(current, "There was nothing to hand to Hermes. Nothing was executed.", "speakable", item.id); return;

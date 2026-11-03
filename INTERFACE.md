@@ -54,3 +54,18 @@ These notes are backend-owned and add no field. Changing or removing a field abo
 - `POST api/task/ack {initData,conversation_id,voice_session_id,job_id}` -> `{job}`. Sent after the client appended the result to the job's own delegation in the job's own call; repeats change nothing. Delivered means appended, not heard. A partial append (the data channel failed between chunks) is never acked or repeated in that call. A submission whose response was lost is resubmitted with the same `delegation_item_id`; only 400/401/403/404/409/413/415/429/503 on the first submission are treated as refusals, and a resubmitted delegation returns its existing job even if readiness lapsed.
 - `POST api/context {initData,conversation_id,voice_session_id}` -> `{revision, text, sources:{jobs,activity}}`. Task outcomes and Pulse items the live call has not received; `revision` is null when there is nothing new. `POST api/context/ack {initData,conversation_id,voice_session_id,revision}` -> `{ok:true}` marks them read.
 - `job` is `{id, number, delegation_item_id, voice_session_id, state, receipt, result, error, spoken}`; `state` is accepted, running, succeeded, failed, cancelled or interrupted; `receipt` is undelivered or delivered.
+
+## Pulse (additive; the shapes above are unchanged)
+
+- `events[]` may carry `interrupted: true` on an assistant event whose speech the user started talking over before
+  it settled. Any other value, or the field on a user event, answers 400. Without the field nothing changes.
+- Activity lines in instructions and context updates begin with a per-call label: `- P<n> [status] title (...)`.
+  Labels continue across a call's context updates and restart at P1 in the next call.
+- `POST api/pulse/feedback {initData,conversation_id,voice_session_id,delegation_item_id,request}` ->
+  `{card:{handle,state,feedback}, channel:"speakable", reply}`. `request` is a client delegation of the form
+  `pulse P<n> useful|not useful|dismiss|later|more`. It needs the live call (409 after it ended) and a label that
+  call carried (404 otherwise); a malformed request answers 400. The same delegation id in the same call returns its
+  first outcome and changes nothing. The client appends `reply` on `speakable` to that delegation. It works whether
+  or not tasks are enabled and never starts a task.
+- `api/context/ack` marks the Pulse cards of that update exposed, never heard. A card is acknowledged only by a
+  settled user turn after an uninterrupted assistant turn of the same call that named it, or by feedback.

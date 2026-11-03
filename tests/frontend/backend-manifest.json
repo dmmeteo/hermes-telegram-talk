@@ -1,22 +1,25 @@
 {
-  "source": "hermes-telegram-talk: native task backend, receipts and mobile/rename integration; exact tested bytes",
+  "source": "hermes-telegram-talk: native task backend, receipts, mobile/rename integration and Pulse; exact tested bytes",
   "files": {
-    "INTERFACE.md": "d5a33f399adb4291d623bc19d4275050cd53ae6c308ed95b879cb4a73220cad6",
+    "INTERFACE.md": "d2145397c629caf7b462e988dfea3fa0aba6548402948f9fd46c4a1d694752ce",
     "LICENSES/CONDUIT-LICENSE": "0d4605059a86488f24fae7601a404abe36d305d6b56d7f5e01225507c8c8e3b0",
     "hermes_talk/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "hermes_talk/activity.py": "cbaf19fcbba7f0a527b161ca66b7cbf0e22756b59eba48d51b4ee682801a9776",
+    "hermes_talk/activity.py": "cc447623de468bd5fbab44638b039c5cc21957dba6fd017b8b2c1ee2a4da86be",
     "hermes_talk/agent.py": "ad3317848c6f0ebaafb1bdc3b973d7db8dc466eb4b2fabee63df6c0a73899167",
     "hermes_talk/assets/avatar.svg": "23c225ebdc39efb2bdb7d06296ae03596af5fae603c3de30b185d096057bbc5b",
     "hermes_talk/config.py": "fc780df2ed9c41f29e08dd26f36c958ea7a4e0c03d128fbc684f4a711f3aaecd",
-    "hermes_talk/context.py": "197e42571064304a97dd0f8c3863b821e413aaa08115a59d162215dd27022119",
+    "hermes_talk/context.py": "691edccabfc84e77cf3848ce36a03fac567cc4cb4886e1cf596b9a0a53d9b21a",
     "hermes_talk/fixtures.py": "fd30721b7e53d6a4c860d81618c8cae43456c28710f57869012f8a1781135502",
     "hermes_talk/history.py": "a8530de7fc69d1a3cdeac2c0c7f905da8e2c969655740f8468340240718c7859",
     "hermes_talk/jobs.py": "9f620108b204d5764b476efd66f952fa727f9d365e63c344364c3679c4f6d73c",
     "hermes_talk/receipts.py": "b79b50163ded53a5c14dc7d6ad62723f3f222e65da6f608714e385e4e22dac9b",
     "hermes_talk/spool.py": "b947b9655ebba380738007be1c35f4c2c3ab3b6757bb4d3a72330bf001128057",
-    "hermes_talk/store.py": "bb1b902cd83804e03f6e20ec75960a4578b2967eb7cc3e2b6d34191515af3eda",
-    "hermes_talk/talk.py": "54c07753d114ba8a5882f685f5593d0457addf12a3d6087804cb7f6dbef39478",
-    "server.py": "1263b566cd760dea7e5fdf5b8fbc5b26c52ca7a714e289065f4562d10df80ec0",
-    "hermes_talk/gateway_rpc.py": "cb613445c7a6b1cc0101b35449c4153e1f59c462c1f23863cccd25b7af9f937a"
+    "hermes_talk/store.py": "5813f68f4143bb9aec4c9abf56f6ba04794a80e82b7a6bef70c16b8cd00c4c15",
+    "hermes_talk/talk.py": "aa1bb24194f632024fc6d600b87bcbfa811769d7b571ade2fb872422d5a6940d",
+    "server.py": "212b4df41fffc91325eb95ef51e82da508a37880767e27e6c5c1c951dc97ea48",
+    "hermes_talk/gateway_rpc.py": "cb613445c7a6b1cc0101b35449c4153e1f59c462c1f23863cccd25b7af9f937a",
+    "hermes_talk/pulse.py": "bc37df302222812c836d4f3e42a081aa1b0f3c07de14ad55ba6539fa0cd7c8b7",
+    "hermes_talk/pulse_ledger.py": "bb0c9ca3589ac6008c027e946604edc718603f03e947a951188be7f47c3d2e28",
+    "LICENSES/CONDUIT-NOTIFIER-LICENSE": "f73f674a9cd717d93528c469b3e5a71d4b3f1d20f1cc7f8eda89ea07a3a3cda6"
   }
 }

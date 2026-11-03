@@ -93,6 +93,35 @@ await step('hangup-keeps-the-task-and-the-next-call-gets-its-result-as-context',
  return {job:done.id,delivered_via:done.delivered_via};
 });
 
+await step('pulse-interruption-and-feedback-cross-the-real-client',async()=>{
+ const card=async()=>(await state()).pulse.find(c=>c.title==='Synthetic browser pulse');
+ const before=await card();
+ assert(before&&before.state==='exposed'&&before.mentions===0,`greetings told nothing: ${JSON.stringify(before)}`);
+ const third=await open();await ready(third.page);
+ const index=await peer();
+ const sessions=(await state()).sessions;
+ assert(/^- P1 \[active\] Synthetic browser pulse /m.test(sessions[sessions.length-1]),'the unread card is offered again as P1');
+ await send(index,{type:'output_transcript.added',item:{text:'The synthetic '}});
+ await send(index,{type:'input_transcript.added',item:{text:'wait'}});
+ await send(index,{type:'turn.done',turn:{id:'a_cut',role:'assistant',transcript:'The synthetic browser pulse is'}});
+ await send(index,{type:'turn.done',turn:{id:'u_cut',role:'user',transcript:'wait, later'}});
+ const cut=await until(async()=>{const c=await card();return c&&c.interrupted===1&&c;},'interrupted mention recorded');
+ assert(cut.state==='exposed'&&cut.mentions===0,`an interrupted mention is not evidence: ${JSON.stringify(cut)}`);
+ const item={id:'del_pulse_1',type:'delegation',target:'client',content:[{type:'input_text',text:'pulse P1 useful'}]};
+ await send(index,{type:'delegation.created',item});
+ await send(index,{type:'delegation.created',item});
+ const reply=await until(()=>got(index,`e.type==='delegation.context.append'&&e.delegation_item_id==='del_pulse_1'`).then(a=>a.length&&a),'feedback reply');
+ await new Promise(r=>setTimeout(r,1500));
+ const all=await got(index,`e.type==='delegation.context.append'&&e.delegation_item_id==='del_pulse_1'`);
+ assert(all.length===1&&all[0].channel==='speakable'&&/P1 was useful/.test(all[0].content[0].text),`one speakable feedback reply: ${JSON.stringify(all)}`);
+ const done=await card();
+ assert(done.state==='acknowledged'&&done.feedback.kind==='useful'&&done.acknowledged.by==='feedback','feedback acknowledged the card');
+ const s=await state();
+ assert(!s.jobs.some(j=>j.delegation_item_id==='del_pulse_1'),'feedback started no Hermes task');
+ await third.page.close();await third.ctx.close();
+ return {interrupted:cut.interrupted,reply:all[0].content[0].text,state:done.state};
+});
+
 await step('no-page-errors-or-external-requests',async()=>{assert(!errors.length,errors.join('; '));return {};});
 log('summary',{passes,failures});
 await browser.close();fixture.kill();

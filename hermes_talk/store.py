@@ -2,7 +2,7 @@
 
 A conversation is one native Hermes session titled "Telegram Voice". The
 binding (verified Telegram user + configured profile + bot -> session id),
-voice-session ledger, summary and activity cursor live in the store's meta
+voice-session ledger, summary and legacy activity cursor live in the store's meta
 table through SessionDB.get_meta/set_meta. Settled turns are appended as
 ordinary user/assistant rows with a receipt, so a retried batch is
 recognized instead of written twice. Raw audio, SDP and reasoning never
@@ -134,7 +134,7 @@ class TalkStore:
             state["summary"] = self._summary(conversation_id)
             self._save(conversation_id, state)
 
-    def start_voice_session(self, account, conversation_id, briefing_watermark, job_ids=()):
+    def start_voice_session(self, account, conversation_id, briefing_watermark, job_ids=(), job_numbers=None):
         with self.lock:
             state = self._owned(account, conversation_id, bound=True)
             self._expire_voice_sessions(conversation_id, state)
@@ -143,7 +143,8 @@ class TalkStore:
             state["voice_sessions"][voice_session_id] = {
                 "started": self.clock(), "ended": None, "end_reason": None,
                 "briefing_watermark": briefing_watermark, "spoke": False,
-                "generation": state["generations"], "job_ids": list(job_ids), "snapshots": {}}
+                "generation": state["generations"], "job_ids": list(job_ids), "snapshots": {},
+                "job_numbers": dict(job_numbers or {})}
             # Bounded ledger: the oldest ended records go first.
             ended = sorted((r["started"], k) for k, r in state["voice_sessions"].items() if r["ended"] is not None)
             for _, key in ended[: max(0, len(state["voice_sessions"]) - 50)]:
@@ -161,13 +162,14 @@ class TalkStore:
         return record
 
     def ingest(self, account, conversation_id, voice_session_id, events, batch_max, text_chars):
-        """Append settled turns once: (accepted ids, duplicates included and never rewritten; job ids the call's
-        instructions carried, when this batch holds the call's first stored assistant turn)."""
+        """Append settled turns once: (accepted ids, duplicates included and never rewritten; the newly stored
+        turns as (event id, sequence, role, text, interrupted) for item-level evidence; a copy of the call record)."""
         if not isinstance(events, list) or not 1 <= len(events) <= batch_max:
             raise TalkError(400, f"Send between 1 and {batch_max} events.")
         parsed = []
         for event in events:
-            if not isinstance(event, dict) or set(event) != {"id", "sequence", "role", "text"}:
+            keys = set(event) if isinstance(event, dict) else set()
+            if not {"id", "sequence", "role", "text"} <= keys <= {"id", "sequence", "role", "text", "interrupted"}:
                 raise TalkError(400, "Each event needs exactly id, sequence, role and text.")
             if not isinstance(event["id"], str) or not EVENT_ID.fullmatch(event["id"]):
                 raise TalkError(400, "Malformed event id.")
@@ -175,6 +177,8 @@ class TalkStore:
                 raise TalkError(400, "Malformed event sequence.")
             if event["role"] not in ROLES:
                 raise TalkError(400, "Only settled user and assistant text is accepted.")
+            if "interrupted" in event and (type(event["interrupted"]) is not bool or event["role"] != "assistant"):
+                raise TalkError(400, "Only an assistant event may be marked interrupted, as true or false.")
             text = event["text"]
             if not isinstance(text, str) or not text.strip() or len(text) > text_chars:
                 raise TalkError(400, f"Event text must be 1..{text_chars} characters.")
@@ -184,30 +188,20 @@ class TalkStore:
         with self.lock:
             state = self._owned(account, conversation_id)
             record = self._voice_session(state, voice_session_id)
-            fresh = []
+            fresh, turns = [], []
             for event in sorted(parsed, key=lambda e: e["sequence"]):
                 receipt = f"talk:{voice_session_id}:{event['id']}"
                 if not self.history.has_receipt(conversation_id, receipt):
                     fresh.append({"role": event["role"], "content": event["text"].strip(),
                                   "platform_message_id": receipt, "timestamp": self.clock()})
+                    turns.append((event["id"], event["sequence"], event["role"], event["text"].strip(),
+                                  bool(event.get("interrupted"))))
             if fresh:
                 self.history.append(conversation_id, fresh)
-            spoke = []
             if any(m["role"] == "assistant" for m in fresh) and not record["spoke"]:
                 record["spoke"] = True
-                self._advance_cursor(state, record)
                 self._save(conversation_id, state)
-                spoke = list(record.get("job_ids") or ())
-            return [e["id"] for e in parsed], spoke
-
-    def _advance_cursor(self, state, record):
-        # Items the call's instructions carried whole count as read once the assistant spoke in it.
-        watermark = record.get("briefing_watermark")
-        if watermark is None:
-            return
-        cursor = state["activity_cursor"]
-        if cursor is None or cursor_key(watermark) > cursor_key(cursor):
-            state["activity_cursor"] = list(cursor_key(watermark))
+            return [e["id"] for e in parsed], turns, dict(record)
 
     def voice_session(self, account, conversation_id, voice_session_id, live=False):
         """A copy of the account's voice session record; live=True also requires the current, unended call."""
@@ -219,7 +213,7 @@ class TalkStore:
                 raise TalkError(409, "That call has ended. Reopen Talk from the bot.")
             return dict(record)
 
-    def save_snapshot(self, account, conversation_id, voice_session_id, watermark, job_ids):
+    def save_snapshot(self, account, conversation_id, voice_session_id, cards, job_ids):
         """Record a mid-call context update; returns its revision. Nothing counts as read until it is acked."""
         with self.lock:
             state = self._owned(account, conversation_id, bound=True)
@@ -227,14 +221,14 @@ class TalkStore:
             snapshots = record.setdefault("snapshots", {})
             revision = record.get("revision", 0) + 1
             record["revision"] = revision
-            snapshots[str(revision)] = {"watermark": watermark, "job_ids": list(job_ids), "acked": False}
+            snapshots[str(revision)] = {"cards": list(cards), "job_ids": list(job_ids), "acked": False}
             for old in sorted(snapshots, key=int)[:-5]:
                 del snapshots[old]
             self._save(conversation_id, state)
             return revision
 
     def ack_snapshot(self, account, conversation_id, voice_session_id, revision):
-        """Mark a delivered context update read: (job ids it carried); a repeated ack changes nothing."""
+        """Mark a context update appended: (job ids, Pulse cards it carried); a repeated ack changes nothing."""
         with self.lock:
             state = self._owned(account, conversation_id)
             record = self._voice_session(state, voice_session_id)
@@ -242,13 +236,10 @@ class TalkStore:
             if snapshot is None:
                 raise TalkError(404, "That context update is not available.")
             if snapshot["acked"]:
-                return []
+                return [], []
             snapshot["acked"] = True
-            if snapshot["watermark"] is not None:
-                self._advance_cursor(state, {"briefing_watermark": snapshot["watermark"]})
-                record["context_watermark"] = snapshot["watermark"]
             self._save(conversation_id, state)
-            return snapshot["job_ids"]
+            return snapshot["job_ids"], snapshot.get("cards") or []
 
     def agent_session(self, conversation_id):
         session_id = self.history.get_meta(f"hermes_talk:agent_session:{conversation_id}")
@@ -264,8 +255,6 @@ class TalkStore:
             record = self._voice_session(state, voice_session_id)
             if record["ended"] is None:
                 record["ended"], record["end_reason"] = self.clock(), "ended"
-                if record["spoke"]:
-                    self._advance_cursor(state, record)
             state["summary"] = self._summary(conversation_id)
             self._save(conversation_id, state)
             return {"ok": True}

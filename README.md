@@ -40,10 +40,12 @@ Non-goals for this PoC:
   the frozen frontend contract. `static/` and `static/talk/` are frontend-owned.
 - `hermes_talk/`:
   - `config.py` parses the YAML into frozen values.
-  - `store.py` holds the account binding, voice-session ledger, idempotent turn ingestion, the end
-    checkpoint and the read cursor.
+  - `store.py` holds the account binding, voice-session ledger, idempotent turn ingestion and the end
+    checkpoint.
   - `history.py` is Hermes `SessionDB` through its public methods, plus a synthetic in-memory twin.
-  - `activity.py` builds the briefing.
+  - `activity.py` scopes the profile's sessions to the user and gives each a truthful status.
+  - `pulse.py` is the Pulse engine's decisions: cards, fingerprints, importance, selection, item attribution and
+    feedback parsing. `pulse_ledger.py` is its persistent per-account record (see "Pulse").
   - `context.py` composes the instructions and mid-call context updates.
   - `jobs.py` is the task record, its state machine and the job board (dedupe, scheduling, receipts, restart).
   - `agent.py` runs a task as one native `hermes chat` process and decides task readiness.
@@ -57,7 +59,8 @@ The plugin is named `hermes-telegram-talk`. The Python package `hermes_talk`, th
 command, `/tg-voice/` routes, and menu label `Talk` retain their existing names. The stored
 `Telegram Voice` title, `telegram-voice` source, `hermes_talk:*` metadata keys, account binding,
 `talk:*` receipts, conversation summaries, and activity cursors remain compatible. Renaming the
-installed plugin does not create a new conversation or reset its read cursor.
+installed plugin does not create a new conversation or reset its read cursor. A legacy activity cursor is where an
+account's first Pulse scan starts; afterwards each card carries its own read state.
 
 The Talk HTML uses content-qualified `app.js?v=...` and `app.css?v=...` URLs. Their values are the
 first 16 hex characters of each asset's SHA256. Update them when either asset changes. The offline
@@ -71,8 +74,8 @@ written with SQL.
   receipt `talk:<voice_session_id>:<event_id>` as its `platform_message_id`, so a retried batch is
   recognized with `has_platform_message_id`.
 - **Binding and state.** The binding key `hermes_talk:binding:<profile>:tg<bot_id>:<user_id>` is kept
-  with `get_meta`/`set_meta`. So is each conversation's state: voice sessions, summary and read
-  cursor.
+  with `get_meta`/`set_meta`. So is each conversation's state (voice sessions and summary) and each account's
+  Pulse record, `hermes_talk:pulse:<profile>:tg<bot_id>:<user_id>`.
 - **Never stored.** Audio, SDP, reasoning and tool output are never stored. Logs carry method, path,
   status and exception type only.
 
@@ -91,15 +94,15 @@ The server builds the context for every call. Each part has its own character bu
 5. The summary of earlier turns. This is the latest user requests, extracted at `api/end` with no
    model call.
 6. The last `recent_turns` turns of this conversation.
-7. Activity since the last visit. These are the profile's sessions from the configured sources that
-   belong to this Telegram user. Sessions with no chat user (CLI, cron, kanban) are the operator's
-   and are briefed only to `activity.owner_user_id`. Talk's own sessions and other users' sessions
-   are excluded. Each item keeps its session id, source and time, plus a status. Unread items are
-   listed oldest first by (last time, session id), up to `activity_items`. Only lines the final
-   instructions carry whole count as read. A line omitted for lack of room, clipped, or past the
-   item limit is counted and offered again next time. The reader pages through
-   `list_sessions_rich` with overlapping pages, up to 1000 sessions per visit. If more changed, the
-   briefing says older updates were not read, rather than claiming it saw everything.
+7. Activity since the last visit: the Pulse cards selected for this call (see "Pulse"). Sessions come from the
+   configured sources and belong to this Telegram user. Sessions with no chat user (CLI, cron, kanban) are the
+   operator's and are briefed only to `activity.owner_user_id`. Talk's own sessions and other users' sessions are
+   excluded. Each line keeps its call label (`P1`, `P2`...), status, session id, source and time. Up to
+   `activity_items` lines go in, most important first; a line that does not fit whole is left out and counted,
+   never clipped. The reader pages through `list_sessions_rich` with overlapping pages, up to 1000 sessions per
+   visit. If more changed, the briefing says older updates were not read, rather than claiming it saw everything.
+   When room allows, a short "Pulse updates" section tells the model to name updates by title and how to delegate
+   feedback.
 8. The greeting directive, if enabled. The model speaks first only after the call connects and
    mentions at most two updates.
 
@@ -112,11 +115,42 @@ The briefing uses four statuses:
 | `replied` | A stored assistant reply. Delivery to a chat is not proven. |
 | `unknown` | Anything else, including stale open sessions. |
 
-The read cursor is the (last time, session id) key of the last complete item in that call's
-instructions. It moves only after a new assistant turn is stored for the call. A call that fails at
-the provider leaves the briefing unread. An unended call expires after `voice.session_ttl_minutes`
-and still gets its summary. A conversation whose native row was deleted is replaced on the next
-bootstrap, and its old id answers 404.
+Being in the instructions is not being heard. An update stays unread until the call itself shows it was told and
+answered (see "Pulse"). A call that fails at the provider exposes nothing. An unended call expires after
+`voice.session_ttl_minutes` and still gets its summary. A conversation whose native row was deleted is replaced on
+the next bootstrap, and its old id answers 404.
+
+## Pulse
+
+Pulse is Talk's briefing engine, adapted for voice from Hermes Conduit notifier's Pulse (MIT,
+`LICENSES/CONDUIT-NOTIFIER-LICENSE`; mechanisms ported, no code copied; inventory and adaptations in
+[docs/adr/0001-pulse-per-item-evidence.md](docs/adr/0001-pulse-per-item-evidence.md)). One record per account
+(profile, bot, Telegram user) survives reopen, restart and `api/new`, and no other account can read or move it.
+
+- **Candidates and cards.** Each scanned session revision becomes a card fingerprinted by (kind, session,
+  status, normalized title). A changed status supersedes the unread older card of the same session.
+- **Selection.** Importance is the status base (failed 0.9, replied 0.6, active 0.5, unknown 0.3), plus 0.3 for
+  a due follow-up and 0.05 for an unconfirmed mention, minus 0.05 per exposure nobody mentioned (at most 0.2), plus
+  the learned preference. The most important unread cards go first; ties drain the oldest first.
+- **Memory.** Feedback updates per-source counts and per-word topic weights (bounded) that form the learned
+  preference, and a list of recently told items used for deduplication.
+- **Evidence per card, per call.** `candidate` (known), `exposed` (the voice model received it whole, in the
+  instructions or an acknowledged context update), `mentioned` (a settled assistant turn of that call named it and
+  was not spoken over), `acknowledged` (a settled user turn followed that mention in the same call, or feedback).
+  Neither a caption nor audio output proves the user heard anything, so a mention alone never closes a card: a
+  call that ends after one offers it again, marked "mentioned before, not confirmed heard". A greeting names no
+  card and closes none. The client marks an assistant turn the user started speaking over as `interrupted`; it is
+  recorded and is not evidence.
+- **Feedback.** The model delegates `pulse P<n> useful|not useful|dismiss|later|more` (`api/pulse/feedback`).
+  Useful and more acknowledge the card (more also speaks its details), not useful and dismiss close it, later
+  snoozes it for three hours as a follow-up. A resubmitted delegation returns its first outcome.
+- **Follow-ups.** A snoozed card comes back once due, boosted and labelled. An acknowledged `active` card is
+  watched; its next status arrives labelled "follow-up on an earlier update".
+- **Deduplication.** An unchanged session is never told twice. The same news (status and normalized title) from
+  another session within ten minutes of an unread or told card is recorded as a duplicate and not offered.
+
+To change a typical behavior, such as a new status weight or feedback kind, edit `pulse.py` and add a case to
+`verify-pulse.py`; storage shape changes belong in `pulse_ledger.py`.
 
 Secret-shaped strings are redacted from every section. These are `sk-…` keys, bot tokens, JWTs and
 `token=`/`password=` values.
@@ -145,8 +179,9 @@ When `tasks.enabled` is true, the voice model's client delegations become Hermes
    on `speakable`, in 500-byte chunks (Conduit framing), once per call, and then acks with `api/task/ack`.
 5. If the call ended first, the task keeps running. The next call's instructions list it ("running" or its result).
    A result that arrives during a later call goes out as a `session.context.append` from `api/context`, and only its
-   ack (`api/context/ack`) marks it delivered. Results carried in instructions count as delivered once the assistant
-   speaks in that call. The same update carries new Pulse items, and the activity cursor moves only on that ack.
+   ack (`api/context/ack`) marks it delivered. A result carried in instructions counts as delivered once an
+   uninterrupted assistant turn of that call names its task ("task 3"); a greeting does not. The same update carries
+   new Pulse cards, which its ack marks exposed, not heard.
 
 Job states are accepted, running, succeeded, failed, cancelled and interrupted. A running job is stored before its
 process starts. A job whose process could not start fails at once and takes no slot, so queued jobs behind it still
@@ -290,13 +325,14 @@ confirms it with `hermes plugins list`. Real-profile installation and activation
 ## Verify
 
 ```sh
-python3 verify-integrated.py --offline --require-host   # canonical gate: backend + frontend offline, host mandatory
+python3 verify-integrated.py --offline --require-host   # canonical gate: backend, frontend and Pulse offline, host mandatory
 python3 verify-agent.py --require-hermes                 # voice tasks through the real Hermes agent (scripted model),
                                                          # Telegram reports (synthetic transport) and delivery faults
 python3 verify-agent.py --browser <out-dir>              # Chromium delegation job: real app.js, server and tasks
 python3 verify-integrated.py --browser <out-dir>        # legacy and Talk Chromium inventories, capped containers
 python3 verify-frontend.py --mobile <out-dir>            # Chromium and actual WebKit: cold/warm assets, rotation, retry and native audio unlock
 python3 verify-backend.py --offline     # full backend gate (below)
+python3 verify-pulse.py --offline       # Pulse per-item acceptance through the real routes, memory and SessionDB
 python3 verify-frontend.py --offline    # legacy 26 + frontend unit checks + HTTP contract on this backend
 python3 verify.py --offline             # legacy 26 signaling/security checks only
 python3 verify.py --browser <out-dir>   # legacy UI/lifecycle run in a capped --network none container
@@ -315,7 +351,7 @@ python3 -m hermes_talk.fixtures         # synthetic Talk server for frontend wor
    - reopen continuity and the summary;
    - explicit-new isolation;
    - clipping and config refusals;
-   - activity scoping, status and cursor;
+   - activity scoping and status, and Pulse cards that only a named, answered mention acknowledges;
    - provider and credential failure;
    - expiry;
    - logs.
@@ -364,6 +400,9 @@ the package's SVG avatar. All identities and text remain synthetic.
 - [x] Authenticated, account-bound persistent conversation; reopen resumes; explicit new is isolated
 - [x] Settled text and bounded summaries in native Hermes history; no audio, SDP or tool output
 - [x] Scoped SOUL, allowlisted skills and truthful activity briefing within explicit budgets
+- [x] Pulse: per-item exposure, mention and acknowledgement; selection, memory, feedback, follow-ups and
+  deduplication per account (`verify-pulse.py`, memory and real SessionDB, plus the Chromium browser job)
+- [ ] Pulse attribution and feedback with a real GPT-Live model (manager)
 - [x] Frozen frontend contract (`INTERFACE.md`) and synthetic fixtures
 - [x] Plugin registers and serves in a disposable Hermes home
 - [ ] Real GPT-Live call with composed context on the VPS (manager)
@@ -380,5 +419,7 @@ The project code is this repository's own. The signaling exchange is adapted fro
 (MIT); see `LICENSES/CONDUIT-LICENSE`. The delegation append framing and 500-byte chunking in `static/talk/app.js`
 follow Conduit `GPTLiveProtocol.swift` at 4b6889097d53ad731089f255b03afe534ef3da45; the task flow (commentary
 progress, speakable result on the same delegation id, call and task lifetimes kept apart) follows its
-`GPTLiveDelegationBridge.swift` and `VoiceBackgroundJobs.swift`. No other Conduit code is copied. The Pulse-style briefing is an independent implementation
-inspired by Conduit notifier's Pulse. No code was copied from it.
+`GPTLiveDelegationBridge.swift` and `VoiceBackgroundJobs.swift`. No other Conduit code is copied. Pulse adapts the
+mechanisms of Conduit notifier's Pulse at d25391f6382211dc22e90672c02ea2709112e3dc and the iOS `PulseFeed` at
+b7fd1cc81bf72c6ef8c35a87cd6b15a135fabd5c (both MIT; `LICENSES/CONDUIT-NOTIFIER-LICENSE`,
+`LICENSES/CONDUIT-LICENSE`). Its code is written for Talk; no upstream code was copied.

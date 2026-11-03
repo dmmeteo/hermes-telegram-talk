@@ -1,4 +1,4 @@
-"""A small Pulse-style briefing read from the profile's own sessions.
+"""Pulse candidates read from the profile's own sessions: who may hear about a row and its truthful status.
 
 Status comes only from what the store recorded: a failed-turn row or an
 error end is "failed"; a recently active open session is "active"; a stored
@@ -6,9 +6,9 @@ assistant reply is "replied" (delivery to a chat platform is not proven);
 anything else, including stale open sessions, is "unknown". Nothing is
 reported as done unless a reply row exists.
 
-Items are ordered by (last_active, session id), oldest first. The read cursor
-is the key of the last complete item the final instructions carried, so an
-item that was cut, omitted or tied on time is offered again rather than skipped.
+Rows are scanned by (last_active, session id). What was read is no longer a
+cursor: each row becomes a Pulse card (pulse.py) whose own evidence says whether
+it was exposed, mentioned or acknowledged.
 """
 from datetime import datetime, timezone
 
@@ -51,7 +51,9 @@ def unread(rows, *, since, user_id, owner_user_id, sources, exclude_ids):
     return sorted(out, key=key)
 
 
-def line(row, now):
-    when = datetime.fromtimestamp(row["last_active"], timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    title = clip(row.get("title") or row.get("preview") or "untitled", 80)
-    return f"- [{status(row, now)}] {title} ({row['source']} session {row['id']}, {when})"
+def title(row):
+    return clip(row.get("title") or row.get("preview") or "untitled", 80)
+
+
+def when(timestamp):
+    return datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")

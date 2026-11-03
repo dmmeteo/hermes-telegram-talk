@@ -22,6 +22,7 @@ import hashlib
 import http.client
 import json
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -332,24 +333,28 @@ def pulse_visibility_and_cursor(model):
         e.history.append(before, [{"role": "assistant", "content": "built", "platform_message_id": "b1",
                                    "timestamp": time.time()}])
         conv, vs = e.call()
-        assert "Synthetic owner build" in e.instructions()
-        state = lambda: json.loads(e.history.get_meta(f"hermes_talk:conversation:{conv}"))
-        assert state()["activity_cursor"] is None, "the cursor waits for the assistant to speak"
-        e.events(conv, vs, ("assistant", "hello"))
-        spoke = state()["activity_cursor"]
-        assert spoke and spoke[1] == before, spoke
+        assert re.search(r"^- P1 \[active\] Synthetic owner build \(cli session ", e.instructions(), re.M)
+        card = lambda title: next(c for c in e.talk.pulse.cards(e.talk.account(fx.USER_ID)) if c["title"] == title)
+        assert card("Synthetic owner build")["state"] == "exposed", "supplied to the model is not heard"
+        e.events(conv, vs, ("assistant", "hello"), ("user", "hi"))
+        assert card("Synthetic owner build")["state"] == "exposed", "a greeting consumed the briefing"
+        e.events(conv, vs, ("assistant", "hello again"), ("user", "hi"), ("assistant", "Synthetic owner build is built."),
+                 ("user", "great"))
+        spoke = card("Synthetic owner build")
+        assert spoke["state"] == "acknowledged" and spoke["acknowledged"]["call"] == vs, spoke
         later = e.history.create_session("Synthetic later deploy", "cli")
         e.history.append(later, [{"role": "assistant", "content": "deployed", "platform_message_id": "l1",
                                   "timestamp": time.time() + 1}])
         status, update = e.post("context", {"conversation_id": conv, "voice_session_id": vs})
         assert status == 200 and "Synthetic later deploy" in update["text"] and "Synthetic owner build" not in update["text"]
-        assert state()["activity_cursor"] == spoke, "an unacked update leaves the cursor in place"
+        assert card("Synthetic later deploy")["state"] == "candidate", "an unacked update exposes nothing"
         e.post("context/ack", {"conversation_id": conv, "voice_session_id": vs, "revision": update["revision"]})
-        assert state()["activity_cursor"][1] == later
+        assert card("Synthetic later deploy")["state"] == "exposed", "appended is exposed, not heard"
         _, vs2 = e.call()
-        assert "Synthetic later deploy" not in e.instructions() and "Synthetic owner build" not in e.instructions()
-        return {"briefed_at_open": before, "cursor_after_speech": spoke, "delivered_mid_call": later,
-                "cursor_after_ack": state()["activity_cursor"]}
+        brief = e.instructions().split("## Activity since the last visit\n", 1)[1].split("\n\n## ", 1)[0]
+        assert "Synthetic owner build" not in brief and "Synthetic later deploy" in brief, brief
+        return {"briefed_at_open": before, "after_greeting": "exposed", "acknowledged": spoke["acknowledged"]["by"],
+                "delivered_mid_call": later, "unheard_update_offered_again": True}
     finally:
         e.close()
 
@@ -828,6 +833,8 @@ def receipt_ack_no_double_speech(model):
         assert "SCRIPTED-ANSWER: late result" in e.instructions()
         assert e.native(late["job"]["id"]).receipt == "undelivered", "instructions alone are not a receipt"
         e.events(conv, vs3, ("assistant", "your late task finished"))
+        assert e.native(late["job"]["id"]).receipt == "undelivered", "a greeting is not item-specific output"
+        e.events(conv, vs3, ("assistant", f"Task {late['job']['number']} finished: late result."))
         assert e.native(late["job"]["id"]).delivered_via == "instructions"
         return {"acks": 3, "delivery_notes": 1, "redelivered_next_call": False, "late_result_via": "instructions"}
     finally:

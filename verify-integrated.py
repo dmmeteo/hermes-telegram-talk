@@ -5,7 +5,8 @@
       verify-backend.py --offline: legacy signaling suite, Talk checks on in-memory history, and the same
           checks plus plugin registration and `hermes talk serve` under a real Hermes runtime in disposable
           homes (see its docstring for how the runtime is found);
-      verify-frontend.py --offline: frontend unit checks and the HTTP contract against this backend.
+      verify-frontend.py --offline: frontend unit checks and the HTTP contract against this backend;
+      verify-pulse.py --offline: per-item Pulse acceptance through the real routes, in memory and on SessionDB.
       --require-host fails instead of skipping when no Hermes runtime is found.
   python3 verify-integrated.py --browser OUT_DIR
       the legacy Chromium inventory (verify.py --browser) and the Talk Chromium inventory
@@ -22,7 +23,8 @@ import sys
 ROOT = Path(__file__).resolve().parent
 COUNTS = {"legacy": r"(\d+)/(\d+) offline checks passed", "memory": r"(\d+)/(\d+) talk checks passed \[memory\]",
           "host": r"(\d+)/(\d+) talk checks passed \[host\]", "frontend": r"(\d+)/(\d+) Talk frontend checks passed",
-          "http": r"Ran (\d+) tests?()"}
+          "http": r"Ran (\d+) tests?()", "pulse_memory": r"(\d+)/(\d+) pulse checks passed \[memory\]",
+          "pulse_host": r"(\d+)/(\d+) pulse checks passed \[host\]"}
 
 
 def stage(name, cmd, env=None):
@@ -50,8 +52,12 @@ def offline(require_host):
     ok = code == 0 and "BACKEND OK" in backend
     code, frontend = stage("frontend", [sys.executable, "verify-frontend.py", "--offline"])
     ok = ok and code == 0 and "TALK_FRONTEND_OFFLINE_OK" in frontend and "\nOK" in frontend
-    counts = {**counted(backend, ("legacy", "memory", "host")), **counted(frontend, ("frontend", "http"))}
-    if "host" not in counts:
+    code, pulse = stage("pulse", [sys.executable, "verify-pulse.py", "--offline"],
+                        {"HERMES_TALK_REQUIRE_HOST": "1"} if require_host else None)
+    ok = ok and code == 0 and "TALK_PULSE_OK" in pulse
+    counts = {**counted(backend, ("legacy", "memory", "host")), **counted(frontend, ("frontend", "http")),
+              **counted(pulse, ("pulse_memory", "pulse_host"))}
+    if "host" not in counts or "pulse_host" not in counts:
         ok = ok and not require_host
     print("counts", json.dumps(counts, sort_keys=True))
     print("TALK_INTEGRATED_OFFLINE_" + ("OK" if ok else "FAILED"))

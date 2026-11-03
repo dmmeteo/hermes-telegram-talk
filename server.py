@@ -41,7 +41,7 @@ MINT_LIMIT = 6
 MINT_WINDOW_S = 60.0
 MAX_ACTIVE_EXCHANGES = 2
 TALK_LIMITS = {"bootstrap": 30, "new": 10, "events": 120, "end": 30, "task": 20, "tasks": 240, "task/cancel": 20,
-               "task/ack": 60, "context": 30, "context/ack": 30}
+               "task/ack": 60, "context": 30, "context/ack": 30, "pulse/feedback": 30}
 CALL = {"initData", "conversation_id", "voice_session_id"}
 TALK_ROUTES = {"bootstrap": ({"initData"}, set()),
                "session": ({"initData", "sdp"}, {"conversation_id"}),
@@ -53,7 +53,8 @@ TALK_ROUTES = {"bootstrap": ({"initData"}, set()),
                "task/cancel": ({"initData", "conversation_id", "job_id"}, set()),
                "task/ack": (CALL | {"job_id"}, set()),
                "context": (CALL, set()),
-               "context/ack": (CALL | {"revision"}, set())}
+               "context/ack": (CALL | {"revision"}, set()),
+               "pulse/feedback": (CALL | {"delegation_item_id", "request"}, set())}
 AVATAR_TYPES = {".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
 MAX_CONNECTIONS = 32
 CALL_ID = re.compile(r"rtc_[A-Za-z0-9_-]+|[0-9a-fA-F-]{36}")
@@ -263,6 +264,9 @@ class VoiceApp:
                 return self.talk.ack(user_id, body["conversation_id"], body["voice_session_id"], body["job_id"])
             if route == "context":
                 return self.talk.context(user_id, body["conversation_id"], body["voice_session_id"])
+            if route == "pulse/feedback":
+                return self.talk.pulse_feedback(user_id, body["conversation_id"], body["voice_session_id"],
+                                                body["delegation_item_id"], body["request"])
             return self.talk.context_ack(user_id, body["conversation_id"], body["voice_session_id"], body["revision"])
         except TalkError as exc:
             raise ApiError(exc.status, exc.message)
@@ -284,12 +288,13 @@ class VoiceApp:
             if not self.talk:
                 return {"sdp": self._exchange(sdp, session_config())}
             try:
-                conversation_id, instructions, watermark, report = self.talk.prepare(user_id, body.get("conversation_id"))
+                conversation_id, instructions, cards, report = self.talk.prepare(user_id, body.get("conversation_id"))
             except TalkError as exc:
                 raise ApiError(exc.status, exc.message)
             answer = self._exchange(sdp, self.talk.session_config(instructions))
             try:
-                voice_session_id = self.talk.started(user_id, conversation_id, watermark, report["job_ids"])
+                voice_session_id = self.talk.started(user_id, conversation_id, cards, report["job_ids"],
+                                                     report["job_numbers"])
             except TalkError as exc:  # e.g. api/new rebound the conversation during the exchange
                 raise ApiError(exc.status, exc.message)
             return {"sdp": answer, "type": "answer", "voice_session_id": voice_session_id,
