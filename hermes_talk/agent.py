@@ -24,6 +24,7 @@ CHILD_ENV_DROP = ("TG_VOICE_BOT_TOKEN", "TG_VOICE_ALLOWED_USER_IDS", "HERMES_YOL
 APPROVING = {"approve", "off", "allow", "yes", "true"}
 CANCEL_GRACE_S = 8.0
 OUTPUT_MAX_BYTES = 4 * 1024 * 1024
+SPOOL = Path(__file__).resolve().parent / "spool.py"
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,8 @@ class Outcome:
     text: str
     error: str
     session_id: str
+    text_cut: int = 0
+    oversized: int = 0
 
 
 def hermes_command():
@@ -102,29 +105,36 @@ def alive(pid, start):
 
 
 def read_outcome(path):
-    """The final result event of a job's stream-json output, or None if the run never reported one."""
+    """The final result event of a job's output record, or None if the run never reported one.
+
+    The record is the bounded file spool.py writes; a raw stream-json file from an earlier Talk
+    version is read the same way, line by line.
+    """
+    session_id, result, oversized = "", None, 0
     try:
         with open(path, "rb") as handle:
-            raw = handle.read(OUTPUT_MAX_BYTES)
+            for raw in handle:
+                if len(raw) > OUTPUT_MAX_BYTES or not raw.startswith(b"{"):
+                    continue
+                try:
+                    event = json.loads(raw)
+                except ValueError:
+                    continue
+                if event.get("type") == "system" and event.get("session_id"):
+                    session_id = str(event["session_id"])
+                elif event.get("type") == "result":
+                    result = event
+                elif event.get("type") == "spool":
+                    oversized = int(event.get("oversized") or 0)
     except OSError:
         return None
-    session_id, result = "", None
-    for line in raw.decode("utf-8", "replace").splitlines():
-        if not line.startswith("{"):
-            continue
-        try:
-            event = json.loads(line)
-        except ValueError:
-            continue
-        if event.get("type") == "system" and event.get("session_id"):
-            session_id = str(event["session_id"])
-        if event.get("type") == "result":
-            result = event
     if result is None:
-        return None
+        return Outcome(1, "", "The run's final output line exceeded the spool limit.", session_id, 0, oversized) \
+            if oversized else None
     code = result.get("exit_code")
     return Outcome(exit_code=code if type(code) is int else 1, text=str(result.get("text") or ""),
-                   error=str(result.get("error") or ""), session_id=str(result.get("session_id") or session_id))
+                   error=str(result.get("error") or ""), session_id=str(result.get("session_id") or session_id),
+                   text_cut=int(result.get("text_cut") or 0), oversized=oversized)
 
 
 class NativeAgent:
@@ -147,18 +157,21 @@ class NativeAgent:
         return argv + (["--resume", resume] if resume else [])
 
     def start(self, job_id, prompt, resume):
-        """Start the native run; returns (process, output path). The caller persists pid first-class."""
+        """Start the native run behind its spool; returns (process, output path). The caller persists the pid."""
         self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         output = self.dir / f"{job_id}.jsonl"
-        with open(output, "wb") as out:
-            process = subprocess.Popen(self.argv(resume), cwd=str(self.tasks.workdir), env=self.env,
-                                       stdin=subprocess.PIPE, stdout=out, stderr=subprocess.DEVNULL,
-                                       start_new_session=True)
+        process = subprocess.Popen([sys.executable, str(SPOOL), str(output), "--", *self.argv(resume)],
+                                   cwd=str(self.tasks.workdir), env=self.env, stdin=subprocess.PIPE,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         try:
             process.stdin.write(prompt.encode("utf-8"))
-            process.stdin.close()
         except OSError:
             pass
+        finally:
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
         return process, str(output)
 
     @staticmethod

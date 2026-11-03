@@ -8,11 +8,14 @@ import json
 import logging
 import re
 import time
+from dataclasses import asdict
 
 from . import activity
 from .agent import NativeAgent, Readiness
+from .config import PRIVATE_NAMES
 from .context import compose, update
-from .jobs import DELEGATION_ID, OPEN, UNDELIVERED, JobBoard
+from .jobs import DELEGATION_ID, OPEN, SUCCEEDED, UNDELIVERED, JobBoard
+from .receipts import DIRECTIVE, Destination, ReportDesk, TelegramSender
 from .store import SOURCE, TalkError, TalkStore, VoiceScope, clip
 
 logger = logging.getLogger("tg-voice")
@@ -24,10 +27,14 @@ SECRETS = [re.compile(p) for p in (
     r"(?i)\b(api[_-]?key|token|secret|password|bearer)\b\s*[:=]?\s*[A-Za-z0-9_\-./+]{12,}",
 )]
 CANCEL = re.compile(r"(?i)^\s*(?:please\s+)?(?:cancel|stop)\s+(?:hermes\s+)?task\s*#?\s*(\d{1,4})\b")
+RESULT = re.compile(r"(?i)^\s*(?:the\s+)?(?:full\s+)?result\s+of\s+(?:hermes\s+)?task\s*#?\s*(\d{1,4})\s*[.!?]?\s*$")
+
+SYNOPSIS_CHARS = 160
 TASK_PROMPT = (
     "[Hermes Telegram Talk voice task {number}. It was delegated from a Telegram voice call and nobody watches this run "
     "live. Use your tools as needed. Nobody can approve a flagged action during this run: if one is blocked, say "
-    "so instead of working around it. End with a short plain-language result that can be read aloud.]"
+    "so instead of working around it. End with a short plain-language result that can be read aloud, in the "
+    "language of the conversation.]"
 )
 NOT_READY = Readiness(False, "Tasks are not available for this account.")
 
@@ -54,7 +61,7 @@ class TalkRuntime:
     activity_scan_max = 1000
 
     def __init__(self, config, bot_token, history, soul=native_soul, skill=native_skill, clock=time.time,
-                 agent=None, home=None):
+                 agent=None, home=None, sender=None):
         self.config = config
         self.bot_id = bot_token.split(":", 1)[0]
         self.history = history
@@ -62,11 +69,16 @@ class TalkRuntime:
         self.soul = soul
         self.skill = skill
         self.clock = clock
-        self.board = None
+        self.board = self.desk = None
         if config.tasks.enabled:
             self.agent = agent or NativeAgent(config.tasks, home)
+            r = config.receipts
+            if r.enabled:
+                self.desk = ReportDesk(history, sender or TelegramSender(bot_token, r.send_timeout_s), clock,
+                                       home or self.agent.home, r.max_chars, r.attempts, r.backoff_s, redact)
             self.board = JobBoard(history, self.agent, config.tasks, clock, self._task_prompt,
-                                  lambda job, sid: self.store.bind_agent_session(job.conversation_id, sid), redact)
+                                  lambda job, sid: self.store.bind_agent_session(job.conversation_id, sid), redact,
+                                  self.desk)
             self.board.reconcile()
 
     def account(self, user_id):
@@ -118,15 +130,52 @@ class TalkRuntime:
         return candidates, len(pending), "" if exhaustive else activity.NOT_EXHAUSTIVE
 
     def _job_items(self, account, conversation_id, exclude_voice_session=None):
-        """(id, line) task outcomes not yet handed to the voice model, then open tasks as status."""
+        """(id, line, synopsis) task outcomes not yet handed to the voice model, oldest first, then open tasks."""
         if self.board is None:
             return []
         jobs = self.board.of_conversation(account.key, conversation_id)
-        done = [(j.id, "- " + redact(j.spoken())) for j in jobs
+        done = [(j.id, "- " + redact(j.spoken()), self._synopsis(j)) for j in jobs
                 if j.terminal and j.receipt == UNDELIVERED and j.voice_session_id != exclude_voice_session]
-        running = [(f"open:{j.id}", f"- Hermes task {j.number} ({clip(redact(j.request), 80)}) is {j.state}.")
+        running = [(f"open:{j.id}", f"- Hermes task {j.number} ({clip(redact(j.request), 80)}) is {j.state}.", "")
                    for j in jobs if j.state in OPEN]
         return done + running
+
+    @staticmethod
+    def _synopsis(job):
+        body = job.result if job.state == SUCCEEDED else job.error
+        return (f"- Hermes task {job.number} ({clip(redact(job.request), 60)}) {job.spoken_state()}. "
+                f"Its result is long ({len(body)} characters); it begins: {clip(redact(body), SYNOPSIS_CHARS)} "
+                f"To hear all of it, delegate exactly \"result of task {job.number}\".")
+
+    def _destinations(self, user_id):
+        return [d for d in self.config.receipts.destinations if user_id in d.user_ids] if self.desk else []
+
+    def _reports_note(self, user_id):
+        if self.desk is None:
+            return ""
+        names = ", ".join(d.name for d in self._destinations(user_id))
+        note = (" When a task finishes, Hermes also sends a short report to the user's Telegram chat with this bot, "
+                "even after the call ends.")
+        if names:
+            note += (f" Only if the user explicitly asks for the report to go to one of: {names}, end the delegated "
+                     "task with a line \"REPORT TO: <name>\"; it then goes there instead.")
+        return note
+
+    def _report_to(self, user_id, request):
+        """(request without a directive, bound destination): the user's own chat unless they named a configured one."""
+        match = DIRECTIVE.search(request)
+        if match is None or self.desk is None:
+            return request, asdict(Destination.private(user_id, self.bot_id)) if self.desk else None
+        name = " ".join(match.group(1).split()).lower()
+        stripped = (request[:match.start()] + request[match.end():]).strip()
+        if name in PRIVATE_NAMES:
+            return stripped, asdict(Destination.private(user_id, self.bot_id))
+        for d in self._destinations(user_id):
+            if d.name.lower() == name:
+                return stripped, asdict(Destination("named", d.chat_id, d.thread_id, d.name, self.bot_id))
+        names = ", ".join(d.name for d in self._destinations(user_id)) or "none"
+        raise TalkError(403, f"That report destination is not available for this account (available: {names}). "
+                             "Nothing was started.")
 
     def prepare(self, user_id, conversation_id):
         """Instructions for the next call on the account's current conversation."""
@@ -144,7 +193,7 @@ class TalkRuntime:
         lines = [redact(activity.line(row, now)) for row in candidates]
         instructions, report = compose(c, soul, [s for s in skills if s[1]], redact(state.get("summary") or ""),
                                        turns, lines, total, note, self.readiness(user_id).ready,
-                                       self._job_items(account, conversation_id))
+                                       self._job_items(account, conversation_id), self._reports_note(user_id))
         # Only items the final text carries whole can be marked read once the assistant speaks.
         k = report["activity_items"]
         watermark = list(activity.key(candidates[k - 1])) if k else None
@@ -197,10 +246,15 @@ class TalkRuntime:
             raise TalkError(503, "Tasks are off in the Talk config.")
         return self.account(user_id)
 
+    def _public_job(self, job):
+        return job.public(self.desk.get(job.id) if self.desk else None)
+
     def task(self, user_id, conversation_id, voice_session_id, delegation_item_id, request):
-        """Start a native task for a delegation of the live call, or cancel one ("cancel task N")."""
+        """Start a native task for a delegation of the live call, cancel one ("cancel task N") or repeat
+        one's stored result ("result of task N")."""
         cancel = CANCEL.match(request) if isinstance(request, str) else None
-        account = self._board_for(user_id) if cancel else self._tasks_for(user_id)
+        recall = RESULT.match(request) if isinstance(request, str) else None
+        account = self._board_for(user_id) if cancel or recall else self._tasks_for(user_id)
         if not isinstance(delegation_item_id, str) or not DELEGATION_ID.fullmatch(delegation_item_id):
             raise TalkError(400, "Malformed delegation id.")
         limit = self.config.tasks.request_chars
@@ -210,32 +264,44 @@ class TalkRuntime:
         if cancel:
             job = self.board.by_number(account.key, conversation_id, int(cancel.group(1)))
             job = self.board.cancel(account.key, conversation_id, job.id)
-            return {"job": job.public(), "created": False, "channel": "speakable",
+            return {"job": self._public_job(job), "created": False, "channel": "speakable",
                     "reply": f"Hermes task {job.number} " + ("is being cancelled." if job.state in OPEN else f"already {job.state}.")}
+        if recall:
+            job = self.board.by_number(account.key, conversation_id, int(recall.group(1)))
+            if not job.terminal:
+                reply = f"Hermes task {job.number} is still {job.state}; it has no result yet."
+            else:
+                reply = redact(job.spoken())
+                if job.state == SUCCEEDED and len(job.result) >= self.config.tasks.result_chars - 1:
+                    reply += " That is as much of the result as voice keeps."
+            return {"job": self._public_job(job), "created": False, "channel": "speakable", "reply": reply}
+        request, report_to = self._report_to(user_id, request)
+        if not request:
+            raise TalkError(400, "A task request must say what to do.")
         job, created = self.board.submit(account.key, conversation_id, voice_session_id, record.get("generation", 0),
-                                         delegation_item_id, " ".join(request.split()))
+                                         delegation_item_id, " ".join(request.split()), report_to)
         reply = (f"Hermes is working on this as background task {job.number}. Its result will follow on this "
                  "delegation; do not guess it." if created and job.state in OPEN else
                  f"This was already sent to Hermes as task {job.number}; it is {job.state}.")
-        return {"job": job.public(), "created": created, "channel": "commentary", "reply": reply}
+        return {"job": self._public_job(job), "created": created, "channel": "commentary", "reply": reply}
 
     def tasks(self, user_id, conversation_id, voice_session_id):
         account = self.account(user_id)
         self.store.voice_session(account, conversation_id, voice_session_id)
         jobs = self.board.of_conversation(account.key, conversation_id) if self.board else []
         pending = any(j.terminal and j.receipt == UNDELIVERED and j.voice_session_id != voice_session_id for j in jobs)
-        return {"jobs": [j.public() for j in jobs], "context_pending": pending,
+        return {"jobs": [self._public_job(j) for j in jobs], "context_pending": pending,
                 "tasks": {"available": self.readiness(user_id).ready}}
 
     def cancel(self, user_id, conversation_id, job_id):
         account = self._board_for(user_id)
         self.store.owned(account, conversation_id)
-        return {"job": self.board.cancel(account.key, conversation_id, job_id).public()}
+        return {"job": self._public_job(self.board.cancel(account.key, conversation_id, job_id))}
 
     def ack(self, user_id, conversation_id, voice_session_id, job_id):
         account = self._board_for(user_id)
         self.store.voice_session(account, conversation_id, voice_session_id)
-        return {"job": self.board.ack(account.key, conversation_id, voice_session_id, job_id).public()}
+        return {"job": self._public_job(self.board.ack(account.key, conversation_id, voice_session_id, job_id))}
 
     def context(self, user_id, conversation_id, voice_session_id):
         """An explicit mid-call refresh: task outcomes and Pulse items the live call has not received yet."""

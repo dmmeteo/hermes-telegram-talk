@@ -1,19 +1,21 @@
 {
   "source": "hermes-telegram-talk: native task backend, receipts and mobile/rename integration; exact tested bytes",
   "files": {
-    "INTERFACE.md": "e9f6294a91223d1b11618b80da84013134210218e5c608ce46c1e3aa8746a1e7",
+    "INTERFACE.md": "b2001462f4798ae7a910aa670c6e8103c45d399cf25f9a274125d07f6dd30521",
     "LICENSES/CONDUIT-LICENSE": "0d4605059a86488f24fae7601a404abe36d305d6b56d7f5e01225507c8c8e3b0",
     "hermes_talk/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "hermes_talk/activity.py": "cbaf19fcbba7f0a527b161ca66b7cbf0e22756b59eba48d51b4ee682801a9776",
-    "hermes_talk/agent.py": "5a38ed10e9236d7ec8692e6b60ed497687c4ceb6b56916aba1ba33f50162060a",
+    "hermes_talk/agent.py": "5f37e642edc87fc20e060356fac2fc9161361989814abc663bffc6c062ebefde",
     "hermes_talk/assets/avatar.svg": "23c225ebdc39efb2bdb7d06296ae03596af5fae603c3de30b185d096057bbc5b",
-    "hermes_talk/config.py": "cc717de3eb7c641a5063fb54d3c3b57af009511014fb3e841436a7a03b5561da",
-    "hermes_talk/context.py": "37984a8e2f11d6a94ed079f5cb7fa2c02a9967eb9d53c77f66961c6ea7070b79",
+    "hermes_talk/config.py": "268cbd0ca08907e2f93da20c80c84e3990c09f75723ffd463dfc4bc0264c8a44",
+    "hermes_talk/context.py": "197e42571064304a97dd0f8c3863b821e413aaa08115a59d162215dd27022119",
     "hermes_talk/fixtures.py": "fd30721b7e53d6a4c860d81618c8cae43456c28710f57869012f8a1781135502",
     "hermes_talk/history.py": "a8530de7fc69d1a3cdeac2c0c7f905da8e2c969655740f8468340240718c7859",
-    "hermes_talk/jobs.py": "aea3c6fc79b8cb3ce97fb441e6d0a17c1f3d331129f45c484cba4bd4253a75a5",
+    "hermes_talk/jobs.py": "47b9aa5f1aa922d18be1da0152156ba3af69eca95c4532316bcdacea5ee5b5fc",
+    "hermes_talk/receipts.py": "1293b82624dbd6aa239ff50c3a4aa73dc7a029de4c0fcb1f15232462ae4541b2",
+    "hermes_talk/spool.py": "e99dfdf769a0eed5c0e63072ca4a527ea5c83df744b95852443ec2e7035633d3",
     "hermes_talk/store.py": "bb1b902cd83804e03f6e20ec75960a4578b2967eb7cc3e2b6d34191515af3eda",
-    "hermes_talk/talk.py": "aa822cb75f706ab0696f3ba6025148da4647c073dd0cc45643053dbbc2660db3",
+    "hermes_talk/talk.py": "82feb285ade766513f0992c59acbcacab14d73123e764a699280a7ecfd3029e9",
     "server.py": "4b2858f0ae389b77b682b1754c65a368647a523e53998b761ba98144ff2ea0ce"
   }
 }

@@ -37,6 +37,8 @@ from hermes_talk import fixtures as fx  # noqa: E402
 from hermes_talk.config import parse_config  # noqa: E402
 
 NO_TASK_USER = 1003
+BLACKHOLE = "http://127.0.0.1:9"
+TELEGRAM = None
 PLUGIN_FILES = ("plugin.yaml", "__init__.py", "server.py", "hermes_talk", "static", "LICENSES")
 TERMINAL = ("succeeded", "failed", "cancelled", "interrupted")
 
@@ -46,11 +48,14 @@ def model_config(model, extra=""):
             f"  api_key: synthetic-local-key\n{extra}")
 
 
-def talk_data(workdir, profile="synthetic", **tasks):
-    return fx.config_data(profile={"id": profile, "display_name": "Synthetic Talk"},
+def talk_data(workdir, profile="synthetic", receipts=None, **tasks):
+    data = fx.config_data(profile={"id": profile, "display_name": "Synthetic Talk"},
                           tasks={"enabled": True, "user_ids": [fx.USER_ID, fx.OTHER_USER_ID],
                                  "toolsets": ["file", "terminal"], "workdir": str(workdir),
                                  "run_budget_seconds": 120, **tasks})
+    if receipts is not None:
+        data["receipts"] = receipts
+    return data
 
 
 def free_port():
@@ -80,7 +85,7 @@ def init(user=fx.USER_ID):
 class Env:
     """One disposable profile with the real Talk runtime and server; root may be reused to restart."""
 
-    def __init__(self, model, root=None, profile="synthetic", profile_extra="", **tasks):
+    def __init__(self, model, root=None, profile="synthetic", profile_extra="", agent=None, **tasks):
         self.model = model
         self.root = Path(root or tempfile.mkdtemp(prefix="talk-agent-"))
         self.home = self.root / "home"
@@ -94,7 +99,8 @@ class Env:
         from hermes_talk.talk import TalkRuntime
         self.config = parse_config(talk_data(self.work, profile, **tasks), self.home)
         self.history = NativeHistory(self.home)
-        self.talk = TalkRuntime(self.config, fx.BOT_TOKEN, self.history, home=self.home)
+        self.talk = TalkRuntime(self.config, fx.BOT_TOKEN, self.history, home=self.home, agent=agent)
+        self.desk = self.talk.desk
         self.fake = fx.FakeUpstream()
         self.app = server.VoiceApp(fx.BOT_TOKEN, {fx.USER_ID, fx.OTHER_USER_ID, NO_TASK_USER}, fx.ORIGIN,
                                    resolve=self.fake.resolve, post=self.fake.post, talk=self.talk)
@@ -412,10 +418,11 @@ def restart_job_reconciliation(model):
     work.mkdir(parents=True)
     fx.write_home(home)
     (home / "config.yaml").write_text(model_config(model))
-    data = talk_data(work)
+    # Reports are checked in-process against the synthetic transport; this served process sends none.
+    data = talk_data(work, receipts={"enabled": False})
     (root / "talk.yaml").write_text(json.dumps(data))
     conv, vs = prepare_call(home, data)
-    env = {**os.environ, "HERMES_HOME": str(home), "TG_VOICE_BOT_TOKEN": fx.BOT_TOKEN,
+    env = {**os.environ, "HERMES_HOME": str(home), "TG_VOICE_BOT_TOKEN": fx.BOT_TOKEN, "TELEGRAM_PROXY": BLACKHOLE,
            "TG_VOICE_ALLOWED_USER_IDS": f"{fx.USER_ID},{fx.OTHER_USER_ID}"}
     port = free_port()
     proc = serve(root, port, env)
@@ -534,7 +541,8 @@ def plugin_native_install(model):
     user_home = root / "home"
     user_home.mkdir()
     hermes = str(Path(sys.executable).parent / "hermes")
-    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(user_home), "PYTHONDONTWRITEBYTECODE": "1"}
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(user_home), "PYTHONDONTWRITEBYTECODE": "1",
+           "TELEGRAM_PROXY": BLACKHOLE}
     native = lambda *args: subprocess.run([hermes, *args], cwd=root, env=env, capture_output=True, text=True, timeout=120)
     proc = None
     profile = user_home / ".hermes" / "profiles" / "synthetic"
@@ -586,9 +594,11 @@ def plugin_native_install(model):
                 break
             time.sleep(0.3)
         assert job["state"] == "succeeded" and marker in job["result"], job
+        assert job["report"] and job["report"]["destination"] == "this Telegram chat", job
         assert not (user_home / ".hermes" / "installs").exists(), "no Hermes runtime was provisioned"
         return {"installed_server": str(target / "server.py").replace(str(root), "<disposable>"), "marker": marker,
-                "job": job["id"], "tasks_available": True}
+                "job": job["id"], "tasks_available": True, "default_report": job["report"],
+                "report_network": f"TELEGRAM_PROXY={BLACKHOLE}; no Telegram egress possible from this check"}
     finally:
         if proc:
             proc.terminate()
@@ -707,14 +717,471 @@ def receipt_ack_no_double_speech(model):
         e.close()
 
 
+def stored_report(e, job_id):
+    from hermes_talk import receipts
+    return receipts.load(e.history.get_meta(receipts.report_key(job_id)))
+
+
+def settled_report(e, job_id, timeout=20):
+    report = e.talk.desk.wait_settled(job_id, timeout)
+    assert report is not None and report.state in ("sent", "failed", "uncertain"), report
+    return report
+
+
+def telegram_default_receipt(model):
+    TELEGRAM.reset()
+    e = Env(model)
+    try:
+        conv, vs = e.call()
+        voice_only = "VOICE-ONLY-" + secrets.token_hex(6)
+        e.events(conv, vs, ("user", f"private aside {voice_only}"), ("assistant", f"noted {voice_only}"))
+        claims = []
+        TELEGRAM.on_call = lambda call: claims.append({k: v for k, v in vars(stored_report(e, call_job[0])).items()
+                                                       if k in ("state", "text", "destination")})
+        call_job = [None]
+        _, body = e.task(conv, vs, "receipt alpha", "del_tg1")
+        call_job[0] = body["job"]["id"]
+        job = e.wait(call_job[0], conv, vs)
+        report = settled_report(e, job["id"])
+        sent = TELEGRAM.sent()
+        assert report.state == "sent" and len(sent) == 1 and report.message_id == sent[0]["message_id"], (report, sent)
+        assert claims and claims[0]["state"] == "sending" and claims[0]["text"] == sent[0]["text"], \
+            "the report and its destination were stored before the send"
+        assert sent[0]["chat_id"] == str(fx.USER_ID) and sent[0]["token"] == fx.BOT_TOKEN and sent[0]["thread_id"] is None
+        text = sent[0]["text"]
+        assert text.startswith("✅ Hermes task 1 finished: receipt alpha") and "SCRIPTED-ANSWER: receipt alpha" in text, text
+        assert len(text) <= 700 and voice_only not in text and "TASK:" not in text and "nobody watches" not in text, text
+        listed = e.jobs(conv, vs)[0][job["id"]]
+        assert listed["receipt"] == "undelivered" and listed["report"] == {"state": "sent", "destination": "this Telegram chat"}
+        _, cancel_body = e.task(conv, vs, "slow 90", "del_tg2")
+        e.wait(cancel_body["job"]["id"], conv, vs, states=("running",))
+        e.post("task/cancel", {"conversation_id": conv, "job_id": cancel_body["job"]["id"]})
+        e.wait(cancel_body["job"]["id"], conv, vs, timeout=40)
+        cancelled = settled_report(e, cancel_body["job"]["id"])
+        assert cancelled.state == "sent" and TELEGRAM.sent()[-1]["text"].startswith("⏹ Hermes task 2 was cancelled: slow 90")
+        secret = "sk-" + "s" * 24
+        _, secret_body = e.task(conv, vs, f"secret check {secret}", "del_tg3")
+        e.wait(secret_body["job"]["id"], conv, vs)
+        settled_report(e, secret_body["job"]["id"])
+        assert secret not in TELEGRAM.sent()[-1]["text"] and "[redacted]" in TELEGRAM.sent()[-1]["text"]
+        _, big_body = e.task(conv, vs, "big 5000", "del_tg4")
+        e.wait(big_body["job"]["id"], conv, vs)
+        big = settled_report(e, big_body["job"]["id"])
+        last = TELEGRAM.sent()[-1]
+        attachment = Path(last["media"][0])
+        assert big.state == "sent" and len(last["text"]) <= 700 and "Full result attached" in last["text"], last
+        assert last["force_document"] and attachment.is_file() and attachment.is_relative_to(e.home / "plugin-data")
+        content = attachment.read_text()
+        assert "BIG-START" in content and "BIG-END" in content and len(content) > 5000
+        from hermes_talk import receipts
+        other_bot = receipts.TelegramSender("654321:" + "x" * 30).send(
+            receipts.Destination(**e.native(job["id"]).report_to), "t", None)
+        assert receipts.classify(other_bot)[0] == "failed" and len(TELEGRAM.calls) == 4, other_bot
+        return {"chat_id": sent[0]["chat_id"], "bot": "the Talk bot that signed the call's initData",
+                "other_bot_refused": other_bot["error"],
+                "message_id": report.message_id, "text": text, "stored_before_send": claims[0]["state"],
+                "voice_receipt": listed["receipt"], "cancelled_report": TELEGRAM.sent()[1]["text"],
+                "secret_redacted": True, "large_cover": last["text"],
+                "attachment": str(attachment.relative_to(e.home)), "attachment_chars": len(content),
+                "transport": "synthetic (tests/agent/synthetic_telegram.py) behind Hermes _send_to_platform"}
+    finally:
+        TELEGRAM.on_call = None
+        e.close()
+
+
+def telegram_alternate_destination(model):
+    TELEGRAM.reset()
+    receipts = {"destinations": {"ops": {"target": "telegram:-1009876543210:17", "user_ids": [fx.USER_ID]}}}
+    e = Env(model, receipts=receipts)
+    try:
+        conv, vs = e.call()
+        assert "REPORT TO: <name>" in e.instructions() and "one of: ops" in e.instructions()
+        _, body = e.task(conv, vs, "alternate alpha\nREPORT TO: ops", "del_alt1")
+        job = e.wait(body["job"]["id"], conv, vs)
+        assert "REPORT TO" not in e.native(job["id"]).request and "SCRIPTED-ANSWER: alternate alpha" in job["result"]
+        report = settled_report(e, job["id"])
+        sent = TELEGRAM.sent()
+        assert report.state == "sent" and len(sent) == 1, sent
+        assert (sent[0]["chat_id"], sent[0]["thread_id"]) == ("-1009876543210", "17"), sent
+        assert not [c for c in TELEGRAM.calls if c["chat_id"] == str(fx.USER_ID)], "no duplicate to the private chat"
+        _, here = e.task(conv, vs, "alternate beta\nREPORT TO: this chat", "del_alt2")
+        e.wait(here["job"]["id"], conv, vs)
+        settled_report(e, here["job"]["id"])
+        assert TELEGRAM.sent()[-1]["chat_id"] == str(fx.USER_ID)
+        jobs_before = len(e.talk.board.jobs)
+        conv_b, vs_b = e.call(fx.OTHER_USER_ID)
+        refused = {
+            "other_user_names_ops": e.task(conv_b, vs_b, "x\nREPORT TO: ops", "del_alt3", fx.OTHER_USER_ID),
+            "raw_chat_id": e.task(conv, vs, "x\nREPORT TO: -1001234567890", "del_alt4"),
+            "home_channel": e.task(conv, vs, "x\nREPORT TO: home", "del_alt5"),
+        }
+        statuses = {k: v[0] for k, v in refused.items()}
+        assert set(statuses.values()) == {403} and len(e.talk.board.jobs) == jobs_before, refused
+        assert "Nothing was started" in refused["raw_chat_id"][1]["error"]
+        extra = e.post("task", {"conversation_id": conv, "voice_session_id": vs, "delegation_item_id": "del_alt6",
+                                "request": "x", "report_to": "-1001234567890"})[0]
+        assert extra == 400
+        bad = {}
+        from hermes_talk.config import ConfigError
+        for name, spec in (("bare", {"target": "telegram", "user_ids": [fx.USER_ID]}),
+                           ("stranger", {"target": "telegram:-100555", "user_ids": [4242]})):
+            try:
+                parse_config(talk_data(e.work, receipts={"destinations": {name: spec}}), e.home)
+                bad[name] = "accepted"
+            except ConfigError as exc:
+                bad[name] = str(exc)[:120]
+        assert all(v != "accepted" for v in bad.values()), bad
+        return {"named": {"chat_id": sent[0]["chat_id"], "thread_id": sent[0]["thread_id"]},
+                "private_duplicate": False, "explicit_private": True, "refused": statuses, "extra_field": extra,
+                "config_refusals": bad, "total_sends": len(TELEGRAM.sent())}
+    finally:
+        e.close()
+
+
+def telegram_closed_call_delivery(model):
+    TELEGRAM.reset()
+    e = Env(model)
+    try:
+        conv, vs = e.call()
+        _, body = e.task(conv, vs, "slow 3", "del_closed")
+        assert e.post("end", {"conversation_id": conv, "voice_session_id": vs})[0] == 200
+        state = json.loads(e.history.get_meta(f"hermes_talk:conversation:{conv}"))
+        assert state["voice_sessions"][vs]["ended"] is not None
+        deadline = time.time() + 60
+        while e.native(body["job"]["id"]).state != "succeeded" and time.time() < deadline:
+            time.sleep(0.3)
+        report = settled_report(e, body["job"]["id"])
+        job = e.native(body["job"]["id"])
+        assert report.state == "sent" and TELEGRAM.sent()[0]["chat_id"] == str(fx.USER_ID)
+        assert "SCRIPTED-SLOW-DONE" in TELEGRAM.sent()[0]["text"]
+        assert job.receipt == "undelivered", "the chat report is not a voice receipt"
+        return {"call_ended_before_result": True, "report": report.state, "voice_receipt": job.receipt,
+                "message_id": report.message_id}
+    finally:
+        e.close()
+
+
+def telegram_ambiguous_send(model):
+    TELEGRAM.reset("timeout")
+    e = Env(model)
+    root = e.root
+    try:
+        conv, vs = e.call()
+        _, a = e.task(conv, vs, "ambiguous alpha", "del_amb1")
+        e.wait(a["job"]["id"], conv, vs)
+        uncertain = settled_report(e, a["job"]["id"])
+        time.sleep(1.5)
+        assert uncertain.state == "uncertain" and len(TELEGRAM.calls) == 1, (uncertain, TELEGRAM.calls)
+        e.talk.desk.sender.timeout = 1.0
+        TELEGRAM.reset("hang")
+        _, b = e.task(conv, vs, "ambiguous beta", "del_amb2")
+        e.wait(b["job"]["id"], conv, vs)
+        hung = settled_report(e, b["job"]["id"], timeout=15)
+        assert hung.state == "uncertain" and "may still have been delivered" in hung.error, hung
+        TELEGRAM.reset("chat_not_found")
+        _, c = e.task(conv, vs, "ambiguous gamma", "del_amb3")
+        e.wait(c["job"]["id"], conv, vs)
+        failed = settled_report(e, c["job"]["id"])
+        time.sleep(1)
+        assert failed.state == "failed" and len(TELEGRAM.calls) == 1, failed
+        e.talk.desk.backoff = (0.3, 0.3)
+        TELEGRAM.reset("refused", "ok")
+        _, d = e.task(conv, vs, "ambiguous delta", "del_amb4")
+        e.wait(d["job"]["id"], conv, vs)
+        retried = settled_report(e, d["job"]["id"])
+        assert retried.state == "sent" and retried.attempts == 2 and len(TELEGRAM.calls) == 2, retried
+        assert TELEGRAM.calls[0]["text"] == TELEGRAM.calls[1]["text"], "the retry resends the stored report"
+        assert len(requests_with(model, "TASK: ambiguous delta")) == 1, "the task was not rerun"
+        TELEGRAM.reset("refused", "refused", "refused")
+        _, f = e.task(conv, vs, "ambiguous epsilon", "del_amb5")
+        e.wait(f["job"]["id"], conv, vs)
+        exhausted = settled_report(e, f["job"]["id"])
+        assert exhausted.state == "failed" and exhausted.attempts == 3 and "gave up" in exhausted.error, exhausted
+        e.close(keep=True)
+        TELEGRAM.reset()
+        e = Env(model, root=root)
+        time.sleep(1)
+        after = stored_report(e, a["job"]["id"])
+        assert after.state == "uncertain" and not TELEGRAM.calls, "a restart never resends an uncertain report"
+        return {"timeout": uncertain.state, "hang": hung.error, "chat_not_found": failed.state,
+                "refused_then_ok": {"state": retried.state, "attempts": retried.attempts},
+                "exhausted": exhausted.error, "after_restart_calls": 0,
+                "policy": "only refused/rate-limited sends retry, at most receipts.attempts times"}
+    finally:
+        e.close()
+
+
+def telegram_restart_dedup(model):
+    TELEGRAM.reset()
+    e = Env(model)
+    root = e.root
+    from dataclasses import replace, asdict
+    from hermes_talk import jobs, receipts
+    try:
+        conv, vs = e.call()
+        _, body = e.task(conv, vs, "dedup alpha", "del_dd1")
+        job_id = body["job"]["id"]
+        e.wait(job_id, conv, vs)
+        settled_report(e, job_id)
+        job = e.native(job_id)
+        e.talk.board._settle(job_id)
+        e.talk.desk.prepare(job, "regenerated text")
+        e.talk.desk.send(job_id)
+        e.talk.board.reconcile()
+        time.sleep(0.5)
+        assert len(TELEGRAM.calls) == 1 and stored_report(e, job_id).text == TELEGRAM.calls[0]["text"]
+        crashed = replace(job, id="jb_" + secrets.token_urlsafe(18), number=91, delegation_id="del_dd91",
+                          finished=time.time())
+        pending = replace(crashed, id="jb_" + secrets.token_urlsafe(18), number=92, delegation_id="del_dd92")
+        unreported = replace(crashed, id="jb_" + secrets.token_urlsafe(18), number=93, delegation_id="del_dd93")
+        old = replace(crashed, id="jb_" + secrets.token_urlsafe(18), number=94, delegation_id="del_dd94", finished=1.0)
+        for j in (crashed, pending, unreported, old):
+            e.history.set_meta(jobs.job_key(j.id), jobs.dump(j))
+        dest = asdict(receipts.Destination.private(fx.USER_ID))
+        for j, state in ((crashed, "sending"), (pending, "pending")):
+            r = receipts.Report(job_id=j.id, scope=j.scope, destination=dest, text=f"stored report {j.number}",
+                                state=state, attempts=1 if state == "sending" else 0,
+                                owner="1:0:dead" if state == "sending" else None, created=time.time())
+            e.history.set_meta(receipts.report_key(j.id), json.dumps(asdict(r)))
+        e.close(keep=True)
+        TELEGRAM.reset()
+        e = Env(model, root=root)
+        for j in (pending, unreported):
+            settled_report(e, j.id)
+        time.sleep(1)
+        texts = [c["text"] for c in TELEGRAM.calls]
+        assert stored_report(e, crashed.id).state == "uncertain", "a claim left by a dead process is not resent"
+        assert stored_report(e, job_id).state == "sent" and stored_report(e, old.id) is None
+        assert len(texts) == 2 and "stored report 92" in texts and any("Hermes task 93" in x for x in texts), texts
+        e.close(keep=True)
+        TELEGRAM.reset()
+        e = Env(model, root=root)
+        time.sleep(1)
+        assert not TELEGRAM.calls, "a second restart sends nothing"
+        return {"duplicate_completion_sends": 1, "crash_mid_send": "uncertain, not resent",
+                "pending_after_restart": "sent once", "terminal_without_report": "reported once",
+                "finished_before_reports_existed": "no report", "second_restart_sends": 0}
+    finally:
+        e.close()
+
+
+class FlakyAgent:
+    """The real NativeAgent whose first `failures` starts raise OSError before any process exists."""
+
+    def __init__(self, inner, failures):
+        self.inner, self.failures, self.starts = inner, failures, 0
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+    def start(self, *args):
+        self.starts += 1
+        if self.starts <= self.failures:
+            raise OSError("synthetic spawn failure")
+        return self.inner.start(*args)
+
+
+def queue_start_failure(model):
+    TELEGRAM.reset()
+    from hermes_talk import jobs
+    from hermes_talk.agent import NativeAgent
+    root = Path(tempfile.mkdtemp(prefix="talk-start-failure-"))
+    e = Env(model, root=root)
+    conv, vs = e.call()
+    scope = e.talk.account(fx.USER_ID).key
+    e.close(keep=True)
+    try:
+        seeded = []
+        from hermes_talk.history import NativeHistory
+        history = NativeHistory(root / "home")
+        for n in (1, 2):
+            job = jobs.new_job(scope, conv, vs, 1, f"del_q{n}", n, f"queued {n}", time.time() + n * 0.01,
+                               {"kind": "private", "chat_id": fx.USER_ID, "thread_id": None, "name": "",
+                                "bot_id": fx.BOT_TOKEN.split(":")[0]})
+            history.set_meta(jobs.job_key(job.id), jobs.dump(job))
+            seeded.append(job.id)
+        history.close()
+        config = parse_config(talk_data(root / "work"), root / "home")
+        agent = FlakyAgent(NativeAgent(config.tasks, root / "home"), failures=1)
+        e = Env(model, root=root, agent=agent)
+        first = e.native(seeded[0])
+        assert first.state == "failed" and "could not start (OSError)" in first.error, first
+        second = e.wait(seeded[1], conv, vs)
+        assert agent.starts == 2 and second["state"] == "succeeded" and "SCRIPTED-ANSWER: queued 2" in second["result"]
+        failed_report = settled_report(e, seeded[0])
+        assert failed_report.state == "sent" and "⚠️ Hermes task 1 failed: queued 1" in failed_report.text
+        assert "could not start" in failed_report.text
+        always = FlakyAgent(NativeAgent(config.tasks, root / "home"), failures=99)
+        e.talk.board.agent = always
+        ids = [e.task(conv, vs, f"doomed {n}", f"del_q{n + 2}")[1]["job"]["id"] for n in (1, 2)]
+        states = [e.native(i).state for i in ids]
+        assert states == ["failed", "failed"] and always.starts == 2, states
+        return {"restart_queue": {"first": first.state, "second": second["state"], "spawn_attempts": agent.starts},
+                "failed_report": failed_report.text, "always_failing": states}
+    finally:
+        e.close()
+
+
+def large_old_unread_result(model):
+    TELEGRAM.reset()
+    from hermes_talk import context
+    text, ids, _ = context.update(1, [("job", "- Task finished. Result: " + "x" * 4000,
+                                       "- Hermes task 1 finished. Its result is long; delegate \"result of task 1\".")],
+                                  [], 0, "", 3200)
+    assert ids == ["job"] and "result of task 1" in text, text
+    e = Env(model, result_chars=4000, max_open_per_user=5)
+    try:
+        conv, vs = e.call()
+        _, body = e.task(conv, vs, "big 3900", "del_big")
+        job_id = body["job"]["id"]
+        assert e.post("end", {"conversation_id": conv, "voice_session_id": vs})[0] == 200
+        _, vs2 = e.call()
+        job = e.wait(job_id, conv, vs2)
+        assert len(job["result"]) > 3200 and "BIG-END" in job["result"]
+        status, update = e.post("context", {"conversation_id": conv, "voice_session_id": vs2})
+        assert status == 200 and update["sources"]["jobs"] == 1, update
+        assert f'"result of task {job["number"]}"' in update["text"] and len(update["text"]) <= 3200, update
+        e.post("context/ack", {"conversation_id": conv, "voice_session_id": vs2, "revision": update["revision"]})
+        assert e.native(job_id).receipt == "delivered"
+        status, full = e.task(conv, vs2, f"result of task {job['number']}", "del_full")
+        assert status == 200 and full["channel"] == "speakable" and "BIG-END" in full["reply"] and not full["created"]
+        from dataclasses import replace
+        from hermes_talk import jobs
+        template = e.native(job_id)
+        old = []
+        for n in range(1, 13):
+            j = replace(template, id="jb_" + secrets.token_urlsafe(18), number=100 + n, delegation_id=f"del_old{n}",
+                        voice_session_id=vs, result=f"OLD-RESULT-{n}", receipt="undelivered", delivered_via=None)
+            e.history.set_meta(jobs.job_key(j.id), jobs.dump(j))
+            old.append(j)
+        e.close(keep=True)
+        e = Env(model, root=e.root, result_chars=4000, max_open_per_user=5)
+        _, vs3 = e.call()
+        listed = sorted(j["number"] for j in e.jobs(conv, vs3)[0].values())
+        assert 101 in listed and 112 in listed, listed
+        assert "OLD-RESULT-1 " in e.instructions() or "OLD-RESULT-1\n" in e.instructions() or \
+            e.instructions().count("OLD-RESULT-1") >= 1, "the oldest unread result is offered first"
+        return {"oversized_update_ids": ids, "synopsis_chars": len(update["text"]),
+                "retrieval": "result of task N", "full_reply_chars": len(full["reply"]),
+                "old_unread_listed": listed[:3], "oldest_in_instructions": True}
+    finally:
+        e.close()
+
+
+NODE_IMAGE = os.environ.get("TALK_NODE_IMAGE", "node:22.22.3-bookworm-slim")
+DELIVERY = {}
+
+
+def delivery_faults():
+    """tests/agent/delivery.mjs against the real app.js, once per gate run (node from PATH, else a capped container)."""
+    if not DELIVERY:
+        script = ["tests/agent/delivery.mjs", "static/talk/app.js"]
+        if shutil.which("node"):
+            cmd = ["node", *script]
+        else:
+            cmd = ["docker", "run", "--rm", "--init", "--network", "none", "--memory", "256m", "--memory-swap", "256m",
+                   "--cpus", "1", "--pids-limit", "128", "--user", f"{os.getuid()}:{os.getgid()}", "--cap-drop", "ALL",
+                   "--security-opt", "no-new-privileges:true", "--mount", f"type=bind,src={ROOT},dst=/src,readonly",
+                   "--workdir", "/src", "--entrypoint", "node", NODE_IMAGE, *script]
+        out = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=180)
+        line = next((l for l in out.stdout.splitlines() if l.startswith("DELIVERY_RESULTS ")), "DELIVERY_RESULTS {}")
+        DELIVERY.update(exit=out.returncode, results=json.loads(line.split(" ", 1)[1]), log=out.stdout[-3000:] + out.stderr[-1000:])
+    return DELIVERY
+
+
+def javascript_group(name):
+    run = delivery_faults()
+    group = run["results"].get(name) or []
+    assert group and all(r["pass"] for r in group), run["log"]
+    return group
+
+
+def ambiguous_task_submission(model):
+    js = javascript_group("ambiguous_task_submission")
+    e = Env(model)
+    try:
+        conv, vs = e.call()
+        unique = "lost response " + secrets.token_hex(4)
+        body = json.dumps({"initData": init(), "conversation_id": conv, "voice_session_id": vs,
+                           "delegation_item_id": "del_lost", "request": unique}).encode()
+        with socket.create_connection(("127.0.0.1", e.port), timeout=10) as raw:
+            raw.sendall(b"POST /tg-voice/api/task HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n"
+                        + f"Origin: {fx.ORIGIN}\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
+        deadline = time.time() + 10
+        while not e.talk.board.jobs and time.time() < deadline:
+            time.sleep(0.05)
+        accepted = list(e.talk.board.jobs.values())
+        assert len(accepted) == 1 and accepted[0].delegation_id == "del_lost", "the dropped response's task was accepted"
+        status, again = e.task(conv, vs, unique, "del_lost")
+        assert status == 200 and not again["created"] and again["job"]["id"] == accepted[0].id, again
+        e.wait(accepted[0].id, conv, vs)
+        assert len(requests_with(model, "TASK: " + unique)) == 1, "resubmitting the same delegation ran nothing twice"
+        return {"server": {"response_dropped_after_accept": True, "resubmitted_created": again["created"],
+                           "native_runs": 1}, "javascript": js}
+    finally:
+        e.close()
+
+
+def partial_append_recovery(model):
+    return {"javascript": javascript_group("partial_append_recovery"),
+            "harness": "tests/agent/delivery.mjs runs the real static/talk/app.js in a node VM with a fault-injected data channel"}
+
+
+def bounded_native_spool(model):
+    from hermes_talk.agent import NativeAgent
+    fixture = ROOT / "tests" / "agent" / "noisy_native.py"
+    results = {}
+    for mode in ("flood", "oversized"):
+        e = Env(model)
+        try:
+            agent = NativeAgent(e.config.tasks, e.home, command=[sys.executable, str(fixture)],
+                                env={**os.environ, "NOISY_MODE": mode})
+            e.talk.board.agent = agent
+            conv, vs = e.call()
+            _, body = e.task(conv, vs, f"noisy {mode}", f"del_noisy_{mode}")
+            job_id = body["job"]["id"]
+            peak = 0
+            deadline = time.time() + 120
+            while e.native(job_id).state in ("accepted", "running") and time.time() < deadline:
+                output = e.native(job_id).output
+                if output and Path(output).exists():
+                    peak = max(peak, Path(output).stat().st_size)
+                time.sleep(0.05)
+            job = e.native(job_id)
+            artifact = e.work / "noisy-artifact.bin"
+            assert job.state == "succeeded" and "NOISY-RESULT-START" in job.result, job
+            assert peak < 2 * 1024 * 1024, f"spool peaked at {peak} bytes"
+            assert artifact.stat().st_size == 6 * 1024 * 1024, "the run's own artifact write is not limited"
+            gone = time.time() + 10
+            while Path(job.output).exists() and time.time() < gone:
+                time.sleep(0.05)
+            assert not Path(job.output).exists(), "the spool is removed once the job is stored"
+            report = settled_report(e, job_id)
+            attached = Path(TELEGRAM.calls[-1]["media"][0]).read_text() if TELEGRAM.calls[-1]["media"] else ""
+            assert "NOISY-RESULT-END" in attached, "the large final result is kept whole for the report"
+            results[mode] = {"spool_peak_bytes": peak, "stdout_bytes": "about 24 MiB" + (" plus a 9 MiB line" if mode == "oversized" else ""),
+                             "artifact_bytes": artifact.stat().st_size, "result_kept": True, "report": report.state}
+        finally:
+            e.close()
+    return results
+
+
 CHECKS = (native_tool_roundtrip, background_result_delivery, context_update_injection, persistent_two_call_history,
           pulse_visibility_and_cursor, cross_user_denial, cross_profile_denial, restart_job_reconciliation,
           voice_disconnect_vs_cancel, delegation_id_dedup, plugin_native_install, unauthenticated_job_denial,
-          limits_and_approvals, receipt_ack_no_double_speech)
+          limits_and_approvals, receipt_ack_no_double_speech, telegram_default_receipt,
+          telegram_alternate_destination, telegram_closed_call_delivery, telegram_ambiguous_send,
+          telegram_restart_dedup, queue_start_failure, large_old_unread_result, ambiguous_task_submission,
+          partial_append_recovery, bounded_native_spool)
 
 
 def run_inner(receipts, only):
+    global TELEGRAM
     from scripted_model import ScriptedModel
+    from synthetic_telegram import SyntheticTelegram
+    TELEGRAM = SyntheticTelegram()
+    TELEGRAM.install()
+    os.environ["TELEGRAM_PROXY"] = BLACKHOLE
     model = ScriptedModel()
     failures = 0
     selected = [fn for fn in CHECKS if not only or fn.__name__ in only]

@@ -64,15 +64,23 @@ def _activity(lines, total, note, limit):
 
 
 def whole_lines(header, items, limit):
-    """(section, ids): the leading (id, line) items that fit whole under header within limit."""
-    taken, text = [], ""
-    for item_id, line in items:
-        candidate = (text or header) + line + "\n"
-        if len(candidate.rstrip("\n")) > limit:
+    """(section, ids): leading (id, line, synopsis) items under header within limit.
+
+    An item whose line does not fit whole goes in as its synopsis (a bounded excerpt plus how to
+    retrieve the rest) instead of blocking every item behind it; an item that fits neither way
+    stops the section, and a tail says how many are still waiting.
+    """
+    taken, text = [], header
+    for index, (item_id, line, synopsis) in enumerate(items):
+        fitted = next((c for c in (line, synopsis) if c and len(text + c) <= limit), None)
+        if fitted is None:
+            tail = f"- {len(items) - index} more task update(s) are waiting and follow next time."
+            if len(text + tail) <= limit:
+                text += tail + "\n"
             break
-        text = candidate
+        text += fitted + "\n"
         taken.append(item_id)
-    return text.rstrip("\n"), taken
+    return (text.rstrip("\n") if taken else ""), taken
 
 
 def update(revision, job_items, activity_lines, activity_total, activity_note, limit):
@@ -86,14 +94,14 @@ def update(revision, job_items, activity_lines, activity_total, activity_note, l
 
 
 def compose(config, soul, skills, summary, turns, activity_lines, activity_total, activity_note,
-            tasks_ready=False, job_items=()):
+            tasks_ready=False, job_items=(), reports_note=""):
     """Instruction text plus a per-section report of what was included (names and sizes only).
 
     report["activity_items"] is how many of activity_lines the text carries whole; only those count
     as read. report["job_ids"] lists the task results the text carries whole.
     """
     b = config.budgets
-    frame = (TASKS_FRAME if tasks_ready else FRAME).format(name=config.display_name)
+    frame = (TASKS_FRAME + reports_note if tasks_ready else FRAME).format(name=config.display_name)
     greeting = ""
     if config.greeting_enabled:
         greeting = _section("Greeting", config.greeting + " Speak first only after the call connects. If the "

@@ -9,6 +9,8 @@ started a process and may still be started after a restart; a running job whose 
 interrupted and never rerun, because its side effects are unknown. Receipt is separate from state:
 "delivered" means the result was handed to the voice model (a delegation append acknowledged by the
 client, or call instructions the assistant then spoke in). It never means the result was heard.
+The chat report of a finished job is a third, separate state (receipts.py); report_to holds the
+destination bound when the job was accepted.
 """
 import json
 import re
@@ -66,6 +68,7 @@ class Job:
     cancel_requested: bool = False
     acks: int = 0
     notes: tuple = field(default_factory=tuple)
+    report_to: dict = None
 
     @property
     def terminal(self):
@@ -86,16 +89,20 @@ class Job:
         return replace(self, receipt=DELIVERED, delivered_via=via, acks=self.acks + 1,
                        notes=self.notes + (f"delivered:{via}:{int(now)}",))
 
-    def public(self):
-        """The browser's view: no prompt, process, native session or scope details."""
+    def public(self, report=None):
+        """The browser's view: no prompt, process, native session, scope or destination details."""
         return {"id": self.id, "number": self.number, "delegation_item_id": self.delegation_id,
                 "voice_session_id": self.voice_session_id, "state": self.state, "receipt": self.receipt,
                 "result": self.result if self.terminal else "", "error": self.error,
-                "spoken": self.spoken() if self.terminal else ""}
+                "spoken": self.spoken() if self.terminal else "",
+                "report": report.public() if report is not None else None}
+
+    def spoken_state(self):
+        return SPOKEN_STATE.get(self.state, "is " + self.state)
 
     def spoken(self):
         """One bounded sentence block describing the outcome, for the voice model."""
-        head = f"Hermes task {self.number} ({self.request[:80]}) {SPOKEN_STATE.get(self.state, 'is ' + self.state)}."
+        head = f"Hermes task {self.number} ({self.request[:80]}) {self.spoken_state()}."
         if self.state == SUCCEEDED and self.result:
             return f"{head} Result: {self.result}"
         if self.state == FAILED and self.error:
@@ -103,10 +110,11 @@ class Job:
         return head
 
 
-def new_job(scope, conversation_id, voice_session_id, generation, delegation_id, number, request, now):
+def new_job(scope, conversation_id, voice_session_id, generation, delegation_id, number, request, now,
+            report_to=None):
     return Job(id="jb_" + secrets.token_urlsafe(18), scope=scope, conversation_id=conversation_id,
                voice_session_id=voice_session_id, generation=generation, delegation_id=delegation_id,
-               number=number, request=request, created=now)
+               number=number, request=request, created=now, report_to=report_to)
 
 
 def dump(job):
@@ -139,12 +147,13 @@ class JobBoard:
     """Server-owned jobs for one profile: dedupe, bounded scheduling, delivery receipts and restart reconciliation.
 
     prompt_for(job) returns (prompt, resume session id); bind(job, native_session_id) records the native
-    session a conversation's tasks continue in.
+    session a conversation's tasks continue in. desk (receipts.ReportDesk or None) gets every job's
+    first terminal transition, with the full redacted result.
     """
 
-    def __init__(self, history, agent, tasks, clock, prompt_for, bind, redact):
+    def __init__(self, history, agent, tasks, clock, prompt_for, bind, redact, desk=None):
         self.history, self.agent, self.tasks, self.clock = history, agent, tasks, clock
-        self.prompt_for, self.bind, self.redact = prompt_for, bind, redact
+        self.prompt_for, self.bind, self.redact, self.desk = prompt_for, bind, redact, desk
         self.lock = threading.RLock()
         self.handles = {}
         self.revision = 0
@@ -160,8 +169,23 @@ class JobBoard:
         self.revision += 1
         return job
 
+    def _finish(self, job, full=None):
+        """Persist a terminal job, then its report (before any send), then hand the report to the sender."""
+        self.handles.pop(job.id, None)
+        job = self._save(job)
+        if self.desk is not None:
+            self.desk.prepare(job, job.error if full is None else full)
+            self.desk.dispatch(job.id)
+        return job
+
     def reconcile(self):
         """After a restart: adopt live runs, settle finished ones from their output, never rerun the rest."""
+        if self.desk is not None:
+            with self.lock:
+                for job in self.jobs.values():
+                    if job.terminal and self.desk.get(job.id) is None and (job.finished or 0) >= self.desk.since:
+                        self.desk.prepare(job, job.result if job.state == SUCCEEDED else job.error)
+            self.desk.reconcile()
         with self.lock:
             for job in list(self.jobs.values()):
                 if job.state != RUNNING:
@@ -173,7 +197,7 @@ class JobBoard:
                     self._settle(job.id, restarted=True)
         self.pump()
 
-    def submit(self, scope, conversation_id, voice_session_id, generation, delegation_id, request):
+    def submit(self, scope, conversation_id, voice_session_id, generation, delegation_id, request, report_to=None):
         """(job, created). A repeated delegation of the same call returns its existing job and starts nothing."""
         with self.lock:
             key = delegation_key(scope, conversation_id, generation, delegation_id)
@@ -184,37 +208,47 @@ class JobBoard:
                 raise TalkError(429, "Too many Hermes tasks are already open. Wait for one to finish or cancel one.")
             number = 1 + max((j.number for j in self.jobs.values() if j.conversation_id == conversation_id), default=0)
             job = self._save(new_job(scope, conversation_id, voice_session_id, generation, delegation_id, number,
-                                     request, self.clock()))
+                                     request, self.clock(), report_to))
             self.history.set_meta(key, job.id)
         self.pump()
         return self.jobs[job.id], True
 
     def pump(self):
+        """Start accepted jobs, oldest first, while slots are free; a job that failed to start takes no slot."""
         with self.lock:
             running = [j for j in self.jobs.values() if j.state == RUNNING]
             busy = {j.conversation_id for j in running}
+            slots = self.tasks.max_concurrent - len(running)
             for job in sorted((j for j in self.jobs.values() if j.state == ACCEPTED), key=lambda j: (j.created, j.id)):
-                if len(running) >= self.tasks.max_concurrent:
+                if slots <= 0:
                     break
                 if job.conversation_id in busy:
                     continue
-                self._launch(job)
-                running.append(job)
-                busy.add(job.conversation_id)
+                if self._launch(job):
+                    slots -= 1
+                    busy.add(job.conversation_id)
 
     def _launch(self, job):
-        prompt, resume = self.prompt_for(job)
+        """True when a native process now runs the job; otherwise the job has failed and nothing ran."""
+        try:
+            prompt, resume = self.prompt_for(job)
+        except Exception as exc:
+            self._finish(job.to(FAILED, finished=self.clock(),
+                                error=f"The task could not be prepared ({type(exc).__name__}). Nothing ran."))
+            return False
         # Persisted before the process exists: a crash from here on leaves a running job without a live
         # process, which reconciles to interrupted instead of a second run.
         job = self._save(job.to(RUNNING, started=self.clock()))
         try:
             process, output = self.agent.start(job.id, prompt, resume)
-        except OSError as exc:
-            self._save(job.to(FAILED, finished=self.clock(), error=f"The Hermes agent could not start ({type(exc).__name__})."))
-            return
+        except Exception as exc:
+            self._finish(job.to(FAILED, finished=self.clock(),
+                                error=f"The Hermes agent could not start ({type(exc).__name__}). Nothing ran."))
+            return False
         self.handles[job.id] = process
         self._save(replace(job, pid=process.pid, pid_start=process_start(process.pid), output=output))
         threading.Thread(target=self._watch, args=(job.id, process), daemon=True).start()
+        return True
 
     def _watch(self, job_id, process):
         timed_out = False
@@ -243,6 +277,7 @@ class JobBoard:
             job = replace(job, native_session_id=outcome.session_id)
             self.bind(job, outcome.session_id)
         limit = self.tasks.result_chars
+        full = None
         if timed_out:
             job = job.to(FAILED, finished=now, error="The task ran past its time budget and was stopped.")
         elif job.cancel_requested:
@@ -251,13 +286,15 @@ class JobBoard:
             job = job.to(INTERRUPTED, finished=now, error=("Talk restarted while the task ran; it was not rerun."
                                                            if restarted else "The run stopped without a result."))
         elif outcome.exit_code == 0 and outcome.text.strip():
-            job = job.to(SUCCEEDED, finished=now, result=clip(self.redact(outcome.text), limit))
+            full = self.redact(outcome.text.strip())
+            if outcome.text_cut:
+                full += f"\n[{outcome.text_cut} more characters of this result were not kept]"
+            job = job.to(SUCCEEDED, finished=now, result=clip(full, limit))
         elif outcome.exit_code == 130:
             job = job.to(INTERRUPTED, finished=now, error="The run was interrupted before it finished.")
         else:
             job = job.to(FAILED, finished=now, error=clip(self.redact(outcome.error or "Hermes reported a failure."), 300))
-        self.handles.pop(job_id, None)
-        self._save(job)
+        self._finish(job, full)
         self.agent.discard_output(job.output)
 
     def owned(self, scope, conversation_id, job_id):
@@ -281,7 +318,7 @@ class JobBoard:
         with self.lock:
             job = self.owned(scope, conversation_id, job_id)
             if job.state == ACCEPTED:
-                return self._save(job.to(CANCELLED, finished=self.clock()))
+                return self._finish(job.to(CANCELLED, finished=self.clock()))
             if job.state != RUNNING or job.cancel_requested:
                 return job
             job = self._save(replace(job, cancel_requested=True))
@@ -305,9 +342,12 @@ class JobBoard:
                     self._save(job.delivered(via, self.clock()))
 
     def of_conversation(self, scope, conversation_id, limit=10):
+        """The conversation's open and not yet delivered jobs, whatever their age, plus its latest `limit`."""
         with self.lock:
-            jobs = [j for j in self.jobs.values() if j.scope == scope and j.conversation_id == conversation_id]
-        return sorted(jobs, key=lambda j: j.number)[-limit:]
+            jobs = sorted((j for j in self.jobs.values() if j.scope == scope and j.conversation_id == conversation_id),
+                          key=lambda j: j.number)
+        recent = {j.id for j in jobs[-limit:]}
+        return [j for j in jobs if j.id in recent or j.state in OPEN or (j.terminal and j.receipt == UNDELIVERED)]
 
     def wait_idle(self, timeout):
         deadline = time.monotonic() + timeout

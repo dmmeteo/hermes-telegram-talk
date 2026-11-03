@@ -149,8 +149,15 @@ When `tasks.enabled` is true, the voice model's client delegations become Hermes
    speaks in that call. The same update carries new Pulse items, and the activity cursor moves only on that ack.
 
 Job states are accepted, running, succeeded, failed, cancelled and interrupted. A running job is stored before its
-process starts. After a Talk restart a live process is adopted and finishes normally. A dead one is settled from its
-output file, or marked interrupted and never rerun. Receipt is separate: delivered means the client appended the
+process starts. A job whose process could not start fails at once and takes no slot, so queued jobs behind it still
+start. After a Talk restart a live process is adopted and finishes normally. A dead one is settled from its
+output record, or marked interrupted and never rerun.
+
+The native process runs behind `hermes_talk/spool.py`, which owns its stdout pipe and keeps only the session event
+and the final result (text up to 1 MiB, marked when cut) in the job's output record. The record stays bounded however
+much the run prints; files the run writes are not limited. The voice gets the result clipped to `tasks.result_chars`.
+A result too long for a context update goes in as a short synopsis that says to delegate "result of task N", which
+returns the stored result without running anything. Unread results are offered oldest first, whatever their age. Receipt is separate: delivered means the client appended the
 result (or the call that carried it spoke), not that anyone heard it. Ending a call never cancels a task; `api/task/
 cancel` and a spoken "cancel task N" delegation do.
 
@@ -159,6 +166,31 @@ unless the profile has a model, every `tasks.toolsets` name exists, the Hermes c
 `manual`, and `approvals.single_query_mode` is not approving. In single-query mode Hermes itself blocks every flagged
 action with nobody to approve it; Talk adds no approval path and never passes `--yolo`. Full tool parity with an
 attended chat is not claimed: anything that needs approval fails and the result says so.
+
+### Task reports in Telegram
+
+With tasks on, every finished task also sends a short report to the private chat between the user and the Talk bot
+whose signed initData opened the call, even when the call has ended. The report says what happened, the result or the
+reason and nothing else: no transcript, prompt, tool log or voice turns, and secret-shaped text is redacted. A result
+longer than `receipts.max_chars` goes as a cover message with the full result attached as a Markdown document from
+the profile's `plugin-data/hermes-talk/reports/`. The task prompt asks the agent to answer in the conversation's
+language; the fixed framing words are English.
+
+The user can send a report elsewhere only by naming a destination the operator listed in `receipts.destinations` for
+that user (`REPORT TO: <name>` at the end of the delegation). It then goes only there. The browser cannot pass a chat
+id; any other name, a raw chat id or "home" is refused before the task starts. A bare platform target (a home channel)
+is refused in the config.
+
+Sending uses Hermes' own platform sender, `tools.send_message_tool._send_to_platform`, the call cron delivery makes
+(`cron/scheduler_delivery.py`), with a Telegram platform config holding the Talk bot token the server already has. It
+formats, chunks and attaches files the way `hermes send` does. Talk stores no token.
+
+Report states are pending, sending, sent, failed and uncertain, separate from the job state and the voice receipt.
+The report and its destination are stored before the send. A send is claimed (pending to sending, stored) first; a
+claim found after a restart becomes uncertain and is not resent. Telegram's sendMessage has no idempotency key, so a
+timeout or any unclassified error is uncertain too, never retried. Only errors that show nothing left (connection
+refused, rate limit) go back to pending, at most `receipts.attempts` times, with the same stored text; the task never
+reruns. A sent report records the Bot API message id.
 
 Limits: `tasks.max_concurrent` (1..2) processes, `tasks.max_open_per_user` open jobs, `tasks.request_chars`,
 `tasks.result_chars`, `tasks.max_turns` and `tasks.run_budget_seconds` (Hermes' own budget, then a stop 60 s later).
@@ -222,7 +254,8 @@ confirms it with `hermes plugins list`. Real-profile installation and activation
 
 ```sh
 python3 verify-integrated.py --offline --require-host   # canonical gate: backend + frontend offline, host mandatory
-python3 verify-agent.py --require-hermes                 # voice tasks through the real Hermes agent (scripted model)
+python3 verify-agent.py --require-hermes                 # voice tasks through the real Hermes agent (scripted model),
+                                                         # Telegram reports (synthetic transport) and delivery faults
 python3 verify-agent.py --browser <out-dir>              # Chromium delegation job: real app.js, server and tasks
 python3 verify-integrated.py --browser <out-dir>        # legacy and Talk Chromium inventories, capped containers
 python3 verify-frontend.py --mobile <out-dir>            # Chromium and actual WebKit: cold/warm assets, rotation, retry and native audio unlock
@@ -287,6 +320,7 @@ the package's SVG avatar. All identities and text remain synthetic.
 | `api/session` against real GPT-Live | yes | fake upstream | not exercised | no | no |
 | Voice tasks: native agent, tools, delivery, restart | yes (off by default) | n/a | yes (real `hermes chat`, scripted model) | in fixture (named disposable profile) | no |
 | Delegation wiring in the Talk UI (Chromium, local peers) | yes | n/a | yes (real tasks in the browser job) | n/a | no |
+| Telegram task reports | yes (on with tasks) | n/a | yes (Hermes sender, synthetic Telegram transport) | default on, no egress | no |
 
 ## Outcome checklist
 

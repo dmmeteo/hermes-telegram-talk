@@ -9,6 +9,7 @@ Script, keyed on the newest user message:
   "recall"        -> the user/assistant turns the agent received, in order
   "slow <s>"      -> wait <s> seconds before answering (cancel/interrupt checks)
   "shell <cmd>"   -> a terminal tool call (approval checks)
+  "big <n>"       -> a result of about <n> characters between BIG-START and BIG-END markers
   anything else   -> "SCRIPTED-ANSWER: <request>"
 """
 import json
@@ -61,6 +62,9 @@ def plan(messages):
     if word == "slow":
         time.sleep(float(rest or "5"))
         return ("text", "SCRIPTED-SLOW-DONE")
+    if word == "big":
+        size = int(rest or "5000")
+        return ("text", "BIG-START " + ("synthetic research finding. " * (size // 28 + 1))[:size] + " BIG-END")
     if word == "recall":
         seen = [f"{m['role']}={m.get('content')}" for m in messages
                 if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)]

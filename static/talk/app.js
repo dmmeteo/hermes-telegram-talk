@@ -14,6 +14,8 @@ let conversation = null;
 let exiting = false;
 const APPEND_MAX_BYTES = 500;
 const FINISHED = ["succeeded", "failed", "cancelled", "interrupted"];
+// Statuses that prove the server refused the task before accepting it; anything else may have been accepted.
+const REFUSED = [400, 401, 403, 404, 409, 413, 415, 429, 503];
 
 function initData() {
   return webApp?.initData || new URLSearchParams(location.hash.slice(1)).get("tgWebAppData") || "";
@@ -242,7 +244,8 @@ function onMessage(current, message) {
     && typeof event.item.id === "string" && !current.delegations.has(event.item.id)) {
     current.delegations.add(event.item.id);
     if (current.conversation?.tasks) void delegate(current, event.item);
-    else append(current, "Tasks are unavailable in Hermes Telegram Talk. Nothing was executed.", "speakable", event.item.id);
+    else current.channel.send(JSON.stringify({type: "delegation.context.append", delegation_item_id: event.item.id,
+      channel: "speakable", content: [{type: "input_text", text: "Tasks are unavailable in Hermes Telegram Talk. Nothing was executed."}]}));
   }
 }
 
@@ -260,15 +263,23 @@ function chunks(text) {
   return out;
 }
 
+// "sent": every chunk was queued; "none": nothing was; "partial": some chunks were, so it must not be repeated.
 function append(current, text, channel, delegationId) {
-  if (call !== current || current.channel?.readyState !== "open") return false;
-  for (const chunk of chunks(text)) {
-    const message = {type: delegationId ? "delegation.context.append" : "session.context.append", channel,
-      content: [{type: "input_text", text: chunk}]};
-    if (delegationId) message.delegation_item_id = delegationId;
-    current.channel.send(JSON.stringify(message));
+  if (call !== current || current.channel?.readyState !== "open") return "none";
+  const parts = chunks(text);
+  let queued = 0;
+  try {
+    for (const chunk of parts) {
+      const message = {type: delegationId ? "delegation.context.append" : "session.context.append", channel,
+        content: [{type: "input_text", text: chunk}]};
+      if (delegationId) message.delegation_item_id = delegationId;
+      current.channel.send(JSON.stringify(message));
+      queued += 1;
+    }
+  } catch (_) {
+    return queued ? "partial" : "none";
   }
-  return true;
+  return "sent";
 }
 
 function callFields(current) {
@@ -282,16 +293,35 @@ async function delegate(current, item) {
   if (!request || !current.voiceId) {
     append(current, "There was nothing to hand to Hermes. Nothing was executed.", "speakable", item.id); return;
   }
-  try {
-    const data = await post("task", {...callFields(current), delegation_item_id: item.id, request});
+  // The same delegation id is idempotent on the server, so an unconfirmed submission is safe to repeat.
+  for (let attempt = 0; ; attempt += 1) {
+    let data = null, refused = null;
+    try {
+      data = await post("task", {...callFields(current), delegation_item_id: item.id, request});
+    } catch (error) {
+      if (REFUSED.includes(error.status)) refused = error;
+    }
     if (call !== current) return;
-    append(current, data.reply, data.channel === "speakable" ? "speakable" : "commentary", item.id);
-    if (data.job?.delegation_item_id === item.id) current.jobs.set(data.job.id, item.id);
-    schedulePoll(current, 500);
-  } catch (error) {
+    if (refused) {
+      append(current, `Hermes could not take this task. ${refused.serverMessage || refused.message} Nothing was executed.`,
+        "speakable", item.id);
+      return;
+    }
+    if (data && typeof data.reply === "string" && data.job?.delegation_item_id === item.id) {
+      current.jobs.set(data.job.id, item.id);
+      append(current, data.reply, data.channel === "speakable" ? "speakable" : "commentary", item.id);
+      schedulePoll(current, 500);
+      return;
+    }
+    if (attempt === 0) append(current, "Checking whether Hermes received this task.", "commentary", item.id);
+    if (attempt >= 2) {
+      append(current, "It is not confirmed whether Hermes received this task. If it did, its result will still arrive "
+        + "here or in Telegram. Do not say that it ran or that nothing ran.", "speakable", item.id);
+      schedulePoll(current, 500);
+      return;
+    }
+    await new Promise(resolve => setTimeout(resolve, 1000 * 2 ** attempt));
     if (call !== current) return;
-    append(current, `Hermes could not take this task. ${error.serverMessage || error.message} Nothing was executed.`,
-      "speakable", item.id);
   }
 }
 
@@ -303,22 +333,28 @@ function schedulePoll(current, delay) {
 
 async function poll(current) {
   if (call !== current || !current.voiceId) return;
-  let data;
-  try { data = await post("tasks", callFields(current)); } catch (_) { schedulePoll(current, 5000); return; }
-  if (call !== current) return;
-  for (const job of Array.isArray(data.jobs) ? data.jobs : []) {
-    if (job.voice_session_id === current.voiceId && current.delegations.has(job.delegation_item_id)
-      && !current.jobs.has(job.id)) current.jobs.set(job.id, job.delegation_item_id);
-    const delegationId = current.jobs.get(job.id);
-    if (!delegationId || job.delegation_item_id !== delegationId || job.voice_session_id !== current.voiceId
-      || !FINISHED.includes(job.state) || current.spoken.has(job.id)) continue;
-    current.spoken.add(job.id);
-    if (append(current, job.spoken || `Hermes task ${job.number} ${job.state}.`, "speakable", delegationId)) {
-      void acknowledge(current, job.id, 0);
+  let delay = 5000;
+  try {
+    const data = await post("tasks", callFields(current));
+    if (call !== current) return;
+    for (const job of Array.isArray(data.jobs) ? data.jobs : []) {
+      if (job.voice_session_id === current.voiceId && current.delegations.has(job.delegation_item_id)
+        && !current.jobs.has(job.id)) current.jobs.set(job.id, job.delegation_item_id);
+      const delegationId = current.jobs.get(job.id);
+      if (!delegationId || job.delegation_item_id !== delegationId || job.voice_session_id !== current.voiceId
+        || !FINISHED.includes(job.state) || current.spoken.has(job.id) || current.cut.has(job.id)) continue;
+      const outcome = append(current, job.spoken || `Hermes task ${job.number} ${job.state}.`, "speakable", delegationId);
+      // Only a whole append is acknowledged. A cut one stays undelivered for the next call, never repeated here.
+      if (outcome === "sent") { current.spoken.add(job.id); void acknowledge(current, job.id, 0); }
+      else if (outcome === "partial") current.cut.add(job.id);
     }
+    if (data.context_pending || current.polls++ % 6 === 0) void refresh(current);
+    delay = [...current.jobs.keys()].some(id => !current.spoken.has(id) && !current.cut.has(id)) ? 2000 : 10000;
+  } catch (_) {
+    delay = 5000;
+  } finally {
+    schedulePoll(current, delay);
   }
-  if (data.context_pending || current.polls++ % 6 === 0) void refresh(current);
-  schedulePoll(current, [...current.jobs.keys()].some(id => !current.spoken.has(id)) ? 2000 : 10000);
 }
 
 async function acknowledge(current, jobId, attempt) {
@@ -332,14 +368,14 @@ async function acknowledge(current, jobId, attempt) {
 }
 
 async function refresh(current) {
-  if (current.refreshing || call !== current || !current.voiceId) return;
+  if (current.refreshing || current.contextCut || call !== current || !current.voiceId) return;
   current.refreshing = true;
   try {
     const data = await post("context", callFields(current));
     if (call !== current || !Number.isInteger(data.revision) || typeof data.text !== "string" || !data.text) return;
-    if (append(current, data.text, data.sources?.jobs ? "speakable" : "commentary")) {
-      await post("context/ack", {...callFields(current), revision: data.revision});
-    }
+    const outcome = append(current, data.text, data.sources?.jobs ? "speakable" : "commentary");
+    if (outcome === "sent") await post("context/ack", {...callFields(current), revision: data.revision});
+    else if (outcome === "partial") current.contextCut = true;
   } catch (_) {
     // A refresh is retried by the next poll; nothing counts as delivered without its ack.
   } finally { current.refreshing = false; }
@@ -427,7 +463,7 @@ async function start() {
   const auth = initData();
   if (!auth) { stop("Open Hermes Telegram Talk from Telegram to sign in."); return; }
   const current = { auth, phase: "connecting", abort: new AbortController(), nodes: [],
-    seen: new Set(), delegations: new Set(), jobs: new Map(), spoken: new Set(), polls: 0,
+    seen: new Set(), delegations: new Set(), jobs: new Map(), spoken: new Set(), cut: new Set(), polls: 0,
     muted: false, inputLevel: 0, outputLevel: 0 };
   call = current; showError(); render();
   try {

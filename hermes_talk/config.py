@@ -51,6 +51,26 @@ class Tasks:
 
 
 @dataclass(frozen=True)
+class ReportDestination:
+    """A chat the operator allows named users to send task reports to, through the Talk bot."""
+    name: str
+    chat_id: int
+    thread_id: int = None
+    user_ids: tuple = ()
+
+
+@dataclass(frozen=True)
+class Receipts:
+    """Short final task reports in Telegram. On with tasks unless turned off; named destinations are opt-in."""
+    enabled: bool = True
+    destinations: tuple = ()
+    max_chars: int = 700
+    attempts: int = 3
+    backoff_s: tuple = (5.0, 30.0)
+    send_timeout_s: float = 30.0
+
+
+@dataclass(frozen=True)
 class TalkConfig:
     profile_id: str
     display_name: str
@@ -70,6 +90,7 @@ class TalkConfig:
     voice_session_ttl_s: int = 2 * 3600
     budgets: Budgets = field(default_factory=Budgets)
     tasks: Tasks = field(default_factory=Tasks)
+    receipts: Receipts = field(default_factory=Receipts)
 
 
 def _text(value, what, limit=400):
@@ -120,6 +141,41 @@ def _tasks(data, base_dir):
                  result_chars=_int(data.get("result_chars", 1500), "tasks.result_chars", 100, 6000))
 
 
+TARGET = re.compile(r"telegram:(-?[1-9][0-9]{0,19})(?::([1-9][0-9]{0,9}))?")
+DEST_NAME = re.compile(r"[a-z][a-z0-9 _-]{0,31}")
+PRIVATE_NAMES = ("this chat", "telegram", "here", "my chat")
+
+
+def _receipts(data, tasks):
+    if not isinstance(data, dict):
+        raise ConfigError("receipts must be a mapping")
+    unknown = set(data) - {"enabled", "destinations", "max_chars", "attempts"}
+    if unknown:
+        raise ConfigError(f"unknown receipts keys: {sorted(unknown)}")
+    if data.get("enabled", True) not in (True, False):
+        raise ConfigError("receipts.enabled must be true or false")
+    if not tasks.enabled or not data.get("enabled", True):
+        return Receipts(enabled=False)
+    destinations = []
+    for name, spec in (data.get("destinations") or {}).items():
+        if not isinstance(name, str) or not DEST_NAME.fullmatch(name) or name in PRIVATE_NAMES:
+            raise ConfigError("receipts.destinations names must be short lowercase labels")
+        if not isinstance(spec, dict) or set(spec) - {"target", "user_ids"}:
+            raise ConfigError(f"receipts.destinations.{name} needs target and user_ids only")
+        match = TARGET.fullmatch(str(spec.get("target", "")))
+        if not match:
+            raise ConfigError(f"receipts.destinations.{name}.target must be telegram:<chat id>[:<topic id>]; "
+                              "a bare platform would mean a home channel and is refused")
+        users = spec.get("user_ids")
+        if not isinstance(users, list) or not users or not all(u in tasks.user_ids for u in users):
+            raise ConfigError(f"receipts.destinations.{name}.user_ids must list task users allowed to choose it")
+        destinations.append(ReportDestination(name, int(match.group(1)),
+                                              int(match.group(2)) if match.group(2) else None, tuple(users)))
+    return Receipts(enabled=True, destinations=tuple(destinations),
+                    max_chars=_int(data.get("max_chars", 700), "receipts.max_chars", 200, 3500),
+                    attempts=_int(data.get("attempts", 3), "receipts.attempts", 1, 5))
+
+
 def parse_config(data, base_dir):
     if not isinstance(data, dict):
         raise ConfigError("config must be a mapping")
@@ -167,6 +223,7 @@ def parse_config(data, base_dir):
     owner = activity.get("owner_user_id")
     if owner is not None and (type(owner) is not int or owner <= 0):
         raise ConfigError("activity.owner_user_id must be a numeric Telegram user id")
+    tasks = _tasks(data.get("tasks") or {}, base_dir)
     if privacy and privacy != {"persist_audio": False}:
         raise ConfigError("privacy only supports persist_audio: false; raw audio is never stored")
     return TalkConfig(
@@ -185,7 +242,8 @@ def parse_config(data, base_dir):
         activity_window_s=_int(activity.get("window_hours", 168), "activity.window_hours", 1, 24 * 90) * 3600,
         voice_session_ttl_s=_int(voice.get("session_ttl_minutes", 120), "voice.session_ttl_minutes", 5, 24 * 60) * 60,
         budgets=budgets,
-        tasks=_tasks(data.get("tasks") or {}, base_dir),
+        tasks=tasks,
+        receipts=_receipts(data.get("receipts") or {}, tasks),
         **colors,
     )
 
