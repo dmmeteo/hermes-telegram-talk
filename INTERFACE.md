@@ -65,7 +65,8 @@ These notes are backend-owned and add no field. Changing or removing a field abo
   parenthesis with `why now: ...`. Both are additive text inside the instructions; no wire field changed.
 - `POST api/pulse/feedback {initData,conversation_id,voice_session_id,delegation_item_id,request}` ->
   `{card:{handle,state,feedback}, channel:"speakable", reply}`. `request` is a client delegation of the form
-  `pulse P<n> useful|not useful|dismiss|later|more`. It needs the live call (409 after it ended) and a label that
+  `pulse P<n> useful|not useful|dismiss|later|more`, optionally followed by a reason (`not relevant|already knew|too
+  late|too often|wrong time`, additive). It needs the live call (409 after it ended) and a label that
   call carried (404 otherwise); a malformed request answers 400. The same delegation id in the same call returns its
   first outcome and changes nothing. The client appends `reply` on `speakable` to that delegation. It works whether
   or not tasks are enabled and never starts a task.

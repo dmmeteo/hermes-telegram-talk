@@ -71,6 +71,53 @@ class Receipts:
 
 
 @dataclass(frozen=True)
+class PulseSettings:
+    """When and how loudly Pulse brings things up in a call (pulse_policy); all optional."""
+    zone: str = "UTC"
+    night: tuple = None  # ((hour, minute) it starts, (hour, minute) it ends), or None for no night
+    quiet_days: tuple = ()  # Monday 0 .. Sunday 6
+    quiet_until: float = None
+    nudge: str = "balanced"
+
+
+def _clock(value, what):
+    match = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", value) if isinstance(value, str) else None
+    if match is None:
+        raise ConfigError(f"{what} must be HH:MM")
+    return int(match.group(1)), int(match.group(2))
+
+
+def _pulse(data):
+    if not isinstance(data, dict):
+        raise ConfigError("pulse must be a mapping")
+    unknown = set(data) - {"zone", "night", "quiet_days", "quiet_until", "nudge"}
+    if unknown:
+        raise ConfigError(f"unknown pulse keys: {sorted(unknown)}")
+    zone = _text(data.get("zone", "UTC"), "pulse.zone", 64)
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo(zone)
+    except Exception:
+        raise ConfigError("pulse.zone must be an IANA time zone name") from None
+    night = data.get("night") or None
+    if night is not None:
+        if not isinstance(night, list) or len(night) != 2:
+            raise ConfigError("pulse.night must be [\"HH:MM\", \"HH:MM\"] or []")
+        night = (_clock(night[0], "pulse.night"), _clock(night[1], "pulse.night"))
+    days = data.get("quiet_days") or []
+    if not isinstance(days, list) or not all(isinstance(d, int) and not isinstance(d, bool) and 0 <= d <= 6
+                                             for d in days):
+        raise ConfigError("pulse.quiet_days must be weekday numbers, Monday 0 to Sunday 6")
+    until = data.get("quiet_until")
+    if until is not None and (isinstance(until, bool) or not isinstance(until, (int, float)) or until < 0):
+        raise ConfigError("pulse.quiet_until must be epoch seconds")
+    nudge = data.get("nudge", "balanced")
+    if nudge not in ("gentle", "balanced", "eager"):
+        raise ConfigError("pulse.nudge must be gentle, balanced or eager")
+    return PulseSettings(zone, night, tuple(sorted(set(days))), float(until) if until is not None else None, nudge)
+
+
+@dataclass(frozen=True)
 class TalkConfig:
     profile_id: str
     display_name: str
@@ -91,6 +138,7 @@ class TalkConfig:
     budgets: Budgets = field(default_factory=Budgets)
     tasks: Tasks = field(default_factory=Tasks)
     receipts: Receipts = field(default_factory=Receipts)
+    pulse: PulseSettings = field(default_factory=PulseSettings)
 
 
 def _text(value, what, limit=400):
@@ -244,6 +292,7 @@ def parse_config(data, base_dir):
         budgets=budgets,
         tasks=tasks,
         receipts=_receipts(data.get("receipts") or {}, tasks),
+        pulse=_pulse(data.get("pulse") or {}),
         **colors,
     )
 

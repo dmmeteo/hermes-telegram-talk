@@ -370,6 +370,230 @@ def interests_decay_unless_said_again(w):
     return {"after_days": 120, "state": faded["state"]}
 
 
+def seed_rows(w, title, rows, source="telegram", age_s=0):
+    """A synthetic session whose rows carry tool calls and tool results, through public SessionDB methods."""
+    from hermes_state_ids import new_session_id
+    w.advance(5)  # a later second than the scan cursor: the frozen test clock never repeats a session's time
+    db, sid, at = w.history.db, new_session_id(), w.clock() - age_s
+    db.create_session(sid, source)
+    db.set_session_title(sid, title)
+    for row in rows:
+        db.append_message(sid, row["role"], content=row.get("content"), tool_name=row.get("tool_name"),
+                          tool_calls=row.get("tool_calls"), tool_call_id=row.get("tool_call_id"), timestamp=at)
+    db.end_session(sid, "done")
+    return sid
+
+
+def fresh_seed(w, *args, **kwargs):
+    w.advance(5)  # as seed_rows: each seeded session is newer than the last scan
+    return w.seed(*args, **kwargs)
+
+
+def tool_call(call_id, name, args):
+    return {"id": call_id, "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
+
+
+def card_by_title(w, title, user=A):
+    found = [c for c in state_cards(w, user) if c["title"] == title]
+    assert len(found) == 1, (title, [c["title"] for c in state_cards(w, user)])
+    return found[0]
+
+
+def call_handles(w, user=A):
+    conv, vs, instructions = w.start(user=user, conversation_id=w.ctx.get("conv") if user == A else None)
+    return conv, vs, instructions, {t: h for h, _, t in lines(instructions)}
+
+
+def rate(w, conv, vs, handle, words, delegation, user=A):
+    return w.post("pulse/feedback", {"initData": w.init(user), "conversation_id": conv, "voice_session_id": vs,
+                                     "delegation_item_id": delegation, "request": f"pulse {handle} {words}"})
+
+
+def with_config(w, **changes):
+    import dataclasses
+    w.talk.config = dataclasses.replace(w.config, **changes)
+
+
+@step
+def claims_are_judged_against_their_turns_tool_calls(w):
+    backed = seed_rows(w, "Synthetic dentist reminder", [
+        {"role": "user", "content": "Please remind me to call the synthetic dentist at 5pm."},
+        {"role": "assistant", "content": "", "tool_calls": [tool_call("call_r1", "cronjob", {"action": "create"})]},
+        {"role": "tool", "tool_name": "cronjob", "tool_call_id": "call_r1", "content": '{"success": true}'},
+        {"role": "assistant", "content": "Done, I set a reminder for 5pm to call the synthetic dentist."}])
+    seed_rows(w, "Synthetic late text", [
+        {"role": "user", "content": "Text synthetic Sam that I am late."},
+        {"role": "assistant", "content": "Sure, I sent the message to synthetic Sam."}])
+    seed_rows(w, "Synthetic landlord email", [
+        {"role": "user", "content": "Email the synthetic landlord about the boiler."},
+        {"role": "assistant", "content": "", "tool_calls": [tool_call("call_m1", "send_message", {})]},
+        {"role": "tool", "tool_name": "send_message", "tool_call_id": "call_m1", "content": '{"error": "denied"}'},
+        {"role": "assistant", "content": "I sent the message to the synthetic landlord."}])
+    summary = w.talk.engine.run_once(A)["memory"]
+    claims = {c["evidence"]: c for c in w.state()["memory"]["claims"]}
+    dentist = claims["I set a reminder for 5pm to call the synthetic dentist."]
+    sam = claims["I sent the message to synthetic Sam."]
+    landlord = claims["I sent the message to the synthetic landlord."]
+    assert dentist["backed_by"] == "cronjob create -> ok" and dentist["session"] == backed, dentist
+    assert sam["backed_by"] == "" and sam["calls"] == [], sam
+    assert landlord["backed_by"] == "" and landlord["calls"] == ["send_message -> error: denied"], landlord
+    cards = [c for c in state_cards(w) if c.get("kind") == "claim"]
+    assert sorted(c["evidence"] for c in cards) == sorted([sam["evidence"], landlord["evidence"]]), cards
+    assert "card" not in dentist, "a backed claim never becomes a card"
+    conv, vs, instructions = w.start(conversation_id=w.ctx["conv"])
+    w.end(conv, vs)
+    levels = {c["evidence"]: (c.get("delivery") or {}).get("level") for c in state_cards(w) if c.get("kind") == "claim"}
+    assert set(levels.values()) <= {"screen", "off"} and "push" not in levels.values(), levels
+    sent = [m for k, m, _ in w.model.requests if k == "selection"][-1][-1]["content"]
+    text = "\n".join(p.get("text", "") for p in sent) if isinstance(sent, list) else sent
+    assert "[claim with no tool call behind it" in text and "send_message -> error: denied" in text
+    w.reopen()
+    again = w.talk.engine.run_once(A)["memory"]
+    assert len(w.state()["memory"]["claims"]) == 3 and again.get("claims", 0) == 0, "a restart rereads nothing"
+    assert not any(c.get("kind") == "claim" for c in state_cards(w, B)), "claims are kept per account"
+    return {"claims": summary.get("claims"), "unbacked": summary.get("unbacked"), "levels": levels,
+            "backed_by": dentist["backed_by"], "landlord_calls": landlord["calls"]}
+
+
+@step
+def learned_preferences_turn_off_a_place_the_user_rates_down(w):
+    with_config(w, budgets=dataclasses_replace(w.config.budgets, activity_items=8))
+    try:
+        fresh_seed(w, "Synthetic kanban board tidy", source="kanban", turns=[("user", "go"), ("assistant", "tidied")],
+               end_reason="done", age_s=0)
+        w.talk.engine.run_once(A)
+        conv, vs, instructions, handle = call_handles(w)
+        assert "Synthetic kanban board tidy" in handle, lines(instructions)
+        before = card_by_title(w, "Synthetic kanban board tidy")["delivery"]
+        assert before["level"] in ("push", "screen"), before
+        status, data = rate(w, conv, vs, handle["Synthetic kanban board tidy"], "not useful", "call_lp1")
+        assert status == 200 and data["card"]["feedback"] == "not_useful", data
+        w.end(conv, vs)
+        signals = w.state()["memory"]["signals"]
+        assert [s["place"] for s in signals.values() if s["useful"] == 0.0 and s["place"] == "source:kanban"]
+        fresh_seed(w, "Synthetic kanban column sweep", source="kanban", turns=[("user", "go"), ("assistant", "swept")],
+               end_reason="done", age_s=0)
+        w.talk.engine.run_once(A)
+        decision = w.state()["selection"]["decisions"][card_by_title(w, "Synthetic kanban column sweep")["fp"]]
+        assert decision["decision"] in ("surfaced", "over_limit"), "the model still picks it"
+        conv, vs, instructions, handle = call_handles(w)
+        w.end(conv, vs)
+        after = card_by_title(w, "Synthetic kanban column sweep")
+        assert "Synthetic kanban column sweep" not in handle and after["state"] == "candidate", lines(instructions)
+        assert after["delivery"]["level"] == "off" and "kanban" in after["delivery"]["learned"], after["delivery"]
+        w.reopen()
+        with_config(w, budgets=dataclasses_replace(w.config.budgets, activity_items=8))
+        conv, vs, instructions, handle = call_handles(w)
+        w.end(conv, vs)
+        assert "Synthetic kanban column sweep" not in handle, "what learning holds survives a restart"
+        other = w.state(B)["memory"]
+        theirs = [x["place"] for x in (other.get("signals") or {}).values()]
+        assert "source:kanban" not in theirs, ("another account's ratings teach nothing there", theirs)
+        return {"before": before["level"], "after": after["delivery"], "other_account_places": theirs}
+    finally:
+        w.talk.config = w.config
+
+
+def dataclasses_replace(obj, **changes):
+    import dataclasses
+    return dataclasses.replace(obj, **changes)
+
+
+@step
+def delivery_policy_holds_for_the_night_and_quiet_then_briefs_once(w):
+    from hermes_talk.config import PulseSettings
+    from datetime import datetime, timezone
+    hour = datetime.fromtimestamp(w.clock(), timezone.utc).hour
+    night = ((hour - 1) % 24, 0), ((hour + 2) % 24, 0)
+    budgets = dataclasses_replace(w.config.budgets, activity_items=8)
+    with_config(w, budgets=budgets, pulse=PulseSettings(night=night))
+    try:
+        fresh_seed(w, "Synthetic lease renewal draft", source="desktop", turns=[("user", "go"), ("assistant", "drafted")],
+               end_reason="done", age_s=0)
+        w.talk.engine.run_once(A)
+        conv, vs, instructions, handle = call_handles(w)
+        w.end(conv, vs)
+        held = card_by_title(w, "Synthetic lease renewal draft")
+        assert "Synthetic lease renewal draft" not in handle and held["state"] == "candidate", lines(instructions)
+        assert held["delivery"]["level"] == "brief" and held["delivery"]["why"] == "held: night", held["delivery"]
+        w.advance(3 * 3600)
+        w.reopen()
+        with_config(w, budgets=budgets, pulse=PulseSettings(night=night))
+        conv, vs, instructions, handle = call_handles(w)
+        w.end(conv, vs)
+        assert "Synthetic lease renewal draft" in handle, lines(instructions)
+        assert "held for the brief" in [l for l in brief(instructions).splitlines()
+                                         if "Synthetic lease renewal draft" in l][0]
+        stamp = w.state()["brief"]
+        briefed = card_by_title(w, "Synthetic lease renewal draft")
+        assert briefed["fp"] in stamp["cards"] and briefed["briefed"] == stamp["at"] and briefed["state"] == "exposed"
+        conv, vs, instructions, handle = call_handles(w)
+        w.end(conv, vs)
+        assert w.state()["brief"] == stamp, "the brief is once per local day"
+        until = w.clock() + 3600
+        with_config(w, budgets=budgets, pulse=PulseSettings(night=night, quiet_until=until))
+        fresh_seed(w, "Synthetic lease signing", source="desktop", turns=[("user", "go"), ("assistant", "signed")],
+               end_reason="done", age_s=0)
+        w.talk.engine.run_once(A)
+        conv, vs, instructions, handle = call_handles(w)
+        w.end(conv, vs)
+        quiet = card_by_title(w, "Synthetic lease signing")
+        assert "Synthetic lease signing" not in handle and quiet["delivery"]["why"] == "held: quiet until", quiet
+        assert all((c.get("delivery") or {}).get("level") != "push" for c in state_cards(w)
+                   if c["state"] in ("candidate", "exposed", "mentioned")) or not handle, "quiet: nothing leads"
+        w.advance(86400)
+        conv, vs, instructions, handle = call_handles(w)
+        w.end(conv, vs)
+        assert "Synthetic lease signing" in handle and w.state()["brief"]["day"] != stamp["day"], lines(instructions)
+        return {"night": [list(night[0]), list(night[1])], "held": held["delivery"], "brief": stamp["day"],
+                "quiet": quiet["delivery"]["why"]}
+    finally:
+        w.talk.config = w.config
+
+
+@step
+def rating_reasons_leave_lessons_that_change_delivery(w):
+    budgets = dataclasses_replace(w.config.budgets, activity_items=8)
+    with_config(w, budgets=budgets)
+    try:
+        for title in ("Synthetic discord lease digest", "Synthetic telegram lease digest", "Synthetic cron lease audit"):
+            fresh_seed(w, title, source=title.split()[1], turns=[("user", "go"), ("assistant", "done")], end_reason="done")
+        w.talk.engine.run_once(A)
+        conv, vs, instructions, handle = call_handles(w)
+        for title in ("Synthetic discord lease digest", "Synthetic telegram lease digest", "Synthetic cron lease audit"):
+            assert title in handle, (title, lines(instructions))
+        status, data = rate(w, conv, vs, handle["Synthetic discord lease digest"], "not useful because not relevant", "r1")
+        assert status == 200, data
+        assert rate(w, conv, vs, handle["Synthetic discord lease digest"], "not useful because not relevant", "r1")[0] == 200
+        assert rate(w, conv, vs, handle["Synthetic telegram lease digest"], "not useful, already knew", "r2")[0] == 200
+        assert rate(w, conv, vs, handle["Synthetic cron lease audit"], "not useful because too often", "r3")[0] == 200
+        bad = rate(w, conv, vs, handle["Synthetic cron lease audit"], "not useful because meh", "r4")
+        assert bad[0] == 400, bad
+        w.end(conv, vs)
+        lessons = w.state()["memory"]["lessons"]
+        whats = [(l["what"], l.get("value")) for l in lessons]
+        assert whats.count(("rule", "source:discord")) == 1, "a repeated delegation leaves one lesson"
+        assert ("seen", None) in whats and ("level", "screen") in whats, whats
+        fresh_seed(w, "Synthetic discord lease recap", source="discord", turns=[("user", "go"), ("assistant", "recap")],
+               end_reason="done")
+        w.talk.engine.run_once(A)
+        sent = [m for k, m, _ in w.model.requests if k == "selection"][-1][-1]["content"]
+        text = "\n".join(p.get("text", "") for p in sent) if isinstance(sent, list) else sent
+        assert 'already knew about updates like these: "Synthetic telegram lease digest"' in text
+        conv, vs, instructions, handle = call_handles(w)
+        w.end(conv, vs)
+        recap = card_by_title(w, "Synthetic discord lease recap")
+        assert "Synthetic discord lease recap" not in handle and recap["delivery"]["why"] == "not relevant rule"
+        loud = [(c["title"], c["delivery"]) for c in state_cards(w) if c.get("kind", "activity") == "activity"
+                and (c.get("delivery") or {}).get("level") == "push" and c["state"] in ("candidate", "exposed")]
+        assert not loud, ("too often: activity comes up no louder than screen", loud)
+        assert not w.state(B)["memory"].get("lessons"), "lessons are per account"
+        return {"lessons": whats}
+    finally:
+        w.talk.config = w.config
+        w.advance(60)  # later work happens later: no session shares this frozen second with the ones seeded here
+
+
 @step
 def without_a_model_route_the_engine_degrades_and_says_so(w):
     pulse_model.bind(None)  # as in a Hermes whose plugin loader gave hermes-talk no ctx.llm

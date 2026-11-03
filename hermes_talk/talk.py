@@ -10,7 +10,7 @@ import re
 import time
 from dataclasses import asdict
 
-from . import activity, pulse
+from . import activity, pulse, pulse_policy
 from .agent import Readiness
 from .gateway_rpc import task_agent
 from .config import PRIVATE_NAMES
@@ -168,7 +168,7 @@ class TalkRuntime:
         """(cards, waiting, lines): the selected Pulse cards and their briefing lines, numbered from first_handle."""
         now = self.clock()
         self.engine.select(account, timeout=SELECT_ON_CALL_S)
-        cards, waiting, by = self.pulse.choose(account, limit, now, exclude)
+        cards, waiting, by = self.pulse.choose(account, limit, now, exclude, pulse_policy.settings_from(self.config))
         lines = [redact(pulse.line(card, f"P{first_handle + i}", activity.when(card["at"])))
                  for i, card in enumerate(cards)]
         logger.info("pulse selection by=%s cards=%d waiting=%d", by, len(cards), waiting)
@@ -290,11 +290,13 @@ class TalkRuntime:
             raise TalkError(400, "Malformed delegation id.")
         parsed = pulse.parse_feedback(request) if isinstance(request, str) and len(request) <= 200 else None
         if parsed is None:
-            raise TalkError(400, "Pulse feedback must be \"pulse P<number> useful|not useful|dismiss|later|more\".")
+            raise TalkError(400, "Pulse feedback must be \"pulse P<number> useful|not useful|dismiss|later|more\", "
+                                 "optionally with a reason: not relevant|already knew|too late|too often|wrong time.")
         self.store.voice_session(account, conversation_id, voice_session_id, live=True)
         number, kind = parsed
         outcome, card = self.pulse.feedback(account, voice_session_id, delegation_item_id, number, kind,
-                                            self.clock(), SNOOZE_S)
+                                            self.clock(), SNOOZE_S, pulse.feedback_reason(request),
+                                            pulse_policy.settings_from(self.config))
         if outcome is None:
             raise TalkError(404, f"Update P{number} is not part of this call.")
         handle = f"P{number}"

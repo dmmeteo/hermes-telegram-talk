@@ -45,6 +45,8 @@ Pulse weighs your value against what the user did with earlier updates, so judge
 NOT_USEFUL_LESSON = ("The user said updates like these were not useful: {titles}. Leave out ones like them unless "
                      "something about them clearly changed (skip: \"rated\").")
 USEFUL_LESSON = "The user said updates like these were useful: {titles}. Favor ones like them."
+ALREADY_KNEW_LESSON = ("The user said they already knew about updates like these: {titles}. Leave out ones like them "
+                       "unless something new happened (skip: \"raised\").")
 
 
 def _clip(text, limit):
@@ -62,7 +64,8 @@ def signature(cards):
 
 def lessons(feedback_titles):
     out = []
-    for kind, lesson in (("not_useful", NOT_USEFUL_LESSON), ("useful", USEFUL_LESSON)):
+    for kind, lesson in (("not_useful", NOT_USEFUL_LESSON), ("useful", USEFUL_LESSON),
+                         ("already_knew", ALREADY_KNEW_LESSON)):
         titles = feedback_titles.get(kind) or []
         if titles:
             out.append(lesson.format(titles="; ".join(f'"{_clip(t, 80)}"' for t in titles[-6:])))
@@ -72,6 +75,9 @@ def lessons(feedback_titles):
 def describe(n, card, now):
     if card.get("kind") == "followup":
         head = f"#{n} [follow-up from memory #{card['ref']}, {card.get('memory_kind', 'item')}] {card['title']}"
+    elif card.get("kind") == "claim":
+        head = (f"#{n} [claim with no tool call behind it, {card['source']} session] {card['title']} "
+                f"(its turn's calls: {'; '.join(card.get('calls') or []) or 'none'})")
     else:
         head = f"#{n} [{card['status']}] {card['title']} ({card['source']} session, changed {_utc(card['at'])})"
     notes = []

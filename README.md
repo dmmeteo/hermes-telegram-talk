@@ -165,9 +165,27 @@ Pulse is Talk's briefing engine, ported for voice from Hermes Conduit notifier's
   call that ends after one offers it again, marked "mentioned before, not confirmed heard". A greeting names no
   card and closes none. The client marks an assistant turn the user started speaking over as `interrupted`; it is
   recorded and is not evidence.
-- **Feedback.** The model delegates `pulse P<n> useful|not useful|dismiss|later|more` (`api/pulse/feedback`).
+- **Feedback.** The model delegates `pulse P<n> useful|not useful|dismiss|later|more` (`api/pulse/feedback`),
+  optionally with a reason (`not relevant|already knew|too late|too often|wrong time`).
   Useful and more acknowledge the card (more also speaks its details), not useful and dismiss close it, later
   snoozes it for three hours as a follow-up. A resubmitted delegation returns its first outcome.
+- **Learned preferences.** Each rating is a signal (`pulse_policy.signal`): useful and not useful/dismiss are
+  thumbs, more is a Do it at the sent stage, later leaves none. `pulse_prefs.py` is upstream's model unchanged
+  (regularized logistic regression over kind, place and timeliness, 60-day long memory, a place following its last
+  three votes): a pick's score (learning + value + pick) against `SURFACE_AT`/`PUSH_AT` sets its level. Reasons
+  leave lessons (`pulse_policy.reason`): too often steps the kind's ceiling one level quieter, too late makes it
+  count as due sooner, already knew is told to the selection model, wrong time closes that part of the day for
+  its leads, not relevant turns off what comes from that place.
+- **Delivery policy.** `pulse_policy.py` (upstream levels, quiet, hours and brief): push leads the call's
+  briefing ("lead with this"), screen is carried after the leads, brief is held for the first call of the next
+  local day that is not in the night or a quiet spell (stamped once per day), off is not brought up. Optional
+  config `pulse: {zone, night: ["22:00", "07:00"], quiet_days: [5, 6], quiet_until: <epoch>, nudge}`; with no
+  night configured none applies, because a Talk call is always opened by the user. Decisions are written only
+  when a card's level changes.
+- **Claims.** The memory reading also lists what Hermes said it had just done with a tool (reminder, event, job,
+  message). `pulse_claims.py` judges each against the tool calls stored in that turn of the same session
+  (SessionDB `get_messages`, public): a worked call that could do it backs it; an unbacked claim becomes a
+  `[claim]` card (screen by default) that the selection model may bring up.
 - **Snooze and watch.** A snoozed card comes back once due, boosted and labelled. An acknowledged `active` card
   is watched; its next status arrives labelled "follow-up on an earlier update".
 - **Deduplication.** An unchanged session is never told twice. The same news (status and normalized title) from
@@ -176,7 +194,10 @@ Pulse is Talk's briefing engine, ported for voice from Hermes Conduit notifier's
 To change a typical behavior: a prompt rule or skip reason in `pulse_select.py`/`pulse_memory.py`/
 `pulse_followup.py` (teach `tests/pulse/model_fixture.py` the new answer and add a step to
 `verify-pulse-engine.py`); a feedback kind or the evidence rules in `pulse.py` (a case in `verify-pulse.py`);
-storage shape in `pulse_ledger.py`; when the engine runs in `pulse_engine.py`.
+storage shape in `pulse_ledger.py`; when the engine runs in `pulse_engine.py`; levels, reasons and quiet/night
+rules in `pulse_policy.py`; claim judging in `pulse_claims.py` (a step in `verify-pulse-engine.py` for each). What
+was ported, adapted or left out, and why, is in
+[docs/adr/0003-pulse-whole-engine.md](docs/adr/0003-pulse-whole-engine.md).
 
 Secret-shaped strings are redacted from every section. These are `sk-…` keys, bot tokens, JWTs and
 `token=`/`password=` values.

@@ -21,6 +21,21 @@ def _turns(rows):
     return [(r["role"], r["content"]) for r in rows if r["role"] in ROLES and r.get("content")]
 
 
+def _rows(rows):
+    out = []
+    for r in rows:
+        calls = r.get("tool_calls")
+        if isinstance(calls, str):
+            try:
+                import json
+                calls = json.loads(calls)
+            except ValueError:
+                calls = []
+        out.append({"role": r.get("role"), "content": r.get("content"), "tool_name": r.get("tool_name"),
+                    "tool_call_id": r.get("tool_call_id"), "tool_calls": calls if isinstance(calls, list) else []})
+    return out
+
+
 class NativeHistory:
     def __init__(self, hermes_home):
         from hermes_state import SessionDB
@@ -73,6 +88,12 @@ class NativeHistory:
     def recent(self, session_id, limit):
         with self.lock:
             return _turns(self.db.get_messages(session_id, limit=limit, latest=True))
+
+    def rows(self, session_id, limit):
+        """The session's latest stored rows with their tool calls (role, content, tool_name, tool_call_id,
+        tool_calls), oldest first: what Pulse judges Hermes's claims against (pulse_claims)."""
+        with self.lock:
+            return _rows(self.db.get_messages(session_id, limit=limit, latest=True))
 
     def activity_rows(self, exclude_source, since_ts, max_rows):
         """(rows active at or after since_ts, newest first; exhaustive) read page by page.
@@ -142,6 +163,9 @@ class MemoryHistory:
 
     def recent(self, session_id, limit):
         return _turns(self.messages.get(session_id, [])[-limit:])
+
+    def rows(self, session_id, limit):
+        return _rows(self.messages.get(session_id, [])[-limit:])
 
     def end_session(self, session_id, reason, at=None):
         self.sessions[session_id].update(ended_at=at or time.time(), end_reason=reason)

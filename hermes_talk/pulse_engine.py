@@ -10,7 +10,7 @@ reason), so deterministic ranking is never reported as model selection.
 import logging
 import threading
 
-from . import pulse, pulse_followup, pulse_memory, pulse_select
+from . import pulse, pulse_claims, pulse_followup, pulse_memory, pulse_policy, pulse_select
 from .pulse_model import ModelUnavailable
 
 logger = logging.getLogger("tg-voice")
@@ -20,6 +20,8 @@ START_DELAY_S = 30.0  # the worker (and plugin discovery) starts after the serve
 SELECT_ON_CALL_S = 8.0  # bound on a model selection made while a call is being set up
 MAX_SOURCES = 12  # sessions read per account per run
 MAX_CHECKS_PER_RUN = 6
+CLAIM_ROWS = 400  # stored rows (tool rows included) read to judge a session's claims
+MAX_CLAIMS_KEPT = 100
 
 
 class PulseEngine:
@@ -127,28 +129,61 @@ class PulseEngine:
             if not rows:
                 continue
             remembered = pulse_memory.remembered(state["memory"])
+            found = []
             try:
-                items, closed, rejected = pulse_memory.extract(self.model, rows, remembered, now)
+                items, closed, rejected = pulse_memory.extract(self.model, rows, remembered, now, claims=found)
             except ModelUnavailable:
                 out["errors"] += 1
                 continue  # the read mark stays, so these lines are read again next run
+            judged = pulse_claims.judge(found, self.rt.history.rows(session_id, CLAIM_ROWS), now) if found else []
             last = [t for t in turns if t[0] in ("user", "assistant") and str(t[1]).strip()][-1]
             provenance = {"session": session_id, "source": source}
 
-            def change(st, items=items, closed=closed, provenance=provenance, last=last, sid=session_id):
+            def change(st, items=items, closed=closed, provenance=provenance, last=last, sid=session_id,
+                       judged=judged):
                 touched = pulse_memory.apply(st["memory"], items, closed, provenance, now)
                 st["memory"]["read"][sid] = pulse_memory.turn_key(*last)
                 pulse_followup.schedule(st["memory"])
+                self._claims(st, judged, provenance, now)
                 return touched
 
             self.rt.pulse.update(account, change)
             state = self.rt.pulse.snapshot(account)
             out["read"] += len(rows)
             out["kept"] += len(items)
+            out["claims"] = out.get("claims", 0) + len(judged)
+            out["unbacked"] = out.get("unbacked", 0) + sum(1 for c in judged if not c["backed_by"])
             out["closed"] += len(closed)
             out["rejected"] += rejected
         out["faded"] = self.rt.pulse.update(account, lambda st: pulse_memory.decay(st["memory"], now))
         return out
+
+    @staticmethod
+    def _claims(state, judged, provenance, now):
+        """Keep each judged claim (pulse_claims) with its session; one with no call behind it becomes a claim card."""
+        memory = state["memory"]
+        kept = pulse_claims.prune(memory.setdefault("claims", []), now)
+        for claim in judged:
+            if any(k["session"] == provenance["session"] and k["evidence"] == claim["evidence"]
+                   and k["action"] == claim["action"] for k in kept):
+                continue  # once per line and action, as upstream
+            number = memory.get("next_claim", 1)
+            memory["next_claim"] = number + 1
+            entry = {**claim, "id": number, "session": provenance["session"], "source": provenance["source"]}
+            kept.append(entry)
+            if claim["backed_by"]:
+                continue
+            ref = f"c{number}"
+            title = f"Hermes said \"{pulse_memory._clip(claim['evidence'], 160)}\" but no {claim['action']} " \
+                    f"tool call in that turn did it"
+            fp = pulse.fingerprint("claim", ref, "claim", title)
+            state["items"][fp] = {"fp": fp, "kind": "claim", "ref": ref, "status": "claim", "title": title,
+                                  "source": provenance["source"], "at": now, "state": "candidate",
+                                  "first_seen": now, "exposures": 0, "mentions": 0, "interrupted": 0, "log": [],
+                                  "followup": None, "feedback": None, "acknowledged": None,
+                                  "evidence": claim["evidence"], "calls": claim["calls"]}
+            entry["card"] = fp
+        memory["claims"] = kept[-MAX_CLAIMS_KEPT:]
 
     def _lines_since(self, session_id, evidence):
         turns = [(r, t) for r, t in self.rt.history.recent(session_id, pulse_memory.MAX_ROWS)
@@ -241,6 +276,7 @@ class PulseEngine:
             kind = (card.get("feedback") or {}).get("kind")
             if kind in ("useful", "not_useful", "dismiss"):
                 titles.setdefault("useful" if kind == "useful" else "not_useful", []).append(card["title"])
+        titles["already_knew"] = pulse_policy.seen_titles(state["memory"])
         limit = self.rt.config.budgets.activity_items or 1
         try:
             decisions, picked = pulse_select.ask(self.model, pool, pulse_memory.remembered(state["memory"]), recent,

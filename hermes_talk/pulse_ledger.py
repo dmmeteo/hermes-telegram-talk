@@ -8,7 +8,7 @@ that carried it. Feedback is keyed by its delegation id, so a resubmitted delega
 import json
 import threading
 
-from . import pulse, pulse_select
+from . import pulse, pulse_policy, pulse_select
 
 MAX_ITEMS = 500
 MAX_SEEN = 2000
@@ -124,9 +124,11 @@ class PulseLedger:
         cards, waiting, _ = self.choose(account, limit, now, exclude)
         return cards, waiting
 
-    def choose(self, account, limit, now, exclude=()):
+    def choose(self, account, limit, now, exclude=(), settings=None):
         """(cards, waiting, by): the model's selection when it covers exactly the eligible cards now, else the
-        deterministic ranking (by "fallback"). A model pick carries its decision (why, value, line)."""
+        deterministic ranking (by "fallback"). A model pick carries its decision (why, value, line). With
+        ``settings`` the delivery policy (pulse_policy) orders them loudest first and holds or turns off the
+        rest; a held card comes with the first call that is the brief, which is stamped once per local day."""
         with self.lock:
             state = self._load(account)
             pool = [dict(i) for i in state["items"].values() if pulse.eligible(i, now)]
@@ -134,14 +136,42 @@ class PulseLedger:
             if selection and selection.get("by") == "model" and selection["sig"] == pulse_select.signature(pool):
                 decisions = selection["decisions"]
                 by_fp = {c["fp"]: c for c in pool}
-                chosen = [dict(by_fp[fp], pick=decisions.get(fp)) for fp in selection["order"]
-                          if fp in by_fp and fp not in exclude][:limit]
+                ordered = [dict(by_fp[fp], pick=decisions.get(fp)) for fp in selection["order"]
+                           if fp in by_fp and fp not in exclude]
                 withheld = sum(1 for c in pool if (decisions.get(c["fp"]) or {}).get("decision")
                                in (pulse_select.SKIPPED, pulse_select.NOT_PICKED))
-                return chosen, max(len(chosen), len(pool) - withheld - len(set(exclude) & set(by_fp))), "model"
-            cards, waiting = pulse.select([dict(c, pick=None) for c in pool if c["fp"] not in exclude],
-                                          state["memory"], now, limit)
-            return cards, waiting, "fallback"
+                rest, by = len(pool) - withheld - len(set(exclude) & set(by_fp)), "model"
+            else:
+                ordered, rest = pulse.select([dict(c, pick=None) for c in pool if c["fp"] not in exclude],
+                                             state["memory"], now, len(pool))
+                by = "fallback"
+            if settings is not None:
+                ordered = self._deliver(account, state, ordered, settings, now)
+            chosen = ordered[:limit]
+            return chosen, (max(len(chosen), rest) if by == "model" else rest), by
+
+    def _deliver(self, account, state, ordered, settings, now):
+        brief = state.get("brief") or {}
+        delivered, held, off, is_brief = pulse_policy.arrange(ordered, state["memory"], settings, now,
+                                                              brief.get("day"))
+        changed = False
+        for card in delivered + held + off:  # written only when a card's level changes, never on every call
+            item = state["items"].get(card["fp"])
+            level = card["delivery"]["level"]
+            if item is not None and (item.get("delivery") or {}).get("level") != level:
+                item["delivery"] = {**card["delivery"], "at": now}
+                changed = True
+        if is_brief:
+            state["brief"] = {"day": pulse_policy.brief_day(settings, now), "at": now,
+                              "cards": [c["fp"] for c in delivered if c["delivery"]["level"] == "brief"]}
+            for card in delivered:
+                if card["delivery"]["level"] == "brief" and card["fp"] in state["items"]:
+                    state["items"][card["fp"]]["briefed"] = now
+            changed = True
+        if changed:
+            self._trim(state)
+            self._save(account, state)
+        return delivered
 
     def update(self, account, change):
         """Run change(state) under the account's lock and save; returns its result. Engine steps use this."""
@@ -244,7 +274,8 @@ class PulseLedger:
                      "at": card["at"], "told": now})
         del told[:-MAX_TOLD]
 
-    def feedback(self, account, voice_session_id, feedback_id, number, kind, now, snooze_s):
+    def feedback(self, account, voice_session_id, feedback_id, number, kind, now, snooze_s, reason=None,
+                 settings=None):
         """(outcome, card copy) for feedback on card P<number> of this call; a repeated feedback id returns its first outcome."""
         with self.lock:
             state = self._load(account)
@@ -269,6 +300,11 @@ class PulseLedger:
                     for word in sorted(memory["topics"], key=lambda w: abs(memory["topics"][w]))[:100]:
                         del memory["topics"][word]
             card["feedback"] = {"kind": kind, "id": feedback_id, "call": voice_session_id, "at": now}
+            pulse_policy.signal(memory, card, kind, now)  # what pulse_prefs learns from
+            if reason in pulse_policy.REASONS:
+                card["feedback"]["reason"] = reason
+                card["feedback"]["lesson"] = pulse_policy.reason(memory, card, reason,
+                                                                 settings or pulse_policy.Settings(), now)
             if kind in ("useful", "more"):
                 if card["state"] != "acknowledged":
                     self._acknowledge(state, card, voice_session_id, "feedback", now)

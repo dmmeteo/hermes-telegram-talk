@@ -30,11 +30,16 @@ FATIGUE_STEP, FATIGUE_MAX = 0.05, 0.2
 PREFERENCE_MAX = 0.3
 TOPIC_MAX = 0.15
 DUPLICATE_WINDOW_S = 10 * 60
+DELIVERY_NOTES = {"push": "lead with this", "screen": "only if there is room or the user asks what else",
+                  "brief": "held for the brief"}
 
 FEEDBACK = {"useful": "useful", "not useful": "not_useful", "dismiss": "dismiss", "later": "later",
             "more": "more"}
 FEEDBACK_REQUEST = re.compile(r"(?i)^\s*pulse\s+(?:feedback\s+)?(?:card\s+)?p\s*(\d{1,3})\s*[:,-]?\s*"
-                              r"(useful|not\s+useful|dismiss|later|more)\s*[.!?]?\s*$")
+                              r"(useful|not\s+useful|dismiss|later|more)(?:\s*[:,-]?\s*(?:because\s+|reason\s*[:=]?\s*)?"
+                              r"(not\s+relevant|already\s+knew|too\s+late|too\s+often|wrong\s+time))?\s*[.!?]?\s*$")
+REASON_KEYS = {"not relevant": "not_relevant", "already knew": "already_knew", "too late": "too_late",
+               "too often": "too_often", "wrong time": "wrong_time"}
 STOPWORDS = frozenset("a an and are as at be by for from in is it of on or the to was were with".split())
 NUMBER_WORDS = {w: str(i) for i, w in enumerate(
     "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen "
@@ -133,6 +138,14 @@ def parse_feedback(request):
     return int(match.group(1)), FEEDBACK[" ".join(match.group(2).lower().split())]
 
 
+def feedback_reason(request):
+    """The reason a "pulse P<n> <kind> <reason>" delegation gives (pulse_policy.REASONS), else None."""
+    match = FEEDBACK_REQUEST.match(request or "")
+    if match is None or not match.group(3):
+        return None
+    return REASON_KEYS[" ".join(match.group(3).lower().split())]
+
+
 def line(card, handle, when):
     notes = []
     if (card.get("followup") or {}).get("due") is not None and card["state"] == "snoozed":
@@ -144,7 +157,12 @@ def line(card, handle, when):
     pick = card.get("pick") or {}
     if pick.get("why"):
         notes.append(f"why now: {pick['why']}")
+    delivery = (card.get("delivery") or {}).get("level")
+    if delivery in DELIVERY_NOTES:
+        notes.append(DELIVERY_NOTES[delivery])
     note = f" ({'; '.join(notes)})" if notes else ""
     if card.get("kind") == "followup":
         return f"- {handle} [followup] {card['title']} (Pulse memory item {card['ref']}, {when}){note}"
+    if card.get("kind") == "claim":
+        return f"- {handle} [claim] {card['title']} (Pulse memory item {card['ref']}, {when}){note}"
     return f"- {handle} [{card['status']}] {card['title']} ({card['source']} session {card['ref']}, {when}){note}"

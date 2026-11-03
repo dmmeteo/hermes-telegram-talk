@@ -33,7 +33,8 @@ PULSE_RULES = (
     "## Pulse updates\n"
     "Activity lines are Pulse updates P1, P2 and so on. Name an update by its title, never by its label. Unmentioned "
     "updates stay unread and return next time. When the user reacts to one, delegate exactly \"pulse P<n> useful\", "
-    "\"not useful\", \"dismiss\", \"later\" or \"more\" and say the reply."
+    "\"not useful\", \"dismiss\", \"later\" or \"more\" and say the reply; when they say why, add it: \"not relevant\", "
+    "\"already knew\", \"too late\", \"too often\" or \"wrong time\". Bring up lines marked \"lead with this\" first."
 )
 
 

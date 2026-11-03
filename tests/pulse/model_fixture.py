@@ -13,6 +13,9 @@ each engine mechanism can be shown to act on what the model said:
   "by YYYY-MM-DD" as its due date), from Hermes a promise; "tell me when" a watch; "thinking about"
   an interest. A line with FABRICATE also yields an item quoting words nobody said and a
   commitment quoted from Hermes's line, which the engine must reject.
+- claims (part of the memory reply): a Hermes line saying "I set a reminder", "I sent the message",
+  "I scheduled the job" or "I added the event" (optionally "I've"/"I have") is a claim of that action;
+  the engine, not the fixture, judges it against the turn's stored tool calls.
 - follow-up ("You check on something"): a later line on the item's subject (a shared word of five
   or more letters) saying "never mind" -> drop, "already did it" -> done; "rocket" ->
   wait; first check -> wait with a one-hour hint; later checks -> tell.
@@ -93,7 +96,15 @@ def remember(text):
             if hermes:
                 items.append({"kind": "commitment", "text": "Misattributed.", "evidence": hermes.group(2)[:60],
                               "line": int(hermes.group(1))})
-    return {"items": items, "closed": []}
+    claims = []
+    for line, said in re.findall(r"^\[line (\d+)\] \S+ \S+ UTC Hermes: (.*)$", chat, re.M):
+        for match in re.finditer(r"\bI(?:'ve| have)? (set a reminder|sent the message|scheduled the job|added the event)", said):
+            evidence = _sentence(said, match.start())
+            action = {"set a reminder": "reminder", "sent the message": "message", "scheduled the job": "job",
+                      "added the event": "event"}[match.group(1)]
+            claims.append({"action": action, "text": f"Hermes said: {evidence}", "evidence": evidence,
+                           "line": int(line)})
+    return {"items": items, "closed": [], "claims": claims}
 
 
 def follow(text):
