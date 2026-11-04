@@ -558,8 +558,10 @@ def delivery_policy_holds_for_the_night_and_quiet_then_briefs_once(w):
                    if c["state"] in ("candidate", "exposed", "mentioned")) or not handle, "quiet: nothing leads"
         w.advance(86400)
         conv, vs, instructions, handle = call_handles(w)
+        assert "Synthetic lease signing" in handle and w.state()["brief"] == stamp, lines(instructions)
+        w.say(conv, vs, ("assistant", "Your Synthetic lease signing is done."), ("user", "good"))
         w.end(conv, vs)
-        assert "Synthetic lease signing" in handle and w.state()["brief"]["day"] != stamp["day"], lines(instructions)
+        assert w.state()["brief"]["day"] != stamp["day"], "the next day's brief, once heard"
         return {"night": [list(night[0]), list(night[1])], "held": held["delivery"], "brief": stamp["day"],
                 "quiet": quiet["delivery"]["why"]}
     finally:

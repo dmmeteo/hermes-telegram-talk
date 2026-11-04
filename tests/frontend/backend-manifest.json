@@ -27,7 +27,7 @@
     "hermes_talk/pulse_select.py": "d1b5d7861f3bcd608902f6443746ca3560aa3033c1c793e9593115d96f0209a0",
     "hermes_talk/pulse_model.py": "be60a0d9d672bb66a494f371261e6b9dd4643bb905d9d9fab492bb2eccb5b0dc",
     "hermes_talk/pulse_prefs.py": "e48486c2132201ef72638cb1647b70d769b7081557ff5a09b72cb4f7c7bf3459",
-    "hermes_talk/pulse_policy.py": "610f0ce0ce07bd385aece132736d5ef069851de44d9cee1998d824fd4db93ab5",
+    "hermes_talk/pulse_policy.py": "74b648b1611dbdb116150c14c986086b41b94b504d02de69482e11cb09ae371a",
     "hermes_talk/pulse_claims.py": "17afaf854c415f6eac83c8bac30ef16378d50906a092a42e3d1ea7986eb30499"
   }
 }
