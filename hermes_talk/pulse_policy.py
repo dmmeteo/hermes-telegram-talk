@@ -12,7 +12,10 @@ Ported from Conduit notifier at d25391f6 (MIT, LICENSES/CONDUIT-NOTIFIER-LICENSE
   its own and it is held for the first brief after.
 - pulse_hours.py: the night and the parts of the day; in the night only what cannot wait (overdue or
   due within SOON_S) comes up, the rest is held for the morning.
-- pulse_brief.py: what was held comes with the brief, once, and is stamped ``briefed``.
+- pulse_brief.py: what was held comes with the brief, once, and is stamped ``briefed``. Talk stamps the
+  day's brief and a card's ``briefed`` only when a brief card is acknowledged (heard, ADR 0001), never when
+  it is chosen or put in the instructions; until then the brief stays open, and a card of the day's brief
+  that is still unread stays owed to later calls that day (``owed``).
 
 Talk adaptation: Talk speaks only when the user opens a call, so there is no push channel and nothing
 scheduled. "push" leads the call's opening briefing, "screen" is carried after the leads (said if
@@ -224,28 +227,31 @@ def decide(card, memory, learned, settings, now):
             "learned": prefs.factor_words(factor) if factor else ""}
 
 
-def arrange(cards, memory, settings, now, last_brief):
+def arrange(cards, memory, settings, now, last_brief, owed=()):
     """(delivered, held, off, brief): the cards a call carries, loudest first (push, then held cards when this
-    call is the brief, then screen), and the ones held or turned off, each card carrying its ``delivery``."""
+    call is the brief, then screen), and the ones held or turned off, each card carrying its ``delivery``.
+    ``owed`` are the fingerprints of the day's heard brief still unread: they keep coming with the brief."""
     learned = prefs.learn(list((memory.get("signals") or {}).values()), now)
     quiet = quiet_why(settings, now)
-    is_brief = not quiet and not is_night(settings, now) and last_brief != brief_day(settings, now)
+    open_ = not quiet and not is_night(settings, now)
+    is_brief = open_ and last_brief != brief_day(settings, now)
     push, screen, briefed, held, off = [], [], [], [], []
     for card in cards:
         decision = decide(card, memory, learned, settings, now)
         was = card.get("delivery") or {}
+        takes = is_brief or (open_ and card.get("fp") in owed)
         if (decision["level"] in ("push", "screen") and str(was.get("why", "")).startswith("held")
                 and not card.get("briefed")):
             # Held for the night or a quiet spell: the first brief after takes it (pulse_brief); on a day whose
             # brief already went it is released to the screen, as upstream's release_held at midnight.
-            decision = dict(decision, level="brief" if is_brief else "screen",
-                            why=was["why"] if is_brief else "released after the brief")
+            decision = dict(decision, level="brief" if takes else "screen",
+                            why=was["why"] if takes else "released after the brief")
         card = dict(card, delivery=decision)
         if decision["level"] == "push":
             push.append(card)
         elif decision["level"] == "screen":
             screen.append(card)
-        elif decision["level"] == "brief" and is_brief:
+        elif decision["level"] == "brief" and takes:
             card["delivery"] = dict(decision, level="brief", why="the brief")
             briefed.append(card)
         elif decision["level"] == "brief":

@@ -524,12 +524,27 @@ def delivery_policy_holds_for_the_night_and_quiet_then_briefs_once(w):
         assert "Synthetic lease renewal draft" in handle, lines(instructions)
         assert "held for the brief" in [l for l in brief(instructions).splitlines()
                                          if "Synthetic lease renewal draft" in l][0]
+        # Supplied to the model is not heard: a brief call that ends unanswered consumes neither the day's brief
+        # nor the card, so a call a minute later (and after a restart) carries it again.
+        unheard = card_by_title(w, "Synthetic lease renewal draft")
+        assert not w.state().get("brief") and not unheard.get("briefed") and unheard["state"] == "exposed", (
+            w.state().get("brief"), unheard)
+        w.advance(60)
+        w.reopen()
+        with_config(w, budgets=budgets, pulse=PulseSettings(night=night))
+        conv, vs, instructions, handle = call_handles(w)
+        assert "Synthetic lease renewal draft" in handle, ("unheard brief debt stays owed", lines(instructions))
+        assert not w.state().get("brief"), "being in the instructions again is still not hearing"
+        w.say(conv, vs, ("assistant", "Your Synthetic lease renewal draft is ready."), ("user", "thanks"))
+        w.end(conv, vs)
         stamp = w.state()["brief"]
         briefed = card_by_title(w, "Synthetic lease renewal draft")
-        assert briefed["fp"] in stamp["cards"] and briefed["briefed"] == stamp["at"] and briefed["state"] == "exposed"
+        assert briefed["fp"] in stamp["cards"] and briefed["briefed"] == stamp["at"], (stamp, briefed)
+        assert briefed["state"] == "acknowledged", briefed
         conv, vs, instructions, handle = call_handles(w)
         w.end(conv, vs)
         assert w.state()["brief"] == stamp, "the brief is once per local day"
+        assert "Synthetic lease renewal draft" not in handle, "an acknowledged brief card is not carried again"
         until = w.clock() + 3600
         with_config(w, budgets=budgets, pulse=PulseSettings(night=night, quiet_until=until))
         fresh_seed(w, "Synthetic lease signing", source="desktop", turns=[("user", "go"), ("assistant", "signed")],

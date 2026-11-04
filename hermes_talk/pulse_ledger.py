@@ -128,7 +128,8 @@ class PulseLedger:
         """(cards, waiting, by): the model's selection when it covers exactly the eligible cards now, else the
         deterministic ranking (by "fallback"). A model pick carries its decision (why, value, line). With
         ``settings`` the delivery policy (pulse_policy) orders them loudest first and holds or turns off the
-        rest; a held card comes with the first call that is the brief, which is stamped once per local day."""
+        rest; a held card comes with the first call that is the brief, which is stamped once per local day when
+        a brief card is acknowledged (_acknowledge), never here: being chosen or supplied is not being heard."""
         with self.lock:
             state = self._load(account)
             pool = [dict(i) for i in state["items"].values() if pulse.eligible(i, now)]
@@ -152,8 +153,10 @@ class PulseLedger:
 
     def _deliver(self, account, state, ordered, settings, now):
         brief = state.get("brief") or {}
+        day = pulse_policy.brief_day(settings, now)
+        owed = brief.get("cards") or () if brief.get("day") == day else ()
         delivered, held, off, is_brief = pulse_policy.arrange(ordered, state["memory"], settings, now,
-                                                              brief.get("day"))
+                                                              brief.get("day"), owed)
         changed = False
         for card in delivered + held + off:  # written only when a card's level changes, never on every call
             item = state["items"].get(card["fp"])
@@ -162,12 +165,12 @@ class PulseLedger:
                 item["delivery"] = {**card["delivery"], "at": now}
                 changed = True
         if is_brief:
-            state["brief"] = {"day": pulse_policy.brief_day(settings, now), "at": now,
-                              "cards": [c["fp"] for c in delivered if c["delivery"]["level"] == "brief"]}
-            for card in delivered:
-                if card["delivery"]["level"] == "brief" and card["fp"] in state["items"]:
-                    state["items"][card["fp"]]["briefed"] = now
-            changed = True
+            # The brief this day would be, before any caller limit: offered, not consumed. It becomes the day's
+            # brief only when one of its cards is acknowledged (_acknowledge); clipped or unheard cards stay owed.
+            offer = {"day": day, "cards": [c["fp"] for c in delivered if c["delivery"]["level"] == "brief"]}
+            if state.get("brief_offer") != offer:
+                state["brief_offer"] = offer
+                changed = True
         if changed:
             self._trim(state)
             self._save(account, state)
@@ -260,6 +263,11 @@ class PulseLedger:
                 self._save(account, state)
 
     def _acknowledge(self, state, card, voice_session_id, by, now):
+        brief, offer = state.get("brief") or {}, state.get("brief_offer") or {}
+        if card["fp"] in offer.get("cards", ()) and brief.get("day") != offer["day"]:
+            state["brief"] = brief = {"day": offer["day"], "at": now, "cards": list(offer["cards"])}
+        if card["fp"] in brief.get("cards", ()) and not card.get("briefed"):
+            card["briefed"] = now
         card["state"] = "acknowledged"
         card["acknowledged"] = {"call": voice_session_id, "by": by, "at": now}
         card["log"] = (card["log"] + [{"step": "acknowledged", "call": voice_session_id, "by": by, "at": now}])[-LOG:]
