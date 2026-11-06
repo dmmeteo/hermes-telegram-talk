@@ -170,6 +170,8 @@ const SCENARIOS = {
   'never-connects': {neverConnect: true, greet: null, expect: {usable: false, failure: 'connect:peer', end: true}},
   'audio-needs-gesture': {audioNeedsGesture: true, greet: [1000, 4000], greetingTurnDoneMs: 4200,
     expect: {usable: false, failure: 'connect:audio', end: true}},
+  'greeting-suspended-then-unlocked-silent': {greet: null, actions: [[5000, 'call.audio.state = "suspended"; call.audio.onstatechange()'],
+    [20000, 'call.audio.state = "running"; void enableAudio(call)']], expect: {usable: true}},
   'late-context-no-tasks': {tasks: false, lateContextAt: 9000, greet: [1000, 4000], greetingTurnDoneMs: 4200,
     expect: {usable: true, lateContext: true}},
 };
@@ -184,6 +186,7 @@ async function runScenario(name) {
   const sc = {...base, ...def, delays: {...base.delays, ...(def.delays || {})}};
   const h = harness(sc); h.sc = sc;
   sc.outputLevel = def.greet ? greetingAudio(h, def.greet[0], def.greet[1]) : () => 0;
+  for (const [at, code] of def.actions || []) { await h.runUntil(at); h.run(code); }
   await h.runUntil(45000);
   const phase = h.run('call ? call.phase : "idle"');
   const error = h.els.get('error');
