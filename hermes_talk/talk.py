@@ -6,6 +6,7 @@ and the bot token, never from the request.
 """
 import json
 import logging
+import random
 import re
 import time
 from dataclasses import asdict
@@ -42,6 +43,8 @@ TASK_PROMPT = (
 )
 NOT_READY = Readiness(False, "Tasks are not available for this account.")
 SNOOZE_S = 3 * 3600
+PREPARING = ("- Activity since the last visit is still being read and may arrive later in this call. Until it does, "
+             "say so if asked; do not guess.")
 FEEDBACK_REPLIES = {
     "useful": "Noted that update {handle} was useful; Pulse will favor similar ones.",
     "not_useful": "Noted that update {handle} was not useful; Pulse will offer fewer like it.",
@@ -82,6 +85,7 @@ class TalkRuntime:
         self.soul = soul
         self.skill = skill
         self.clock = clock
+        self._last_greeting = {}
         self.board = self.desk = None
         if config.tasks.enabled:
             self.agent = agent or task_agent(config.tasks, home)
@@ -149,14 +153,24 @@ class TalkRuntime:
                 scanned.append({**full, "status": activity.status(full, now), "title": activity.title(full)})
             self.pulse.refresh(account, scanned, exhaustive, now)
         except Exception as exc:  # a briefing is never worth the call
-            return f"- Activity could not be read ({type(exc).__name__}). Say so if asked; do not guess."
-        return "" if exhaustive else activity.NOT_EXHAUSTIVE
+            note = f"- Activity could not be read ({type(exc).__name__}). Say so if asked; do not guess."
+        else:
+            note = "" if exhaustive else activity.NOT_EXHAUSTIVE
+        self.pulse.update(account, lambda st: st.__setitem__("prepared", {"at": now, "note": note}))
+        return note
+
+    def _prepared_note(self, account):
+        """The briefing note of the account's last background scan, or that its activity is still being read."""
+        prepared = self.pulse.snapshot(account).get("prepared")
+        return PREPARING if prepared is None else prepared["note"]
 
     def pulse_refresh(self, user_id):
         """Scan the profile's changed sessions into the account's cards outside a call (the engine's tick)."""
         account = self.account(user_id)
         talk = self.pulse.talk_sessions(account)
         if not talk:
+            conversation_id, state = self.store.current(account)
+            self._scan(account, user_id, conversation_id, state)
             return
         try:
             state = self.store.owned(account, talk[-1], bound=True)
@@ -164,10 +178,11 @@ class TalkRuntime:
             return  # that conversation is no longer the account's current one; the next call scans
         self._scan(account, user_id, talk[-1], state)
 
-    def _cards(self, account, limit, exclude=(), first_handle=1):
+    def _cards(self, account, limit, exclude=(), first_handle=1, select=True):
         """(cards, waiting, lines): the selected Pulse cards and their briefing lines, numbered from first_handle."""
         now = self.clock()
-        self.engine.select(account, timeout=SELECT_ON_CALL_S)
+        if select:
+            self.engine.select(account, timeout=SELECT_ON_CALL_S)
         cards, waiting, by = self.pulse.choose(account, limit, now, exclude, pulse_policy.settings_from(self.config))
         lines = [redact(pulse.line(card, f"P{first_handle + i}", activity.when(card["at"])))
                  for i, card in enumerate(cards)]
@@ -233,14 +248,17 @@ class TalkRuntime:
         soul = redact(self.soul() or "")
         skills = [(name, redact(self.skill(name) or "")) for name in c.skills]
         turns = [(role, redact(text)) for role, text in self.history.recent(conversation_id, c.budgets.recent_turns)]
-        note = self._scan(account, user_id, conversation_id, state)
         self.pulse.remember_talk(account, conversation_id)
         limit = c.budgets.activity_items if c.activity_enabled else 0
-        cards, total, lines = self._cards(account, limit) if limit else ([], 0, [])
+        # Call setup reads only the account's prepared Pulse state; scanning and model selection catch up in the
+        # background and reach this call through its context refreshes.
+        cards, total, lines = self._cards(account, limit, select=False) if limit else ([], 0, [])
+        note = self._prepared_note(account) if limit else ""
+        self.engine.prepare_soon(user_id)
         job_items = self._job_items(account, conversation_id)
         instructions, report = compose(c, soul, [s for s in skills if s[1]], redact(state.get("summary") or ""),
                                        turns, lines, total, note, self.readiness(user_id).ready,
-                                       job_items, self._reports_note(user_id))
+                                       job_items, self._reports_note(user_id), self._greeting_line(account))
         # Only cards the final text carries whole are exposed; none counts as heard until the call shows it.
         carried = [card["fp"] for card in cards[: report["activity_items"]]]
         report["job_ids"] = [i for i in report["job_ids"] if not i.startswith("open:")]
@@ -249,6 +267,17 @@ class TalkRuntime:
             {key: report[key] for key in ("frame", "soul", "skills", "summary", "recent", "jobs", "activity",
                                           "greeting", "activity_items")}, sort_keys=True))
         return conversation_id, instructions, carried, report
+
+    def _greeting_line(self, account):
+        """One of the profile's configured ready greetings, never the one this account heard last."""
+        phrases = self.config.greeting_phrases
+        if not phrases:
+            return None
+        last = self._last_greeting.get(account.key)
+        choices = [p for p in phrases if p != last] or list(phrases)
+        line = random.choice(choices)
+        self._last_greeting[account.key] = line
+        return line
 
     def session_config(self, instructions):
         return {"model": self.config.model, "instructions": instructions,

@@ -34,6 +34,8 @@ class PulseEngine:
         self.users = set()
         self.thread = None
         self.last = {}  # user id -> summary of the last run, for logs and gates
+        self.guard = threading.Lock()
+        self.preparing = {}  # user id -> the background thread refreshing that account's prepared cards
 
     # --- background worker -------------------------------------------------------------------------
     def known_users(self):
@@ -62,6 +64,35 @@ class PulseEngine:
     def poke(self, user_id):
         self.users.add(user_id)
         self.wake.set()
+
+    def prepare_soon(self, user_id):
+        """Refresh one account's prepared cards off the request path (scan, then select); at most one run per
+        account at a time. Only a started engine prepares in the background; returns the thread or None."""
+        if self.thread is None or self.stopped.is_set():
+            return None
+        with self.guard:
+            running = self.preparing.get(user_id)
+            if running is not None and running.is_alive():
+                return running
+            thread = threading.Thread(target=self.prepare_now, args=(user_id,), name="talk-pulse-prepare",
+                                      daemon=True)
+            self.preparing[user_id] = thread
+        self.users.add(user_id)
+        thread.start()
+        return thread
+
+    def prepare_now(self, user_id):
+        """Scan the account's changed sessions into its cards and settle the selection; returns how it stands."""
+        try:
+            self.rt.pulse_refresh(user_id)
+            return self.select(self.rt.account(user_id), timeout=SELECT_ON_CALL_S)
+        except Exception as exc:  # the call keeps its prepared state; the next refresh or tick retries
+            logger.warning("pulse prepare failed (%s)", type(exc).__name__)
+            return "failed"
+        finally:
+            with self.guard:
+                if self.preparing.get(user_id) is threading.current_thread():
+                    del self.preparing[user_id]
 
     def _loop(self, loader, delay):
         if self.stopped.wait(delay):

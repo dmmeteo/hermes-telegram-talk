@@ -46,7 +46,7 @@ CALL = {"initData", "conversation_id", "voice_session_id"}
 TALK_ROUTES = {"bootstrap": ({"initData"}, set()),
                "session": ({"initData", "sdp"}, {"conversation_id"}),
                "events": (CALL | {"events"}, set()),
-               "end": (CALL, set()),
+               "end": (CALL, {"readiness"}),
                "new": ({"initData", "conversation_id"}, set()),
                "task": (CALL | {"delegation_item_id", "request"}, set()),
                "tasks": (CALL, set()),
@@ -55,6 +55,22 @@ TALK_ROUTES = {"bootstrap": ({"initData"}, set()),
                "context": (CALL, set()),
                "context/ack": (CALL | {"revision"}, set()),
                "pulse/feedback": (CALL | {"delegation_item_id", "request"}, set())}
+READINESS_STAGES = ("bootstrap", "microphone", "offer", "session", "remote", "handshake", "channel", "peer",
+                    "playing", "audio", "usable", "greeting", "greeting_done", "ready")
+READINESS_FAILURES = re.compile(r"(?:connect|greeting):[a-z_]{1,24}|none")
+
+
+def log_readiness(value):
+    """Log a call's content-free readiness timings: known stage names with integer milliseconds and the unmet gate."""
+    if not isinstance(value, dict):
+        return
+    stages = value.get("stages") if isinstance(value.get("stages"), dict) else {}
+    kept = {k: v for k, v in stages.items() if k in READINESS_STAGES and type(v) is int and 0 <= v <= 86_400_000}
+    failure = value.get("failure")
+    failure = failure if isinstance(failure, str) and READINESS_FAILURES.fullmatch(failure) else "unknown"
+    logger.info("call readiness failure=%s stages=%s", failure, json.dumps(kept, sort_keys=True))
+
+
 AVATAR_TYPES = {".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
 MAX_CONNECTIONS = 32
 CALL_ID = re.compile(r"rtc_[A-Za-z0-9_-]+|[0-9a-fA-F-]{36}")
@@ -252,6 +268,7 @@ class VoiceApp:
             if route == "events":
                 return self.talk.events(user_id, body["conversation_id"], body["voice_session_id"], body["events"])
             if route == "end":
+                log_readiness(body.get("readiness"))
                 return self.talk.end(user_id, body["conversation_id"], body["voice_session_id"])
             if route == "task":
                 return self.talk.task(user_id, body["conversation_id"], body["voice_session_id"],

@@ -129,6 +129,7 @@ class TalkConfig:
     language_hint: str = ""
     greeting_enabled: bool = True
     greeting: str = "Say a short hello."
+    greeting_phrases: tuple = ()
     skills: tuple = ()
     activity_enabled: bool = True
     activity_sources: tuple = ("cli", "telegram", "discord", "cron", "kanban", "desktop")
@@ -157,6 +158,13 @@ def _sources(value):
     if not isinstance(value, list) or not all(isinstance(s, str) and NAME.fullmatch(s) for s in value):
         raise ConfigError("activity.sources must be a list of session source names")
     return tuple(value)
+
+
+def _phrases(value):
+    """A profile's ready greetings: up to 12 short lines, one spoken per call."""
+    if not isinstance(value, list) or len(value) > 12:
+        raise ConfigError("greeting.phrases must be a list of at most 12 lines")
+    return tuple(dict.fromkeys(_text(v, "greeting.phrases[]", 160) for v in value))
 
 
 def _tasks(data, base_dir):
@@ -283,6 +291,7 @@ def parse_config(data, base_dir):
         language_hint=voice.get("language_hint", "") if isinstance(voice.get("language_hint", ""), str) else "",
         greeting_enabled=bool(greeting.get("enabled", True)),
         greeting=_text(greeting.get("text", TalkConfig.greeting), "greeting.text", 400),
+        greeting_phrases=_phrases(greeting.get("phrases", [])),
         skills=tuple(dict.fromkeys(skills)),
         activity_enabled=bool(activity.get("enabled", True)),
         activity_sources=_sources(activity.get("sources", list(TalkConfig.activity_sources))),

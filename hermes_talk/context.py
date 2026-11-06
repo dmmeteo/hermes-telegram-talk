@@ -101,7 +101,7 @@ def update(revision, job_items, activity_lines, activity_total, activity_note, l
 
 
 def compose(config, soul, skills, summary, turns, activity_lines, activity_total, activity_note,
-            tasks_ready=False, job_items=(), reports_note=""):
+            tasks_ready=False, job_items=(), reports_note="", greeting_line=None):
     """Instruction text plus a per-section report of what was included (names and sizes only).
 
     report["activity_items"] is how many of activity_lines the text carries whole; only those count
@@ -110,7 +110,11 @@ def compose(config, soul, skills, summary, turns, activity_lines, activity_total
     b = config.budgets
     frame = (TASKS_FRAME + reports_note if tasks_ready else FRAME).format(name=config.display_name)
     greeting = ""
-    if config.greeting_enabled:
+    if config.greeting_enabled and greeting_line:
+        greeting = _section("Greeting", "Speak first only after the call connects, and open with exactly this one "
+                            f"short line, in its own language: \"{greeting_line}\" Then stop and listen. Do not add "
+                            "a briefing or list updates in the greeting; bring them up once the user has spoken.", 800)
+    elif config.greeting_enabled:
         greeting = _section("Greeting", config.greeting + " Speak first only after the call connects. If the "
                             "activity briefing lists items, mention at most the two most relevant in one sentence "
                             "and do not imply anything is done unless its status says so.", 800)

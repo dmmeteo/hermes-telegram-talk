@@ -107,7 +107,27 @@ The server builds the context for every call. Each part has its own character bu
    When room allows, a short "Pulse updates" section tells the model to name updates by title and how to delegate
    feedback.
 8. The greeting directive, if enabled. The model speaks first only after the call connects and
-   mentions at most two updates.
+   mentions at most two updates. With `greeting.phrases` configured, the call instead opens with exactly one of
+   those lines (chosen locally, never the account's previous one, no model request) and leaves updates for later.
+
+### Fast start and in-call catch-up
+
+Opening a call never scans the profile's sessions or asks the Pulse model. `api/session` reads the account's
+prepared Pulse state (the cards and selection of the last background run; when there is none yet, the briefing
+says activity is still being read and must not be guessed) and starts one background preparation per account:
+scan, then model selection. Its result reaches the same live call through the existing `api/context` refresh
+(revisioned, acknowledged, deduplicated); being supplied to the model is exposure, never hearing. The client
+refreshes context after connecting, then every few polls, also when tasks are off.
+
+Freshness sources: the call start (above), call end (`engine.poke`), the engine's slow tick and in-call context
+refreshes. Host session events are not subscribed: the plugin registers only its CLI command and the Talk server
+runs in its own process, so session changes elsewhere in the profile are picked up by these refreshes, not pushed.
+
+The client's 30 s connection deadline ends when transport and audio are usable (peer connected, data channel open,
+handshake, audio running and playing), not when the greeting finishes. A greeting that is not heard or not finished
+within 12 s falls back to listening instead of ending the call. Each call records content-free stage timings and,
+on failure, the first unmet gate (`connect:session`, `connect:peer`, `connect:handshake`, `connect:audio`, ...);
+`api/end` carries them to the server log.
 
 The briefing uses four statuses:
 

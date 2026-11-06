@@ -114,7 +114,9 @@ function sample(current) {
   if (current.phase === "greeting" && current.greetingDone && current.greetingHeard && current.outputLevel < .008) {
     if (!current.quietSince) current.quietSince = performance.now();
     if (performance.now() - current.quietSince > 350) {
-      current.phase = "ready"; clearTimeout(current.timeout); updateMic(current);
+      current.phase = "ready"; current.greetingOver = true; clearTimeout(current.greetingTimer);
+      mark(current, "greeting_done"); mark(current, "ready");
+      updateMic(current);
     }
   } else current.quietSince = 0;
   render();
@@ -131,11 +133,29 @@ function analyse(current, stream, direction) {
   current[`${direction}Samples`] = new Float32Array(analyser.fftSize);
 }
 
+const CONNECT_MS = 30000;
+const GREETING_MS = 12000;
+const SETUP = [["bootstrap", c => c.conversation], ["microphone", c => c.stream], ["session", c => c.voiceId]];
+const TRANSPORT = [["peer", c => c.peer?.connectionState === "connected"],
+  ["channel", c => c.channel?.readyState === "open"], ["handshake", c => c.handshake],
+  ["audio", c => c.audio?.state === "running"], ["playing", c => c.playing]];
+
+function mark(current, stage) {
+  current.stages ??= {};
+  if (stage && current.stages[stage] === undefined) current.stages[stage] = Math.round(performance.now() - (current.began ?? 0));
+  globalThis.talkReadiness = {stages: {...current.stages}, failure: current.failure || "none"};
+}
+
+function unmet(current, gates = [...SETUP, ...TRANSPORT]) {
+  return (gates.find(([, met]) => !met(current)) || ["none"])[0];
+}
+
 function checkpoint(current) {
   if (!current.voiceId || current.ended) return;
   current.ended = true;
   void post("end", { initData: current.auth, conversation_id: current.conversation.id,
-    voice_session_id: current.voiceId }, { keepalive: true }).catch(() => {});
+    voice_session_id: current.voiceId, readiness: {stages: current.stages || {}, failure: current.failure || "none"} },
+    { keepalive: true }).catch(() => {});
 }
 
 function stop(message = "") {
@@ -144,6 +164,7 @@ function stop(message = "") {
   if (current) {
     current.abort.abort();
     clearTimeout(current.timeout);
+    clearTimeout(current.greetingTimer);
     clearTimeout(current.disconnectTimeout);
     cancelAnimationFrame(current.frame);
     current.stream?.getTracks().forEach(track => track.stop());
@@ -236,7 +257,9 @@ function onMessage(current, message) {
   let event;
   try { event = JSON.parse(message.data); } catch (_) { return; }
   if (!event || typeof event !== "object") return;
-  if (["session.started", "session.updated"].includes(event.type)) { current.handshake = true; advance(current); }
+  if (["session.started", "session.updated"].includes(event.type)) {
+    current.handshake = true; mark(current, "handshake"); advance(current);
+  }
   if (["input_transcript.added", "output_transcript.added"].includes(event.type)) current.lastSettled = null;
   if (event.type === "output_transcript.added") current.answering = true;
   if (event.type === "input_transcript.added" && current.answering) current.interrupted = true;
@@ -357,13 +380,19 @@ async function delegate(current, item) {
 }
 
 function schedulePoll(current, delay) {
-  if (call !== current || !current.conversation?.tasks) return;
+  if (call !== current) return;
   clearTimeout(current.pollTimer);
   current.pollTimer = setTimeout(() => void poll(current), delay);
 }
 
 async function poll(current) {
   if (call !== current || !current.voiceId) return;
+  if (!current.conversation?.tasks) {
+    const n = current.polls++;
+    await refresh(current);
+    schedulePoll(current, n < 3 ? 10000 : 60000);
+    return;
+  }
   let delay = 5000;
   try {
     const data = await post("tasks", callFields(current));
@@ -379,7 +408,8 @@ async function poll(current) {
       if (outcome === "sent") { current.spoken.add(job.id); void acknowledge(current, job.id, 0); }
       else if (outcome === "partial") current.cut.add(job.id);
     }
-    if (data.context_pending || current.polls++ % 6 === 0) void refresh(current);
+    const n = current.polls++;
+    if (data.context_pending || n % 6 === 0 || n < 3) void refresh(current);
     delay = [...current.jobs.keys()].some(id => !current.spoken.has(id) && !current.cut.has(id)) ? 2000 : 10000;
   } catch (_) {
     delay = 5000;
@@ -413,16 +443,26 @@ async function refresh(current) {
 }
 
 function advance(current) {
-  if (call !== current || !current.handshake || current.channel.readyState !== "open"
-    || current.peer.connectionState !== "connected" || !current.playing || current.audio.state !== "running") return;
+  if (call !== current) return;
+  for (const [stage, met] of TRANSPORT) if (met(current)) mark(current, stage);
+  if (unmet(current, TRANSPORT) !== "none") return;
+  // Transport and audio are usable: the connection deadline is met. A greeting never ends a connected call.
+  mark(current, "usable");
+  clearTimeout(current.timeout);
   if (current.conversation.greeting && !current.greetingSent) {
     current.greetingSent = true;
     current.phase = "greeting";
+    mark(current, "greeting");
     current.channel.send(JSON.stringify({ type: "session.context.append", channel: "speakable",
       content: [{ type: "input_text", text: "Begin the configured opening greeting now." }] }));
-  } else if (!current.conversation.greeting) current.phase = "ready";
-  else if (current.greetingDone) current.phase = "greeting";
-  if (current.phase === "ready") clearTimeout(current.timeout);
+    current.greetingTimer = setTimeout(() => {
+      if (call !== current || current.phase !== "greeting") return;
+      current.failure = "greeting:" + (current.greetingHeard ? "unfinished" : current.greetingDone ? "unheard" : "no_turn");
+      current.phase = "ready"; current.greetingOver = true; mark(current, "ready"); updateMic(current);
+    }, GREETING_MS);
+  } else if (!current.conversation.greeting) { current.phase = "ready"; mark(current, "ready"); }
+  else if (current.greetingOver) current.phase = "ready";
+  else if (current.greetingDone || current.phase === "blocked" || current.phase === "connecting") current.phase = "greeting";
   updateMic(current);
 }
 
@@ -493,7 +533,7 @@ async function start() {
   }
   const auth = initData();
   if (!auth) { stop("Open Hermes Telegram Talk from Telegram to sign in."); return; }
-  const current = { auth, phase: "connecting", abort: new AbortController(), nodes: [],
+  const current = { auth, phase: "connecting", abort: new AbortController(), nodes: [], began: performance.now(), stages: {},
     seen: new Set(), delegations: new Set(), jobs: new Map(), spoken: new Set(), cut: new Set(), polls: 0,
     muted: false, inputLevel: 0, outputLevel: 0 };
   call = current; showError(); render();
@@ -507,7 +547,11 @@ async function start() {
       }
     };
     void enableAudio(current);
-    current.timeout = setTimeout(() => { if (call === current) stop("Voice did not become ready. Tap Retry to reconnect."); }, 30000);
+    current.timeout = setTimeout(() => {
+      if (call !== current) return;
+      current.failure = "connect:" + unmet(current); mark(current);
+      stop("Voice did not become ready. Tap Retry to reconnect.");
+    }, CONNECT_MS);
     const data = await post("bootstrap", {initData: auth}, {signal: current.abort.signal});
     if (call !== current) return;
     if (typeof data.conversation_id !== "string" || !Number.isInteger(data.limits?.event_batch_max)
@@ -519,6 +563,7 @@ async function start() {
       conversation = {id: data.conversation_id, auth, pending: [], sequence: 0, retries: 0};
     }
     current.conversation = conversation;
+    mark(current, "bootstrap");
     conversation.batchMax = data.limits.event_batch_max;
     conversation.greeting = data.greeting_enabled;
     conversation.tasks = data.tasks?.available === true;
@@ -534,6 +579,7 @@ async function start() {
         ? "Microphone access denied. Allow microphone access in Telegram or device settings, then tap Retry."
         : "Microphone unavailable. Check your device, then tap Retry.");
     }
+    mark(current, "microphone");
     current.stream.getAudioTracks().forEach(track => { track.enabled = false; });
     if (call !== current) { current.stream.getTracks().forEach(track => track.stop()); return; }
     analyse(current, current.stream, "input");
@@ -561,13 +607,16 @@ async function start() {
     current.channel.onclose = () => { if (call === current) stop("Connection lost. Tap Retry to reconnect."); };
     await current.peer.setLocalDescription(await current.peer.createOffer());
     await waitForIce(current);
+    mark(current, "offer");
     const answer = await post("session", {initData: auth, sdp: current.peer.localDescription.sdp,
       conversation_id: conversation.id}, {signal: current.abort.signal});
     if (answer.conversation_id !== current.conversation.id || typeof answer.voice_session_id !== "string"
       || typeof answer.sdp !== "string" || answer.type !== "answer") throw new Error("Voice handshake failed. Tap Retry.");
     current.voiceId = answer.voice_session_id;
     if (call !== current) { checkpoint(current); return; }
+    mark(current, "session");
     await current.peer.setRemoteDescription({type: "answer", sdp: answer.sdp});
+    mark(current, "remote");
     schedulePoll(current, 1500);
     sample(current);
   } catch (error) {

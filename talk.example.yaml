@@ -16,6 +16,8 @@ voice:
 greeting:
   enabled: true
   text: "Greet the user in one short sentence."
+  # phrases:                 # optional ready greetings for this profile only; one short line per call, chosen locally
+  #   - "Привіт! Я на зв’язку. Що робимо?"
 context:
   skills: []                 # allowlist of skill names read through the host skill loader; empty = none
   budgets:                   # application character limits, not provider tokens

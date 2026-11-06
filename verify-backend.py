@@ -102,6 +102,8 @@ class Harness:
         return data
 
     def call(self, conversation_id=None, user=fx.USER_ID):
+        """One call opened after the account's background Pulse preparation has caught up."""
+        self.talk.engine.prepare_now(user)
         body = {"sdp": fx.OFFER, **({"conversation_id": conversation_id} if conversation_id else {})}
         data = self.ok("session", body, user)
         return data, self.fake.posts[-1][2]["session"]["instructions"]
