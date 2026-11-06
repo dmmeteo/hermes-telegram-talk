@@ -456,9 +456,12 @@ function advance(current) {
     current.channel.send(JSON.stringify({ type: "session.context.append", channel: "speakable",
       content: [{ type: "input_text", text: "Begin the configured opening greeting now." }] }));
     current.greetingTimer = setTimeout(() => {
-      if (call !== current || current.phase !== "greeting") return;
+      if (call !== current) return;
+      current.greetingOver = true;
       current.failure = "greeting:" + (current.greetingHeard ? "unfinished" : current.greetingDone ? "unheard" : "no_turn");
-      current.phase = "ready"; current.greetingOver = true; mark(current, "ready"); updateMic(current);
+      mark(current);
+      if (current.phase !== "greeting") return;
+      current.phase = "ready"; mark(current, "ready"); updateMic(current);
     }, GREETING_MS);
   } else if (!current.conversation.greeting) { current.phase = "ready"; mark(current, "ready"); }
   else if (current.greetingOver) current.phase = "ready";
