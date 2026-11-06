@@ -146,6 +146,93 @@ def concurrent_calls_share_one_background_preparation():
         close(h)
 
 
+NATIVE_THREAD = threading.Thread
+
+
+class _PausedFirstStart(NATIVE_THREAD):
+    """Holds the first preparation thread between its registration and start() until the test lets it go."""
+    created = []
+    at_start = threading.Event()
+    go = threading.Event()
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.created.append(self)
+
+    def start(self):
+        if self is self.created[0]:
+            self.at_start.set()
+            assert self.go.wait(10), "the first caller was never released"
+        super().start()
+
+
+@check
+def a_same_account_call_inside_the_start_window_joins_the_registered_preparation():
+    from hermes_talk import pulse_engine
+
+    h = harness()
+    refreshes, entered = [], threading.Event()
+    release = threading.Event()
+
+    def refresh(user_id):
+        refreshes.append(user_id)
+        entered.set()
+        release.wait(10)
+    h.talk.pulse_refresh = refresh
+    _PausedFirstStart.created, _PausedFirstStart.at_start, _PausedFirstStart.go = [], threading.Event(), threading.Event()
+    returned = {}
+    first = threading.Thread(target=lambda: returned.update(first=h.talk.engine.prepare_soon(fx.USER_ID)))
+    pulse_engine.threading.Thread = _PausedFirstStart
+    try:
+        first.start()
+        assert _PausedFirstStart.at_start.wait(10), "the first caller never reached thread start"
+        returned["second"] = h.talk.engine.prepare_soon(fx.USER_ID)
+        _PausedFirstStart.go.set()
+        first.join(10)
+        assert entered.wait(10), "the registered preparation never ran"
+    finally:
+        pulse_engine.threading.Thread = NATIVE_THREAD
+        _PausedFirstStart.go.set()
+        release.set()
+    try:
+        settle(h)
+        threads = len(_PausedFirstStart.created)
+        assert (threads, refreshes) == (1, [fx.USER_ID]), f"{threads} threads, refreshes {refreshes}"
+        assert returned["first"] is returned["second"], "the overlapping caller got another preparation"
+        return {"threads": threads, "refreshes": len(refreshes)}
+    finally:
+        close(h)
+
+
+@check
+def a_preparation_whose_thread_cannot_start_leaves_the_account_retryable():
+    from hermes_talk import pulse_engine
+
+    h = harness()
+    refreshes = []
+    h.talk.pulse_refresh = refreshes.append
+
+    class Refused(NATIVE_THREAD):
+        def start(self):
+            raise RuntimeError("can't start new thread")
+    pulse_engine.threading.Thread = Refused
+    try:
+        refused = h.talk.engine.prepare_soon(fx.USER_ID)
+    finally:
+        pulse_engine.threading.Thread = NATIVE_THREAD
+    try:
+        assert refused is None and fx.USER_ID not in h.talk.engine.preparing, "a never-started thread kept the slot"
+        h.talk.engine.prepare_soon(fx.USER_ID)
+        settle(h)
+        assert refreshes == [fx.USER_ID], refreshes
+        h.talk.engine.prepare_soon(fx.USER_ID)
+        settle(h)
+        assert refreshes == [fx.USER_ID, fx.USER_ID], "a finished preparation blocks the next one"
+        return {"refreshes": len(refreshes)}
+    finally:
+        close(h)
+
+
 @check
 def the_configured_ukrainian_greeting_is_short_varied_and_profile_scoped():
     h = harness(voice={"language_hint": "Speak Ukrainian unless the user switches language."},
