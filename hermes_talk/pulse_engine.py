@@ -67,18 +67,27 @@ class PulseEngine:
 
     def prepare_soon(self, user_id):
         """Refresh one account's prepared cards off the request path (scan, then select); at most one run per
-        account at a time. Only a started engine prepares in the background; returns the thread or None."""
+        account at a time. Only a started engine prepares in the background; returns the thread or None.
+        The registered thread is the account's claim from registration on, even before it is alive: only its own
+        run or its failed start releases it."""
         if self.thread is None or self.stopped.is_set():
             return None
         with self.guard:
             running = self.preparing.get(user_id)
-            if running is not None and running.is_alive():
+            if running is not None:
                 return running
             thread = threading.Thread(target=self.prepare_now, args=(user_id,), name="talk-pulse-prepare",
                                       daemon=True)
             self.preparing[user_id] = thread
         self.users.add(user_id)
-        thread.start()
+        try:
+            thread.start()
+        except Exception as exc:  # the call keeps its prepared state; the next call or tick retries
+            with self.guard:
+                if self.preparing.get(user_id) is thread:
+                    del self.preparing[user_id]
+            logger.warning("pulse prepare could not start (%s)", type(exc).__name__)
+            return None
         return thread
 
     def prepare_now(self, user_id):

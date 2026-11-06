@@ -21,7 +21,7 @@
     "hermes_talk/pulse.py": "eb1f8c7f96970e2bf5af5052c61339b667e3186240fafa7ba07ceff5fc73fb0c",
     "hermes_talk/pulse_ledger.py": "c4bcc4ae8fd803ce6f86858b80b856dccbbec6f1de5df890b9a4c47dce5ac3ba",
     "LICENSES/CONDUIT-NOTIFIER-LICENSE": "f73f674a9cd717d93528c469b3e5a71d4b3f1d20f1cc7f8eda89ea07a3a3cda6",
-    "hermes_talk/pulse_engine.py": "1c2145cb21134514b043019fc71887d1a664fbc80d9df14411364444b57572af",
+    "hermes_talk/pulse_engine.py": "ab89f8db0e08879a41805a023986babb8200e7a1336583fd50feb80013ae1162",
     "hermes_talk/pulse_memory.py": "8f283de79e8fc14b4a095e3035476e33c4018b8ce6dc326eff4d63401cdd2aa2",
     "hermes_talk/pulse_followup.py": "b0ed1efe3a056ff69f5a7ddf63e8a86a2e1edf6e4f3bc5b5cf9e8dea0977e44c",
     "hermes_talk/pulse_select.py": "d1b5d7861f3bcd608902f6443746ca3560aa3033c1c793e9593115d96f0209a0",
