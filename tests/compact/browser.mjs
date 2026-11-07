@@ -74,11 +74,24 @@ try {
     await shot('listening'); checks++;
     await page.click('#mute');
     await until(async () => !await enabled() && await phase() === 'muted' && await energy() < .001, 'muted outbound audio is silent at receiver');
+    await shot('muted');
+    const contrast = await page.locator('#mute').evaluate(button => {
+      const style = getComputedStyle(button), icon = getComputedStyle(button.querySelector('svg'));
+      const rgb = value => value.match(/[\d.]+/g).slice(0, 3).map(Number);
+      const bg = rgb(style.backgroundColor), ink = rgb(icon.color), alpha = Number(icon.opacity);
+      const effective = ink.map((v, i) => v * alpha + bg[i] * (1 - alpha));
+      const lum = values => values.map(v => v / 255).map(v => v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4)
+        .reduce((sum, v, i) => sum + v * [.2126, .7152, .0722][i], 0);
+      const a = lum(effective), b = lum(bg);
+      return {ratio: (Math.max(a, b) + .05) / (Math.min(a, b) + .05), foreground: icon.color, background: style.backgroundColor, opacity: alpha};
+    });
+    log('pressed-hover-contrast', {profile, ...contrast});
+    assert(contrast.ratio >= 3, 'pressed microphone hover icon has at least 3:1 contrast');
     await provider.evaluate(i => { window.peers[i].gain.gain.value = .18; }, index);
     await until(() => page.evaluate(() => call.outputLevel > .015), 'assistant output still plays while microphone muted');
-    assert(await phase() === 'muted', 'muted ring remains neutral');
+    await until(async () => await phase() === 'speaking' && !await enabled() && await energy() < .001, 'muted microphone stays silent while actual assistant output turns ring orange');
     assert(await page.evaluate(() => !document.getElementById('remote').muted && !document.getElementById('remote').paused), 'mute leaves assistant output playing');
-    await shot('muted'); checks++;
+    await shot('speaking-mic-muted'); checks++;
     await page.click('#mute');
     await until(async () => await phase() === 'speaking' && await enabled(), 'orange requires assistant output');
     await shot('speaking'); checks++;

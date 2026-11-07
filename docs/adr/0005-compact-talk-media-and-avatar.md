@@ -2,7 +2,7 @@
 
 The phone dialogue fills the available height above a persistent control row. The app removes its own heading. Telegram owns the outer chrome. The row contains a menu, a larger profile avatar and a microphone button. Reply voice and End call are in the menu. Connect, Retry and Enable audio remain visible when needed. An unbound menu launch still displays the instruction to send `/talk` in the intended chat.
 
-Mute disables the outgoing microphone tracks. Its page-local preference survives call replacement, voice reconnect and audio suspension. It uses no browser storage. Assistant playback stays enabled. A ready call with measured microphone energy is blue, measured assistant output is orange, and silence is neutral. Muted and unusable media states are neutral. Both profiles use these semantic ring colors, even when an older profile appearance config supplies another accent.
+Mute disables the outgoing microphone tracks. Its page-local preference survives call replacement, voice reconnect and audio suspension. It uses no browser storage. Assistant playback stays enabled. A ready call with measured microphone energy is blue, measured assistant output is orange, and silence is neutral. Actual assistant playback takes priority over outgoing microphone mute. Muted silence and unusable media states are neutral. Both profiles use these semantic ring colors, even when an older profile appearance config supplies another accent.
 
 The transcript keeps its 100-line bound and final-turn persistence. Its scroll area fills the remaining height. New text follows the end only while the reader follows the end. Rotation preserves a reader's older position.
 

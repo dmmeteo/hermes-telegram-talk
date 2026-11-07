@@ -92,9 +92,8 @@ function render() {
   const mediaReady = current && current.phase === "ready" && current.playing && current.audio?.state === "running"
     && current.peer?.connectionState === "connected";
   const state = !current ? "idle" : current.phase === "blocked" ? "blocked"
-    : current.phase !== "ready" ? "connecting" : current.muted ? "muted"
-    : !mediaReady ? "blocked" : current.outputLevel > .015 && !remoteAudio.muted && remoteAudio.volume !== 0
-      ? "speaking" : current.inputLevel > .005 && current.stream?.getAudioTracks().some(track => track.enabled && track.readyState !== "ended")
+    : current.phase !== "ready" ? "connecting" : !mediaReady ? "blocked" : current.outputLevel > .015 && !remoteAudio.muted && remoteAudio.volume !== 0
+      ? "speaking" : current.muted ? "muted" : current.inputLevel > .005 && current.stream?.getAudioTracks().some(track => track.enabled && track.readyState !== "ended")
       ? "listening" : "silent";
   orb.dataset.state = state;
   orb.setAttribute("aria-label", ({idle: "Call stopped.", blocked: "Tap to enable audio. Microphone paused.",
@@ -689,7 +688,7 @@ async function refreshAvatar(current) {
       headers: {"Content-Type": "application/json"}, body: JSON.stringify({initData: current.auth}), signal: current.abort.signal});
     if (!response.ok || call !== current) return;
     const blob = await response.blob();
-    if (!["image/png", "image/jpeg", "image/svg+xml"].includes(blob.type) || blob.size > 1024 * 1024) return;
+    if (call !== current || !["image/png", "image/jpeg", "image/svg+xml"].includes(blob.type) || blob.size > 1024 * 1024) return;
     const avatar = document.getElementById("avatar");
     const previous = current.avatarObject;
     current.avatarObject = URL.createObjectURL(blob);

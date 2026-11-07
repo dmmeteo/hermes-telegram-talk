@@ -177,12 +177,29 @@ test('silent media is neutral and only enabled microphone energy means listening
  assert.equal(f.nodes.get('orb').dataset.state,'silent');
  f.run(`current.inputLevel=.1;render();`);assert.equal(f.nodes.get('orb').dataset.state,'listening');
  f.run(`current.muted=true;updateMic(current);current.outputLevel=.2;render();`);
- assert.equal(f.run('track.enabled'),false);assert.equal(f.nodes.get('orb').dataset.state,'muted');
+ assert.equal(f.run('track.enabled'),false);assert.equal(f.nodes.get('orb').dataset.state,'speaking');
+ f.run(`remoteAudio.muted=true;render();`);assert.equal(f.nodes.get('orb').dataset.state,'muted');
+ f.run(`remoteAudio.muted=false;remoteAudio.volume=0;render();`);assert.equal(f.nodes.get('orb').dataset.state,'muted');
+ f.run(`remoteAudio.volume=1;current.outputLevel=0;render();`);assert.equal(f.nodes.get('orb').dataset.state,'muted');
  f.run(`current.muted=false;current.playing=false;render();`);assert.notEqual(f.nodes.get('orb').dataset.state,'speaking');
 });
 test('mute preference survives a replacement call and audio state transitions',()=>{
  const f=fixture();f.run(`current.phase='ready';toggleMute();current.phase='blocked';updateMic(current);current.phase='ready';updateMic(current);`);
  assert.equal(f.run('track.enabled'),false);assert.equal(f.run('microphoneMuted'),true);
+});
+test('an avatar body completed after call replacement cannot overwrite the new avatar',async()=>{
+ const f=fixture();f.run(`
+ let releaseBlob;
+ globalThis.URL=class extends URL {static createObjectURL(){return 'blob:stale';} static revokeObjectURL(){}};
+ fetch=async()=>({ok:true,blob:()=>new Promise(resolve=>{releaseBlob=resolve;})});
+ document.getElementById('avatar').src='blob:new-call';
+ globalThis.refresh=refreshAvatar(current);
+ `);
+ await Promise.resolve();
+ f.run(`call={};releaseBlob({type:'image/png',size:100});`);
+ await f.run('refresh');
+ assert.equal(f.nodes.get('avatar').src,'blob:new-call');
+ assert.equal(f.run('current.avatarObject'),undefined);
 });
 let failed=0;
 for(const {name,run} of tests){try{await run();console.log('PASS',name);}catch(e){failed++;console.error('FAIL',name,e.message);}}
