@@ -332,6 +332,10 @@ def pulse_visibility_and_cursor(model):
         before = e.history.create_session("Synthetic owner build", "cli")
         e.history.append(before, [{"role": "assistant", "content": "built", "platform_message_id": "b1",
                                    "timestamp": time.time()}])
+        # Accepted asynchronous startup (612eac4): a call opens on the account's PREPARED Pulse state and never
+        # waits for a scan. The session above predates this call, so the account's background preparation (the
+        # engine tick or an earlier visit) is let finish first; the late-arrival path is pulse_late_after_fast_start.
+        e.talk.engine.prepare_now(fx.USER_ID)
         conv, vs = e.call()
         assert re.search(r"^- P1 \[active\] Synthetic owner build \(cli session ", e.instructions(), re.M)
         card = lambda title: next(c for c in e.talk.pulse.cards(e.talk.account(fx.USER_ID)) if c["title"] == title)
@@ -355,6 +359,33 @@ def pulse_visibility_and_cursor(model):
         assert "Synthetic owner build" not in brief and "Synthetic later deploy" in brief, brief
         return {"briefed_at_open": before, "after_greeting": "exposed", "acknowledged": spoke["acknowledged"]["by"],
                 "delivered_mid_call": later, "unheard_update_offered_again": True}
+    finally:
+        e.close()
+
+
+def pulse_late_after_fast_start(model):
+    """The first call opens without waiting; activity read later arrives in that same call as a context update."""
+    e = Env(model)
+    try:
+        before = e.history.create_session("Synthetic late build", "cli")
+        e.history.append(before, [{"role": "assistant", "content": "built late", "platform_message_id": "lb1",
+                                   "timestamp": time.time()}])
+        started = time.monotonic()
+        conv, vs = e.call()
+        opened_s = time.monotonic() - started
+        first = e.instructions()
+        assert "still being read" in first and "Synthetic late build" not in first, first[-800:]
+        e.talk.engine.prepare_now(fx.USER_ID)  # the background preparation finishes after the call opened
+        card = lambda: next(c for c in e.talk.pulse.cards(e.talk.account(fx.USER_ID)) if c["title"] == "Synthetic late build")
+        status, update = e.post("context", {"conversation_id": conv, "voice_session_id": vs})
+        assert status == 200 and update["revision"] and "Synthetic late build" in update["text"], update
+        assert card()["state"] == "candidate", "an unacked update exposes nothing"
+        e.post("context/ack", {"conversation_id": conv, "voice_session_id": vs, "revision": update["revision"]})
+        assert card()["state"] == "exposed", "appended is exposed, not heard"
+        assert card()["ref"] == before, (card()["ref"], before)  # provenance: the exact source session
+        status, again = e.post("context", {"conversation_id": conv, "voice_session_id": vs})
+        assert status == 200 and "Synthetic late build" not in (again.get("text") or ""), "delivered twice"
+        return {"opened_s": round(opened_s, 3), "late_revision": update["revision"], "provenance": card()["ref"]}
     finally:
         e.close()
 
@@ -1312,7 +1343,7 @@ def bounded_native_spool(model):
 
 
 CHECKS = (native_tool_roundtrip, background_result_delivery, context_update_injection, persistent_two_call_history,
-          pulse_visibility_and_cursor, cross_user_denial, cross_profile_denial, restart_job_reconciliation,
+          pulse_visibility_and_cursor, pulse_late_after_fast_start, cross_user_denial, cross_profile_denial, restart_job_reconciliation,
           voice_disconnect_vs_cancel, delegation_id_dedup, plugin_native_install, unauthenticated_job_denial,
           limits_and_approvals, smart_approval_profile, receipt_ack_no_double_speech, telegram_default_receipt,
           telegram_alternate_destination, telegram_closed_call_delivery, telegram_ambiguous_send,
