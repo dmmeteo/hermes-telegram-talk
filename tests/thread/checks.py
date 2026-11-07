@@ -129,15 +129,25 @@ class MemoryExtras:
     def payload(self, caption, paths):
         return caption + "\n\n" + "\n".join(f"[Image attached at: {p}]" for p in paths)
 
-    def finalize(self, home, event, user_message, response, turn_id):
+    def finalize(self, home, event, response, turn_id, history=(), api=None):
+        """A chat-agent turn about `event`, shaped as the gateway shapes it: the model gets the multimodal payload
+        (`api`, default: the event's caption plus its image hints), post_llm_call gets the clean persisted text (the
+        caption; the payload itself when there is no caption) and the history ending in this turn's rows."""
         from types import SimpleNamespace
         from hermes_talk.thread_gateway import chat_reply
         sid = f"s-{event.source.user_id}-{event.source.chat_id}-{event.source.thread_id}"
         self.origins[sid] = event.source
         store = SimpleNamespace(lookup_by_session_id=lambda s: SimpleNamespace(origin=self.origins[s])
                                 if s in self.origins else None)
-        chat_reply(session_id=sid, platform="telegram", user_message=user_message, assistant_response=response,
-                   turn_id=turn_id, home=str(home), store=store)
+        images = [u for u, t in zip(event.media_urls, event.media_types) if t.startswith("image/")]
+        caption = event.text or getattr(getattr(event, "raw_message", None), "caption", None) or ""
+        if api is None:
+            api = self.payload(caption or "What do you see in this image?", images) if images else caption
+        persisted = caption if caption else None
+        messages = [*history, {"role": "user", "content": api}, {"role": "assistant", "content": response}]
+        chat_reply(session_id=sid, platform="telegram", user_message=persisted if persisted is not None else api,
+                   assistant_response=response, turn_id=turn_id, conversation_history=messages, home=str(home),
+                   store=store)
 
 
 def run(history_factory, event_factory, dispatch, out, extras=None):
@@ -622,13 +632,17 @@ def run(history_factory, event_factory, dispatch, out, extras=None):
                 urls = [p["image_url"]["url"] for p in message if p.get("type") == "image_url"]
                 assert len(urls) == 1 and base64.b64decode(urls[0].split(",", 1)[1]) == JPEG, urls
             reply = "Synthetic analysis: a test card with a grey square."
-            extras.finalize(rig.home, event_factory(text="Synthetic unrelated", message_id=61), "Synthetic unrelated",
-                            "Synthetic unrelated reply", "t-0")
-            extras.finalize(rig.home, event, message, reply, "t-1")
-            extras.finalize(rig.home, event, message, reply, "t-1")  # a repeated finalization of the same turn
+            # A newer unrelated turn whose history still holds the (not yet answered) photo row: only the turn's own
+            # user row counts, so the photo's cached path in an older row must not attribute this reply.
+            older = [{"role": "user", "content": message}, {"role": "assistant", "content": "Synthetic earlier"}]
+            extras.finalize(rig.home, event_factory(text="Synthetic unrelated", message_id=61),
+                            "Synthetic unrelated reply", "t-0", history=older)
+            # The real route: post_llm_call gets the caption alone; the cached path is only in the turn's payload row.
+            extras.finalize(rig.home, event, reply, "t-1", history=older)
+            extras.finalize(rig.home, event, reply, "t-1", history=older)  # a repeated finalization of the same turn
             other = event_factory(message_id=60, message_type="photo", media=[(str(photo), "image/jpeg")],
                                   thread_id="99")
-            extras.finalize(rig.home, other, message, "Synthetic foreign topic reply", "t-2")
+            extras.finalize(rig.home, other, "Synthetic foreign topic reply", "t-2", api=message)
             update = rig.context(ids)
             text = update["text"]
             assert text.count(reply) == 1 and "did not see it yourself" in text, text
@@ -640,9 +654,33 @@ def run(history_factory, event_factory, dispatch, out, extras=None):
             kept = [t for _, t in rig.turns(ids["conversation_id"])]
             assert sum(reply in c for c in kept) == 1 and any(c.startswith("[Telegram chat agent reply") for c in kept)
             rig.call("end", **ids)
-            extras.finalize(rig.home, event, message, "Synthetic late reply", "t-3")
+            extras.finalize(rig.home, event, "Synthetic late reply", "t-3")
             assert not any("Synthetic late reply" in c for c in
                            [t for _, t in rig.turns(ids["conversation_id"])]), "a stale reply after end"
+        finally:
+            rig.close()
+
+    @check("uncaptioned_photo_reply_reaches_the_call_and_a_foreign_last_row_adds_nothing")
+    def _():
+        rig = Rig(history_factory)
+        try:
+            ids = rig.start()
+            photo = rig.root / "profiles" / "synthetic" / "bare.jpg"
+            photo.write_bytes(JPEG)
+            event = event_factory(message_id=62, message_type="photo", media=[(str(photo), "image/jpeg")])
+            assert dispatch(rig.home, event) is None, "the photo goes on to the chat agent"
+            second = rig.root / "profiles" / "synthetic" / "card2.jpg"  # each download is its own cached file
+            second.write_bytes(JPEG)
+            captioned = event_factory(message_id=63, message_type="photo", media=[(str(second), "image/jpeg")],
+                                      caption="Synthetic second card")
+            assert dispatch(rig.home, captioned) is None
+            # A turn whose last user row is not its own input (caption absent from it) adds nothing from history.
+            stray = extras.payload("Synthetic other note", list(captioned.media_urls))
+            extras.finalize(rig.home, captioned, "Synthetic misattributed reply", "u-0", api=stray)
+            extras.finalize(rig.home, event, "Synthetic bare analysis: a grey square.", "u-1")
+            text = rig.context(ids)["text"]
+            assert text.count("Synthetic bare analysis") == 1 and "message 62" in text, text
+            assert "Synthetic misattributed reply" not in text, text
         finally:
             rig.close()
 

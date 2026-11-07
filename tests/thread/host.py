@@ -225,17 +225,36 @@ class HostExtras:
         assert not skipped, skipped
         return parts
 
-    def finalize(self, home, event, user_message, response, turn_id):
+    def finalize(self, home, event, response, turn_id, history=(), api=None):
+        """A chat-agent turn about `event` through the gateway's own preparation and run arguments: the clean
+        persisted text from `_hmwa_apply_message_timestamp`, the model payload from `TurnRunner._native_image_run_message`
+        (the event's images, as `_enrich_inbound_images` buffers them in native mode, unless `api` is given), the
+        override selected as agent/turn_context.py selects `original_user_message`, then Hermes' own finalizer."""
         import logging
         from types import SimpleNamespace
         from agent.turn_finalizer import _apply_output_hooks
+        from gateway.run import _event_media_is_image
+        from gateway.run_turn_prepare import GatewayTurnPrepareMixin
+        from gateway.run_turn_runner import TurnRunner
         entry = session_store(home).get_or_create_session(event.source)
         agent = SimpleNamespace(session_id=entry.session_id, model="synthetic-scripted-model", platform="telegram",
                                 _persist_disabled=False)
-        self._with_home(home, lambda: _apply_output_hooks(
-            agent, response, logging.getLogger("talk-thread-host"), platform="telegram",
-            effective_task_id=entry.session_id, turn_id=turn_id, original_user_message=user_message,
-            messages=[{"role": "user", "content": user_message}, {"role": "assistant", "content": response}]))
+        images = [u for i, u in enumerate(event.media_urls) if _event_media_is_image(event, i)]
+
+        def run():
+            message, persisted, _ = GatewayTurnPrepareMixin._hmwa_apply_message_timestamp(None, event, event.text)
+            payload = api
+            if payload is None:
+                turn = object.__new__(TurnRunner)
+                turn._ctx = SimpleNamespace(session_key=entry.session_key, message=message)
+                turn._runner = SimpleNamespace(_consume_pending_native_image_paths=lambda key: list(images))
+                payload = turn._native_image_run_message()
+            original = persisted if persisted is not None else payload  # agent/turn_context.py
+            messages = [*history, {"role": "user", "content": payload}, {"role": "assistant", "content": response}]
+            return _apply_output_hooks(agent, response, logging.getLogger("talk-thread-host"), platform="telegram",
+                                       effective_task_id=entry.session_id, turn_id=turn_id,
+                                       original_user_message=original, messages=messages)
+        self._with_home(home, run)
 
 
 def make_dispatch(loop):

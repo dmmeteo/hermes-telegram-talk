@@ -259,7 +259,10 @@ minimize the Mini App, send a text, a file or a photo, come back. Decisions and 
   in the gateway's own SessionStore, and stores the reply (up to 1500 characters, once per message) for the same
   live call and conversation. The voice then hears it as the chat agent's reply about that photo or file ("You did
   not see it yourself"). Replies for another thread, an ended or rebound call, or an unrelated turn are not
-  carried. The voice model itself has no verified image input and is never told it saw anything.
+  carried. For a captioned photo the gateway passes the hook only the caption as `user_message`; the cached file is
+  then found in the turn's own (last) user row of `conversation_history`, used only when it holds that same caption,
+  so an older photo in the history is never attributed to a newer reply. The voice model itself has no verified
+  image input and is never told it saw anything.
 - **Never stalls the gateway.** The gateway waits at most 0.5 s for a thread's lock (the voice server holds it while
   acking or flushing to SessionDB). After that the message goes to Hermes as usual, so it is answered in the chat
   and never lost; only that one message misses the call.

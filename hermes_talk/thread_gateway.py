@@ -8,6 +8,13 @@ that thread only through the handle (thread_inbox.launch_thread).
 `post_llm_call` sees each finished chat-agent turn. When that turn answered a photo or file a live call of the same
 thread passed on to the chat agent (matched by the exact cached file the agent was given, and by the session's
 origin in the gateway's own SessionStore), the reply is stored once as an attributed analysis item for that call.
+
+The gateway hands `post_llm_call` the turn's clean persisted text as `user_message` (for a captioned photo that is
+the caption alone: gateway/run_turn_prepare.py `_hmwa_apply_message_timestamp`, agent/turn_context.py), while the
+native multimodal payload with its `[Image attached at: <cached path>]` hint exists only in `conversation_history`.
+So the cached file is looked for in `user_message` and in this turn's own user row: the last user row of the
+history, and only when it is the same input as `user_message`. Older rows are never scanned, so an earlier photo can
+never be attributed to a newer, unrelated reply.
 """
 import json
 import os
@@ -76,8 +83,21 @@ def _user_text(message):
     return ""
 
 
+def _current_input(user_message, conversation_history):
+    """This turn's input text: `user_message` plus, when it is this same input, the turn's own user row."""
+    text = _user_text(user_message)
+    rows = [m for m in conversation_history or () if isinstance(m, dict) and m.get("role") == "user"]
+    if not rows:
+        return text
+    row = _user_text(rows[-1].get("content"))  # the turn's input; the loop appends only assistant/tool rows after it
+    clean = text.strip()
+    if row and (not clean or clean in row):  # a mismatch (e.g. a mid-turn note) adds nothing: miss, never misattribute
+        return text + "\n" + row
+    return text
+
+
 def chat_reply(session_id=None, platform=None, user_message=None, assistant_response=None, turn_id=None,
-               home=None, store=None, clock=time.time, **_):
+               conversation_history=None, home=None, store=None, clock=time.time, **_):
     """`post_llm_call` body: the stored analysis item names, else []."""
     if platform != "telegram" or not isinstance(assistant_response, str) or not assistant_response.strip():
         return []
@@ -94,7 +114,7 @@ def chat_reply(session_id=None, platform=None, user_message=None, assistant_resp
         return []
     user_id, chat_id = str(getattr(origin, "user_id", "")), str(getattr(origin, "chat_id", ""))
     thread_id = getattr(origin, "thread_id", None)
-    text = _user_text(user_message)
+    text = _current_input(user_message, conversation_history)
     stored = []
     for bind_path in inbox.root.glob("bind-*.json"):
         try:

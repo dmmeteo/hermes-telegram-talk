@@ -30,6 +30,6 @@
     "hermes_talk/pulse_policy.py": "74b648b1611dbdb116150c14c986086b41b94b504d02de69482e11cb09ae371a",
     "hermes_talk/pulse_claims.py": "17afaf854c415f6eac83c8bac30ef16378d50906a092a42e3d1ea7986eb30499",
     "hermes_talk/thread_inbox.py": "03fe9e99e9d4e04950712183d371bfc993f69391e0e21da29213288b8529efb9",
-    "hermes_talk/thread_gateway.py": "0e3fc9aced14d01120e4844fdbedf9c6d9917cf190ecd80dbdd757dcbc9dc2f8"
+    "hermes_talk/thread_gateway.py": "a623b5aa6210d9040dea9c6296b4238e880d6dd62fcd720e9490986fe7451b51"
   }
 }
