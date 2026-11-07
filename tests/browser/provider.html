@@ -24,9 +24,10 @@ async function serve() {
     destination.stream.getTracks().forEach(track => peer.addTrack(track, destination.stream));
     peer.ondatachannel = ({channel}) => {
       entry.channel = channel;
-      channel.onopen = () => {
-        if (entry.behavior.handshake) entry.send({type:'session.started',session:{id:'synthetic'}});
-      };
+      // Chromium can hand over an incoming channel that is already open, and then never fires onopen for it.
+      const hello = () => { if (entry.behavior.handshake && !entry.greeted) { entry.greeted = true; entry.send({type:'session.started',session:{id:'synthetic'}}); } };
+      channel.onopen = hello;
+      if (channel.readyState === 'open') hello();
       channel.onmessage = message => {
         const event = JSON.parse(message.data);
         entry.got.push(event);
