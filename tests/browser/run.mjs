@@ -32,8 +32,8 @@ let nativePolicyBrowser;
 log('runtime',{browser:browser.version(),display:'headless Chromium; native CDP context for real tab visibility',fixture:'real frozen backend + local Chromium WebRTC peers; all identities/context/media synthetic',network:'none'});
 const provider=await browser.newPage();
 await provider.goto(`${FIX}/provider.html`);
-const {initData}=await(await fetch(`${FIX}/identity`)).json();
-const appUrl=APP+'#tgWebAppData='+encodeURIComponent(initData);
+const {initData,launch}=await(await fetch(`${FIX}/identity`)).json();
+const appUrl=APP+'?launch='+launch+'#tgWebAppData='+encodeURIComponent(initData);
 const errors=[];
 const contexts=[];
 function instrument() {

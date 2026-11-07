@@ -235,10 +235,16 @@ transcript and, when the profile offers several, a reply-voice selector. Everyth
 minimize the Mini App, send a text, a file or a photo, come back. Decisions and the inspected interfaces are in
 [docs/adr/0004-exact-thread-chat-input.md](docs/adr/0004-exact-thread-chat-input.md).
 
-- **Which chat.** `api/session` binds the call to (profile, bot, user, chat, topic) from the signed launch only: the
-  user's private chat with this bot, and a topic of it when the Mini App was opened through a `start_param=topic<id>`
-  link. A launch from a group, a channel or another user's chat binds nothing. There is no fallback to a last active
-  chat, and the browser cannot name one.
+- **Which chat.** Send `/talk` in the private chat (or a topic of it) with the bot. The plugin's Telegram handler
+  (`register_telegram_handler`) answers in that same chat and topic with an "Open Talk" web_app button. Its URL is the
+  Mini App URL the voice server published plus a fresh launch handle that the gateway stored for (profile, bot,
+  user, chat, topic). `api/session` binds the call to that thread only through the handle: it must name this
+  profile, bot and signed user, be opened within 10 minutes, and it is claimed by one Telegram launch (a reconnect
+  of the same page keeps it; another launch gets "already used"). A Main Mini App link may carry the same handle
+  as `startapp`. A menu launch without a handle, a group, a channel or another account's handle binds nothing and
+  the Mini App says so ("Not linked to a chat. Send /talk there to link it."). There is no fallback to the main
+  chat or a last active chat, and the browser cannot name one. Nothing is sent or registered with Telegram until
+  an operator restarts the profile's gateway with this plugin.
 - **How it arrives.** `register(ctx)` adds a `pre_gateway_dispatch` hook. In the profile's gateway it sees each inbound
   message before Hermes' own dispatch and takes it only when the bot (from the Telegram message), chat, topic and
   sender equal a live binding (`plugin-data/hermes-talk/threads/`). Taken input is written once per message id and edit
@@ -247,8 +253,16 @@ minimize the Mini App, send a text, a file or a photo, come back. Decisions and 
 - **What the voice gets.** The next in-call context refresh carries a `## Chat input` section (no reconnect, no
   Pulse wait). Text and UTF-8 text files up to 64 KB (6000 characters each) are given whole. Photos, PDFs, voice
   notes and files that are too large or not UTF-8 are not given to the voice: the call gets a note saying so and
-  the message continues to the profile's normal chat agent in the same thread, which has Hermes' vision path. The
-  voice model has no verified image input, so it is never told it saw anything.
+  the message continues to the profile's normal chat agent in the same thread, which gets the real multimodal
+  payload (or Hermes' vision description, per the profile's image routing). When that agent's turn finishes, the
+  plugin's `post_llm_call` hook matches the turn to the exact cached file it was given and to the session's origin
+  in the gateway's own SessionStore, and stores the reply (up to 1500 characters, once per message) for the same
+  live call and conversation. The voice then hears it as the chat agent's reply about that photo or file ("You did
+  not see it yourself"). Replies for another thread, an ended or rebound call, or an unrelated turn are not
+  carried. The voice model itself has no verified image input and is never told it saw anything.
+- **Never stalls the gateway.** The gateway waits at most 0.5 s for a thread's lock (the voice server holds it while
+  acking or flushing to SessionDB). After that the message goes to Hermes as usual, so it is answered in the chat
+  and never lost; only that one message misses the call.
 - **Exactly once.** An input is stored in the conversation (SessionDB, receipt `talk:chat:...`) when its context
   update is acked, or at `api/end` if the call never got it. A minimized page that reconnects without `api/end`
   still gets the earlier call's undelivered input, once. Edits are separate inputs, marked as edited.
@@ -506,6 +520,8 @@ the package's SVG avatar. All identities and text remain synthetic.
 | Delegation wiring in the Talk UI (Chromium, local peers) | yes | n/a | yes (real tasks in the browser job) | n/a | no |
 | Telegram task reports | yes (on with tasks) | n/a | yes (Hermes sender, synthetic Telegram transport) | default on, no egress | no |
 | Exact-thread chat input (text, text files; truthful notes otherwise) | yes | yes | yes (registered gateway hook, adapter-built events, real SessionDB) | in fixture | no |
+| `/talk` launch handle binding the exact chat/topic; visible unbound state | yes | yes | yes (real PTB Application dispatch, recording sender; real routes) | no (needs a gateway restart with this plugin) | no |
+| Chat agent's reply about a photo or file carried into the same call | yes | yes | yes (real turn finalizer and `post_llm_call`, real SessionStore, native image payload; scripted reply) | no | no |
 | Transcript and reply-voice selector in the Mini App | yes | yes (unit) | n/a | n/a | no |
 | Shopy female/restrained source example | yes | yes | n/a | no | no |
 

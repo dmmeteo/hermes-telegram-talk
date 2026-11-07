@@ -18,6 +18,7 @@ from hermes_talk import fixtures as f
 from hermes_talk.config import parse_config
 from hermes_talk.history import MemoryHistory
 from hermes_talk.talk import TalkRuntime
+from hermes_talk.thread_inbox import Thread
 
 offers, answers = queue.Queue(), queue.Queue()
 logs = io.StringIO()
@@ -27,7 +28,9 @@ history = MemoryHistory()
 # Two reply voices, so the selector is part of every layout this inventory checks (synthetic config).
 talk = TalkRuntime(parse_config(f.config_data(voice={'voice': 'cove', 'choices': ['cove', 'marin']}), home), f.BOT_TOKEN,
                    history,
-                   soul=f.file_soul(home), skill=f.file_skill(home))
+                   soul=f.file_soul(home), skill=f.file_skill(home), home=home)
+# What `/talk` in the synthetic user's private chat would hand the Mini App: one launch bound to that chat.
+LAUNCH = talk.inbox.issue_launch(Thread(talk.config.profile_id, talk.bot_id, f.USER_ID, str(f.USER_ID)))
 
 
 def resolve():
@@ -77,7 +80,7 @@ class Fixture(BaseHTTPRequestHandler):
             except queue.Empty:
                 return self.send(204, b'')
         if self.path == '/identity':
-            return self.send(200, {'initData': f.sign_init_data(f.USER_ID, int(time.time()))})
+            return self.send(200, {'initData': f.sign_init_data(f.USER_ID, int(time.time())), 'launch': LAUNCH})
         if self.path == '/other-identity':
             return self.send(200, {'initData': f.sign_init_data(f.OTHER_USER_ID, int(time.time()))})
         if self.path == '/state':

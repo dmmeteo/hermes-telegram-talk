@@ -13,6 +13,14 @@ const transcriptList = document.getElementById("transcript");
 const voiceBox = document.getElementById("voice-box");
 const voiceSelect = document.getElementById("voice");
 const voiceNote = document.getElementById("voice-note");
+const threadNote = document.getElementById("thread-note");
+// The /talk button URL carries a server-issued handle for the chat thread it was sent in; nothing else binds one.
+const launch = /^[A-Za-z0-9_-]{32,64}$/.test(new URLSearchParams(location.search).get("launch") || "")
+  ? new URLSearchParams(location.search).get("launch") : null;
+const THREAD_NOTES = {unbound: "Not linked to a chat. Send /talk there to link it.",
+  expired: "Talk link expired. Send /talk in the chat again.", used: "Talk link already used. Send /talk again.",
+  invalid: "Talk link not valid. Send /talk in the chat again.", foreign: "Talk link is for another account.",
+  not_private: "Chat input works only in a private chat.", unavailable: "Chat input is unavailable here."};
 const reconnectButton = document.getElementById("reconnect");
 let call = null;
 let conversation = null;
@@ -318,7 +326,10 @@ function renderVoice(current) {
 
 async function loadVoice(current) {
   try {
-    const data = await post("voice", {initData: current.auth}, {signal: current.abort.signal});
+    const data = await post("voice", {initData: current.auth, ...(launch ? {launch} : {})}, {signal: current.abort.signal});
+    const status = data.thread && typeof data.thread.status === "string" ? data.thread.status : "bound";
+    threadNote.textContent = THREAD_NOTES[status] || "";
+    threadNote.hidden = !THREAD_NOTES[status];
     if (data.voice && Array.isArray(data.voice.choices) && typeof data.voice.current === "string") {
       voiceState = data.voice;
       // The voice this call's session was created with: the account's stored choice when the call started.
@@ -743,7 +754,7 @@ async function start() {
     await waitForIce(current);
     mark(current, "offer");
     const answer = await post("session", {initData: auth, sdp: current.peer.localDescription.sdp,
-      conversation_id: conversation.id}, {signal: current.abort.signal});
+      conversation_id: conversation.id, ...(launch ? {launch} : {})}, {signal: current.abort.signal});
     if (answer.conversation_id !== current.conversation.id || typeof answer.voice_session_id !== "string"
       || typeof answer.sdp !== "string" || answer.type !== "answer") throw new Error("Voice handshake failed. Tap Retry.");
     current.voiceId = answer.voice_session_id;

@@ -70,10 +70,19 @@ class Rig:
         body = {"initData": init or sign(user, int(self.clock()), self.token), **body}
         return self.app.handle(route, json.dumps(body).encode())
 
-    def start(self, user=fx.USER_ID, **launch):
-        boot = self.call("bootstrap", user, init=sign(user, int(self.clock()), self.token, **launch))
-        answer = self.call("session", user, init=sign(user, int(self.clock()), self.token, **launch),
-                           sdp=fx.OFFER, conversation_id=boot["conversation_id"])
+    def issue(self, user=fx.USER_ID, thread_id=None):
+        """What the gateway's /talk handler stores for a command in this user's private chat (or topic)."""
+        return ThreadInbox(self.home, self.clock).issue_launch(
+            Thread(self.config.profile_id, BOT_ID, user, str(user), thread_id))
+
+    def start(self, user=fx.USER_ID, thread_id=None, launch=None, init=None, bound=True):
+        """A Mini App launch from the /talk button of (user, thread); `launch`/`init` repeat an earlier launch."""
+        init = init or sign(user, int(self.clock()), self.token)
+        launch = launch or (self.issue(user, thread_id) if bound else None)
+        boot = self.call("bootstrap", user, init=init)
+        extra = {"launch": launch} if launch else {}
+        answer = self.call("session", user, init=init, sdp=fx.OFFER, conversation_id=boot["conversation_id"], **extra)
+        self.last_launch = (launch, init)
         return {"conversation_id": answer["conversation_id"], "voice_session_id": answer["voice_session_id"]}
 
     def context(self, ids, user=fx.USER_ID):
@@ -105,8 +114,35 @@ def _inbox_names(rig, thread_key):
     return [n for n, _ in ThreadInbox(rig.home).pending(thread_key)]
 
 
-def run(history_factory, event_factory, dispatch, out):
+class MemoryExtras:
+    """Stage-1 stand-ins for the gateway's /talk dispatch and a chat-agent turn's post_llm_call (see host.py)."""
+
+    def __init__(self):
+        self.origins = {}
+
+    def talk_command(self, home, user_id, chat_id=None, chat_type="private", thread_id=None, bot_id=BOT_ID):
+        from hermes_talk.thread_gateway import offer
+        text, url = offer(home, bot_id, user_id, chat_id or user_id, chat_type, thread_id)
+        return [] if text is None else [{"chat_id": int(chat_id or user_id), "text": text, "url": url,
+                                         "message_thread_id": thread_id}]
+
+    def payload(self, caption, paths):
+        return caption + "\n\n" + "\n".join(f"[Image attached at: {p}]" for p in paths)
+
+    def finalize(self, home, event, user_message, response, turn_id):
+        from types import SimpleNamespace
+        from hermes_talk.thread_gateway import chat_reply
+        sid = f"s-{event.source.user_id}-{event.source.chat_id}-{event.source.thread_id}"
+        self.origins[sid] = event.source
+        store = SimpleNamespace(lookup_by_session_id=lambda s: SimpleNamespace(origin=self.origins[s])
+                                if s in self.origins else None)
+        chat_reply(session_id=sid, platform="telegram", user_message=user_message, assistant_response=response,
+                   turn_id=turn_id, home=str(home), store=store)
+
+
+def run(history_factory, event_factory, dispatch, out, extras=None):
     results = []
+    extras = extras or MemoryExtras()
 
     def check(name):
         def wrap(fn):
@@ -124,15 +160,46 @@ def run(history_factory, event_factory, dispatch, out):
 
     key_main = f"tg{BOT_ID}:{fx.USER_ID}:{fx.USER_ID}:-"
 
-    @check("launch_thread_binds_only_signed_private_chat_and_topic")
+    @check("launch_binds_only_an_issued_handle_of_this_user_bot_and_profile_once")
     def _():
-        t = launch_thread({}, fx.USER_ID, "p", BOT_ID)
-        assert t == Thread("p", BOT_ID, fx.USER_ID, str(fx.USER_ID), None), t
-        assert launch_thread({"chat_type": "sender"}, fx.USER_ID, "p", BOT_ID).thread_id is None
-        assert launch_thread({"start_param": "topic77"}, fx.USER_ID, "p", BOT_ID).thread_id == "77"
-        for refused in ({"chat_type": "group"}, {"chat_type": "supergroup"}, {"chat_type": "channel"},
-                        {"chat_type": "private"}, {"start_param": "chat-999"}, {"start_param": "topic7x"}):
-            assert launch_thread(refused, fx.USER_ID, "p", BOT_ID) is None, refused
+        rig = Rig(history_factory)
+        try:
+            inbox, profile = ThreadInbox(rig.home, rig.clock), rig.config.profile_id
+            topic = rig.issue(thread_id="77")
+            first = {"hash": "a" * 64}
+            assert launch_thread(first, fx.USER_ID, profile, BOT_ID, inbox, topic) == (
+                Thread(profile, BOT_ID, fx.USER_ID, str(fx.USER_ID), "77"), "bound")
+            again = launch_thread(first, fx.USER_ID, profile, BOT_ID, inbox, topic)  # reconnect of the same page
+            assert again[1] == "bound" and again[0].thread_id == "77", again
+            assert launch_thread({"hash": "b" * 64}, fx.USER_ID, profile, BOT_ID, inbox, topic) == (None, "used")
+            fresh = rig.issue()
+            assert launch_thread({"hash": "c" * 64, "start_param": fresh}, fx.USER_ID, profile, BOT_ID, inbox)[1] == \
+                "bound", "a signed start_param may carry the same handle"
+            for fields, handle, why in (({}, None, "unbound"), ({"start_param": "topic77"}, None, "unbound"),
+                                        ({"chat_type": "group"}, rig.issue(), "not_private"),
+                                        ({"chat_type": "private"}, rig.issue(), "not_private"),
+                                        ({}, "x" * 40, "invalid"), ({}, "../../etc", "invalid")):
+                assert launch_thread({"hash": "d" * 64, **fields}, fx.USER_ID, profile, BOT_ID, inbox, handle) == (
+                    None, why), (fields, handle)
+            mine = rig.issue()
+            assert launch_thread({"hash": "e" * 64}, fx.OTHER_USER_ID, profile, BOT_ID, inbox, mine) == (
+                None, "foreign")
+            assert launch_thread({"hash": "e" * 64}, fx.USER_ID, "other-profile", BOT_ID, inbox, mine) == (
+                None, "foreign")
+            assert launch_thread({"hash": "e" * 64}, fx.USER_ID, profile, "654321", inbox, mine) == (None, "foreign")
+            late = rig.issue()
+            rig.clock.now += 601
+            assert launch_thread({"hash": "f" * 64}, fx.USER_ID, profile, BOT_ID, inbox, late) == (None, "expired")
+            # the real routes: a menu launch without a handle is unbound and says so; it never takes main-chat input
+            status = rig.call("voice")["thread"]["status"]
+            assert status == "unbound", status
+            ids = rig.start(bound=False)
+            assert dispatch(rig.home, event_factory(text="Synthetic main chat", message_id=5)) is None
+            assert "inputs" not in rig.context(ids)["sources"]
+            assert rig.call("voice", launch=rig.issue())["thread"]["status"] == "bound"
+            expect(400, lambda: rig.call("voice", launch=7))
+        finally:
+            rig.close()
 
     @check("text_during_call_reaches_same_call_once_without_reconnect")
     def _():
@@ -197,13 +264,13 @@ def run(history_factory, event_factory, dispatch, out):
         a = Rig(history_factory, "alpha")
         b = Rig(history_factory, "beta", root=a.root / "b")
         try:
-            ids_topic = a.start(start_param="topic12")
+            ids_topic = a.start(thread_id="12")
             assert dispatch(a.home, event_factory(text="for topic 12", thread_id="12", message_id=10)) == SKIP
             assert dispatch(a.home, event_factory(text="main lane", message_id=11)) is None  # no call there
             assert dispatch(b.home, event_factory(text="other profile", thread_id="12", message_id=12)) is None
             text = a.context(ids_topic)["text"]
             assert "for topic 12" in text and "main lane" not in text and "other profile" not in text, text
-            ids_b = b.start(start_param="topic12")
+            ids_b = b.start(thread_id="12")
             assert "inputs" not in b.context(ids_b)["sources"]
         finally:
             b.close()
@@ -296,7 +363,8 @@ def run(history_factory, event_factory, dispatch, out):
             assert dispatch(rig.home, event_factory(text="Synthetic while minimized", message_id=950)) == SKIP
             fetched = rig.context(first)  # fetched but the page was hidden before its append was acked
             assert fetched["sources"]["inputs"] == 1
-            second = rig.start()  # Retry: a new voice session of the same conversation and thread, no api/end
+            launch, init = rig.last_launch
+            second = rig.start(launch=launch, init=init)  # Retry in the same page: same launch, no api/end
             assert second["conversation_id"] == first["conversation_id"]
             assert dispatch(rig.home, event_factory(text="Synthetic after restore", message_id=951)) == SKIP
             update = rig.context(second)
@@ -393,7 +461,7 @@ def run(history_factory, event_factory, dispatch, out):
         import threading
         rig = Rig(history_factory)
         try:
-            thread = launch_thread({}, fx.USER_ID, rig.config.profile_id, BOT_ID)
+            thread = Thread(rig.config.profile_id, BOT_ID, fx.USER_ID, str(fx.USER_ID))
             old = ThreadInbox(rig.home, rig.clock)
             old.bind(thread, "conv-A", "voice-A", 600)
             read, go = threading.Event(), threading.Event()
@@ -506,6 +574,119 @@ def run(history_factory, event_factory, dispatch, out):
             joined = "\n".join(seen)
             assert "more characters of this input were not carried" in joined, joined[:300]
             assert sum("Synthetic after album" in t for t in seen) == 1, len(seen)
+            assert _inbox_names(rig, key_main) == []
+        finally:
+            rig.close()
+
+    @check("talk_command_offers_the_mini_app_bound_to_its_own_thread")
+    def _():
+        rig = Rig(history_factory)
+        try:
+            sent = extras.talk_command(rig.home, fx.USER_ID, thread_id=12)
+            assert len(sent) == 1 and sent[0]["chat_id"] == fx.USER_ID and sent[0]["message_thread_id"] == 12, sent
+            url = sent[0]["url"]
+            assert url.startswith(fx.ORIGIN + "/tg-voice/?launch="), url
+            handle = url.split("launch=", 1)[1]
+            ids = rig.start(launch=handle)
+            assert dispatch(rig.home, event_factory(text="Synthetic topic note", thread_id="12", message_id=40)) == SKIP
+            assert dispatch(rig.home, event_factory(text="Synthetic main note", message_id=41)) is None
+            text = rig.context(ids)["text"]
+            assert "Synthetic topic note" in text and "Synthetic main note" not in text, text
+            expect_status = rig.call("voice", init=sign(fx.USER_ID, int(rig.clock()) - 1), launch=handle)
+            assert expect_status["thread"]["status"] == "used", expect_status  # another launch cannot replay it
+            assert extras.talk_command(rig.home, 999000111) == []  # not on the Talk allowlist
+            group = extras.talk_command(rig.home, fx.USER_ID, chat_id=-100555, chat_type="supergroup")
+            assert group and group[0]["url"] is None and "private chat" in group[0]["text"], group
+            assert extras.talk_command(rig.home, 999000111, chat_id=-100555, chat_type="supergroup") == []
+            (rig.home / "plugin-data" / "hermes-talk" / "threads" / "launch.json").unlink()
+            assert extras.talk_command(rig.home, fx.USER_ID) == [], "no voice server: no answer and no handle"
+        finally:
+            rig.close()
+
+    @check("chat_agent_reply_about_a_photo_reaches_the_same_call_attributed_once")
+    def _():
+        rig = Rig(history_factory)
+        try:
+            ids = rig.start()
+            photo = rig.root / "profiles" / "synthetic" / "photo.jpg"
+            photo.write_bytes(JPEG)
+            event = event_factory(message_id=60, message_type="photo", media=[(str(photo), "image/jpeg")],
+                                  caption="Synthetic what is this")
+            assert dispatch(rig.home, event) is None, "the photo goes on to the chat agent"
+            message = extras.payload("Synthetic what is this", list(event.media_urls))
+            if isinstance(message, list):  # the real multimodal payload carries the exact cached bytes
+                import base64
+                urls = [p["image_url"]["url"] for p in message if p.get("type") == "image_url"]
+                assert len(urls) == 1 and base64.b64decode(urls[0].split(",", 1)[1]) == JPEG, urls
+            reply = "Synthetic analysis: a test card with a grey square."
+            extras.finalize(rig.home, event_factory(text="Synthetic unrelated", message_id=61), "Synthetic unrelated",
+                            "Synthetic unrelated reply", "t-0")
+            extras.finalize(rig.home, event, message, reply, "t-1")
+            extras.finalize(rig.home, event, message, reply, "t-1")  # a repeated finalization of the same turn
+            other = event_factory(message_id=60, message_type="photo", media=[(str(photo), "image/jpeg")],
+                                  thread_id="99")
+            extras.finalize(rig.home, other, message, "Synthetic foreign topic reply", "t-2")
+            update = rig.context(ids)
+            text = update["text"]
+            assert text.count(reply) == 1 and "did not see it yourself" in text, text
+            assert "Synthetic unrelated reply" not in text and "Synthetic foreign topic reply" not in text, text
+            assert "photo" in text and "message 60" in text, text
+            rig.ack(ids, update["revision"])
+            again = rig.context(ids)
+            assert reply not in (again.get("text") or ""), "delivered twice"
+            kept = [t for _, t in rig.turns(ids["conversation_id"])]
+            assert sum(reply in c for c in kept) == 1 and any(c.startswith("[Telegram chat agent reply") for c in kept)
+            rig.call("end", **ids)
+            extras.finalize(rig.home, event, message, "Synthetic late reply", "t-3")
+            assert not any("Synthetic late reply" in c for c in
+                           [t for _, t in rig.turns(ids["conversation_id"])]), "a stale reply after end"
+        finally:
+            rig.close()
+
+    @check("busy_thread_lock_never_stalls_the_gateway_or_drops_input")
+    def _():
+        import threading
+        import time as _time
+        rig = Rig(history_factory)
+        try:
+            ids = rig.start()
+            held, release = threading.Event(), threading.Event()
+
+            def hold():
+                with ThreadInbox(rig.home).locked(key_main):
+                    held.set()
+                    release.wait(10)
+            worker = threading.Thread(target=hold)
+            worker.start()
+            held.wait(5)
+            began = _time.monotonic()
+            result = dispatch(rig.home, event_factory(text="Synthetic during slow I/O", message_id=70))
+            waited = _time.monotonic() - began
+            release.set()
+            worker.join(5)
+            assert result is None and waited < 2.0, (result, waited)  # bounded; Hermes handles the message instead
+            assert dispatch(rig.home, event_factory(text="Synthetic after the lock", message_id=71)) == SKIP
+            text = rig.context(ids)["text"]
+            assert "Synthetic after the lock" in text and "Synthetic during slow I/O" not in text, text
+        finally:
+            rig.close()
+
+    @check("new_conversation_keeps_the_old_calls_unheard_input_in_the_old_history_once")
+    def _():
+        rig = Rig(history_factory)
+        try:
+            first = rig.start()
+            assert dispatch(rig.home, event_factory(text="Synthetic orphan", message_id=80)) == SKIP
+            fresh = rig.call("new", conversation_id=first["conversation_id"])["conversation_id"]
+            assert fresh != first["conversation_id"]
+            second = rig.start()  # no api/end for the first call; the new conversation binds the same thread
+            assert second["conversation_id"] == fresh, (second, fresh)
+            assert "inputs" not in rig.context(second)["sources"], "the old call's input never enters the new call"
+            old = [t for _, t in rig.turns(first["conversation_id"])]
+            assert sum("Synthetic orphan" in c for c in old) == 1, old
+            assert not any("Synthetic orphan" in t for _, t in rig.turns(fresh))
+            rig.start()  # binding again flushes nothing twice
+            assert sum("Synthetic orphan" in t for _, t in rig.turns(first["conversation_id"])) == 1
             assert _inbox_names(rig, key_main) == []
         finally:
             rig.close()

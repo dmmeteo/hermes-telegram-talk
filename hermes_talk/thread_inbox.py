@@ -20,6 +20,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -35,9 +36,12 @@ PENDING_MAX = 50             # undelivered items per binding; later ones pass to
 TEXT_EXTENSIONS = {".txt", ".md", ".markdown", ".csv", ".tsv", ".log", ".json", ".jsonl", ".xml", ".yaml", ".yml",
                    ".toml", ".ini", ".cfg", ".conf", ".srt", ".vtt", ".html", ".htm", ".py", ".js", ".ts", ".sh",
                    ".sql", ".diff", ".patch", ".rst", ".tex"}
-TOPIC = re.compile(r"topic(\d{1,12})")
+LAUNCH_TTL_S = 600           # a /talk launch handle must be opened within this time
+LOCK_WAIT_S = 0.5            # the gateway never waits longer for a thread lock; the message then goes to Hermes
+ANALYSIS_CHARS = 1500        # characters of the chat agent's reply a call receives about one attachment
+HANDLE = re.compile(r"[A-Za-z0-9_-]{32,64}")
 DIGITS = re.compile(r"-?\d{1,20}")
-ITEM = re.compile(r"m(\d{1,20})(?:-e([A-Za-z0-9_-]{1,40}))?\.json")
+ITEM = re.compile(r"m(\d{1,20})(?:-e([A-Za-z0-9_-]{1,40}))?(-a)?\.json")
 
 
 @dataclass(frozen=True)
@@ -58,21 +62,28 @@ class Thread:
         return "this chat" if self.thread_id is None else f"topic {self.thread_id} of this chat"
 
 
-def launch_thread(fields, user_id, profile, bot_id):
-    """The Thread a Mini App launch proves, or None.
+class Busy(Exception):
+    """The thread lock stayed held longer than the caller may wait."""
 
-    `fields` are the already HMAC-verified initData fields. Only a launch inside the user's private chat with this
-    bot binds (menu/keyboard/inline buttons, which carry no `chat_type`, or a direct link with `chat_type=sender`),
-    so the chat id is the user id. A Telegram-signed `start_param` of the form `topic<id>` names a topic of that same
-    private chat. Group, channel and other-user chats are never bound: Telegram does not sign their chat id there."""
-    chat_type = fields.get("chat_type")
-    if chat_type not in (None, "sender"):
-        return None
+
+def launch_thread(fields, user_id, profile, bot_id, inbox, handle=None, peek=False):
+    """(Thread or None, status) for a Mini App launch; status is "bound" or why nothing was bound.
+
+    `fields` are the already HMAC-verified initData fields. Telegram signs no chat or topic id for a private-chat
+    launch, so the thread comes only from a launch handle the profile's gateway issued for `/talk` in that thread
+    (`issue_launch`), passed as the `launch` request field (web_app button URL) or as a signed `start_param`. The
+    handle must name this profile, bot and user and is claimed by exactly one Telegram launch (its initData hash).
+    Without one the call is unbound: no chat input and no guessed or last-active chat."""
+    if fields.get("chat_type") not in (None, "sender"):
+        return None, "not_private"
     start = fields.get("start_param")
-    topic = TOPIC.fullmatch(start) if isinstance(start, str) else None
-    if start not in (None, "") and topic is None:
-        return None
-    return Thread(profile, str(bot_id), int(user_id), str(user_id), topic.group(1) if topic else None)
+    if handle in (None, "") and isinstance(start, str) and HANDLE.fullmatch(start):
+        handle = start
+    if handle in (None, ""):
+        return None, "unbound"
+    if inbox is None:
+        return None, "unavailable"
+    return inbox.claim_launch(handle, user_id, profile, bot_id, fields.get("hash") or "", peek=peek)
 
 
 def _digest(key):
@@ -118,19 +129,88 @@ class ThreadInbox:
         return self.root / f"inbox-{_digest(key)}"
 
     @contextlib.contextmanager
-    def locked(self, key):
+    def locked(self, key, wait_s=None):
         """Hold this thread's lifecycle lock across processes (voice server and gateway).
 
         Bind, end and take each read the binding and then act on it; under one exclusive `flock` per thread key a
         stale call's end can never delete a newer call's binding, and the gateway can never store input for a
-        binding that ends (and flushes) in between. The lock file itself is never removed."""
+        binding that ends (and flushes) in between. With `wait_s` the lock is tried without blocking until that
+        deadline and `Busy` is raised, so the gateway never stalls on a slow voice server. The file stays."""
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd = os.open(self.root / f"lock-{_digest(key)}", os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            if wait_s is None:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            else:
+                deadline = time.monotonic() + wait_s
+                while True:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            raise Busy(key) from None
+                        time.sleep(0.01)
             yield
         finally:
             os.close(fd)  # closing releases the flock
+
+    # Launch handles ----------------------------------------------------------------------------------------------
+    def publish(self, url, profile, bot_id, users):
+        """Where the voice server serves the Mini App, for the gateway's /talk handler (same HERMES_HOME)."""
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        _write(self.root / "launch.json", {"url": url, "profile": profile, "bot_id": str(bot_id),
+                                           "users": sorted(int(u) for u in users)})
+
+    def published(self):
+        try:
+            data = json.loads((self.root / "launch.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) and isinstance(data.get("url"), str) else None
+
+    def _launch_path(self, handle):
+        return self.root / f"launch-{_digest('launch:' + handle)}.json"
+
+    def issue_launch(self, thread, ttl_s=LAUNCH_TTL_S):
+        """A fresh single-launch handle for `thread`, written by the gateway when `/talk` arrives in that thread."""
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        cutoff = self.clock() - DONE_KEEP_S
+        for path in self.root.glob("launch-*.json"):
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+            except OSError:
+                pass
+        handle = secrets.token_urlsafe(24)
+        _write_new(self._launch_path(handle), {**asdict(thread), "key": thread.key, "issued_at": self.clock(),
+                                               "expires_at": self.clock() + ttl_s, "claimed_by": None})
+        return handle
+
+    def claim_launch(self, handle, user_id, profile, bot_id, launch_id, peek=False):
+        """(Thread, "bound") if `handle` names this profile, bot and user and is unclaimed and fresh, or was claimed
+        by this same Telegram launch (a reconnect of the same page); else (None, reason). `peek` claims nothing."""
+        if not isinstance(handle, str) or HANDLE.fullmatch(handle) is None or not launch_id:
+            return None, "invalid"
+        path = self._launch_path(handle)
+        with self.locked("launch:" + handle):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return None, "invalid"
+            if (data.get("profile") != profile or data.get("bot_id") != str(bot_id)
+                    or data.get("user_id") != int(user_id)):
+                return None, "foreign"
+            claimed = data.get("claimed_by")
+            launch = hashlib.sha256(launch_id.encode()).hexdigest()
+            if claimed is None and not data.get("expires_at", 0) > self.clock():
+                return None, "expired"
+            if claimed is not None and claimed != launch:
+                return None, "used"
+            if claimed is None and not peek:
+                _write(path, {**data, "claimed_by": launch, "claimed_at": self.clock()})
+            return Thread(data["profile"], data["bot_id"], data["user_id"], data["chat_id"],
+                          data.get("thread_id")), "bound"
 
     # Voice-server side ------------------------------------------------------------------------------------------
     def bind(self, thread, conversation_id, voice_session_id, ttl_s):
@@ -199,7 +279,7 @@ class ThreadInbox:
             except (OSError, ValueError):
                 continue
             if isinstance(item, dict) and item.get("key") == key:
-                out.append(((int(match.group(1)), match.group(2) or "", name), name, item))
+                out.append(((int(match.group(1)), match.group(2) or "", bool(match.group(3)), name), name, item))
         return [(name, item) for _, name, item in sorted(out)]
 
     def settle(self, key, name):
@@ -216,7 +296,8 @@ class ThreadInbox:
     def offer(self, thread_key, item):
         """Store one taken input once; True if stored now or already stored, False if the inbox is full."""
         folder = self._inbox(thread_key)
-        name = f"m{item['message_id']}" + (f"-e{item['revision']}" if item.get("revision") else "") + ".json"
+        name = (f"m{item['message_id']}" + (f"-e{item['revision']}" if item.get("revision") else "")
+                + ("-a" if item.get("kind") == "analysis" else "") + ".json")
         if (folder / name).exists() or (folder / name).with_suffix(".done").exists():
             return True
         if len(self.pending(thread_key)) >= PENDING_MAX:
@@ -326,8 +407,11 @@ def take_event(event, home, clock=time.time):
     inbox = ThreadInbox(home, clock)
     if not inbox.root.is_dir():
         return None  # no call of this profile ever bound a thread
-    with inbox.locked(key):
-        return _take_locked(inbox, key, event, user_id, chat_id, message_id, message_type, text, clock, home)
+    try:
+        with inbox.locked(key, wait_s=LOCK_WAIT_S):
+            return _take_locked(inbox, key, event, user_id, chat_id, message_id, message_type, text, clock, home)
+    except Busy:
+        return None  # the voice server holds this thread right now; Hermes handles the message as usual
 
 
 def _take_locked(inbox, key, event, user_id, chat_id, message_id, message_type, text, clock, home):
@@ -361,14 +445,22 @@ def _take_locked(inbox, key, event, user_id, chat_id, message_id, message_type, 
         record = {**item, "kind": details[0][0] if len(details) == 1 else "album", "taken": take,
                   "caption": caption[:CAPTION_CHARS],
                   "attachments": [dict(d, kind=k) for k, _, d in details]}
+        if not take:  # the chat agent gets these exact cached files; its reply is matched back by them
+            record["paths"] = sorted({str(x) for m in media if (real := _confined(m, home)) is not None
+                                      for x in (m, real)})
         stored = inbox.offer(key, record)
         return {"action": "skip", "reason": "hermes-talk live call"} if take and stored else None
     except OSError:
         return None  # the call never saw it; Hermes handles it as usual
 
 
-def gateway_hook(event=None, **_):
+SESSION_STORE = []  # the gateway's own SessionStore, as handed to pre_gateway_dispatch; read by post_llm_call
+
+
+def gateway_hook(event=None, session_store=None, **_):
     """`pre_gateway_dispatch` callback (registered in `__init__.register`)."""
+    if session_store is not None and not (SESSION_STORE and SESSION_STORE[0] is session_store):
+        SESSION_STORE[:] = [session_store]
     try:
         from hermes_constants import get_hermes_home
         home = get_hermes_home()
@@ -386,13 +478,19 @@ def gateway_hook(event=None, **_):
 
 def receipt(item):
     revision = f":e{item['revision']}" if item.get("revision") else ""
-    return f"talk:chat:{item['key']}:{item['message_id']}{revision}"
+    analysis = ":analysis" if item.get("kind") == "analysis" else ""
+    return f"talk:chat:{item['key']}:{item['message_id']}{revision}{analysis}"
 
 
 def item_line(handle, item):
     """One context line for the voice model. Never claims the model saw bytes it did not get."""
     when = time.strftime("%H:%M", time.gmtime(item.get("at") or 0))
     edited = " (edited message)" if item.get("revision") else ""
+    if item.get("kind") == "analysis":
+        clip = " (shortened)" if item.get("clipped") else ""
+        return (f"- {handle} the chat agent of this thread replied at {when} UTC about the {item['about']} the user "
+                f"sent there (message {item['message_id']}){clip}. You did not see it yourself; you may relay this "
+                f"reply as the chat agent's: {item['text']}")
     if item.get("kind") == "text" and item.get("taken"):
         return f"- {handle} text{edited} at {when} UTC: {item['text']}"
     if item.get("kind") == "text":
@@ -422,8 +520,9 @@ def item_line(handle, item):
 
 def history_text(item):
     """What the conversation keeps: the same truthful line, marked as chat input, never fake model turns."""
-    return "[Telegram chat input during the call] " + item_line("", item)[3:].strip()
+    mark = "chat agent reply" if item.get("kind") == "analysis" else "chat input"
+    return f"[Telegram {mark} during the call] " + item_line("", item)[3:].strip()
 
 
-__all__ = ["Thread", "ThreadInbox", "launch_thread", "take_event", "gateway_hook", "item_line", "history_text",
+__all__ = ["Busy", "Thread", "ThreadInbox", "launch_thread", "take_event", "gateway_hook", "item_line", "history_text",
            "receipt", "describe_attachment"]

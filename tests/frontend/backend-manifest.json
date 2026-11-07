@@ -1,7 +1,7 @@
 {
   "source": "hermes-telegram-talk: native task backend, receipts, mobile/rename integration and Pulse; exact tested bytes",
   "files": {
-    "INTERFACE.md": "377cc326cb888522476bd41aff410901c5808ce52eb4dd02a2a4038ea6a1feae",
+    "INTERFACE.md": "84df48a5c9aa6f6738f33b8e973f3c8d425a934802f3f2d2f03f94354fc712e4",
     "LICENSES/CONDUIT-LICENSE": "0d4605059a86488f24fae7601a404abe36d305d6b56d7f5e01225507c8c8e3b0",
     "hermes_talk/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "hermes_talk/activity.py": "cc447623de468bd5fbab44638b039c5cc21957dba6fd017b8b2c1ee2a4da86be",
@@ -16,7 +16,7 @@
     "hermes_talk/spool.py": "b947b9655ebba380738007be1c35f4c2c3ab3b6757bb4d3a72330bf001128057",
     "hermes_talk/store.py": "57e9789634a52211c09e0e9e6b104a197a0be143c098f146a6acb2179183f98f",
     "hermes_talk/talk.py": "c8c2684edc9aed0c7bd517e1fe8eb5d96a9d663709552a1e432607c861acbf50",
-    "server.py": "f92a0983f60e2a8c9aa38476c9584fb04d1e91172cabe91a71cb6eb813aaa806",
+    "server.py": "afbf11f48dbbc3cfaa537de2b79847db2e1f807ed1ae2c51f5ae88c16df5e22e",
     "hermes_talk/gateway_rpc.py": "cb613445c7a6b1cc0101b35449c4153e1f59c462c1f23863cccd25b7af9f937a",
     "hermes_talk/pulse.py": "eb1f8c7f96970e2bf5af5052c61339b667e3186240fafa7ba07ceff5fc73fb0c",
     "hermes_talk/pulse_ledger.py": "c4bcc4ae8fd803ce6f86858b80b856dccbbec6f1de5df890b9a4c47dce5ac3ba",
@@ -29,6 +29,7 @@
     "hermes_talk/pulse_prefs.py": "e48486c2132201ef72638cb1647b70d769b7081557ff5a09b72cb4f7c7bf3459",
     "hermes_talk/pulse_policy.py": "74b648b1611dbdb116150c14c986086b41b94b504d02de69482e11cb09ae371a",
     "hermes_talk/pulse_claims.py": "17afaf854c415f6eac83c8bac30ef16378d50906a092a42e3d1ea7986eb30499",
-    "hermes_talk/thread_inbox.py": "53c4f6c5458ac5a5bcbc7969e60963522e6b5ebaae609947d68c2ca03dc46507"
+    "hermes_talk/thread_inbox.py": "26f1c27c0f6695bdb068035955b22e25ee8dfddd56ba1c923efb07a99a0130a4",
+    "hermes_talk/thread_gateway.py": "0e3fc9aced14d01120e4844fdbedf9c6d9917cf190ecd80dbdd757dcbc9dc2f8"
   }
 }

@@ -116,12 +116,135 @@ class Producer:
         return event
 
 
+STORES = {}
+
+
+def session_store(home):
+    """The profile gateway's own SessionStore (real class, disposable sessions dir in that home)."""
+    if str(home) not in STORES:
+        from gateway.config import GatewayConfig
+        from gateway.session import SessionStore
+        STORES[str(home)] = SessionStore(Path(home) / "sessions", GatewayConfig())
+    return STORES[str(home)]
+
+
+class HostExtras:
+    """`/talk` through a real PTB Application wired by the Telegram adapter, and chat-agent turns finished by
+    Hermes' own turn finalizer, so post_llm_call reaches the plugin through the registered hook."""
+
+    def __init__(self, loop):
+        self.loop = loop
+
+    def _with_home(self, home, fn):
+        previous = os.environ.get("HERMES_HOME")
+        load_plugin(home)
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+        token = set_hermes_home_override(home)
+        try:
+            return fn()
+        finally:
+            reset_hermes_home_override(token)
+            if previous is None:
+                os.environ.pop("HERMES_HOME", None)
+            else:
+                os.environ["HERMES_HOME"] = previous
+
+    def talk_command(self, home, user_id, chat_id=None, chat_type="private", thread_id=None, bot_id=None):
+        import json
+        from checks import BOT_ID
+        from gateway.config import PlatformConfig
+        from plugins.platforms.telegram.adapter import TelegramAdapter
+        from telegram import Bot, Update
+        from telegram.ext import ApplicationBuilder
+        from telegram.request import BaseRequest
+        bot_id = int(bot_id or BOT_ID)
+        sent = []
+
+        class Capture(BaseRequest):  # the disposable sender: Bot API calls are recorded, nothing leaves the host
+            async def initialize(self):
+                pass
+
+            async def shutdown(self):
+                pass
+
+            @property
+            def read_timeout(self):
+                return 1.0
+
+            async def do_request(self, url, method, request_data=None, **_):
+                name = url.rsplit("/", 1)[-1]
+                params = dict(request_data.parameters) if request_data is not None else {}
+                if name == "getMe":
+                    result = {"id": bot_id, "is_bot": True, "first_name": "Synthetic bot", "username": "synthetic_bot"}
+                else:
+                    sent.append(params)
+                    result = {"message_id": 9000 + len(sent), "date": 1_900_000_000, "text": params.get("text", ""),
+                              "chat": {"id": int(params["chat_id"]), "type": "private"}}
+                return 200, json.dumps({"ok": True, "result": result}).encode()
+
+        def run():
+            adapter = TelegramAdapter(PlatformConfig(enabled=True, token=f"{bot_id}:synthetic-offline-bot-token"))
+            core = []
+
+            async def core_command(update, context):
+                core.append(update.effective_message.text)
+            adapter._handle_command = core_command
+            app = (ApplicationBuilder().bot(Bot(f"{bot_id}:synthetic-offline-bot-token", request=Capture()))
+                   .updater(None).build())
+            adapter._wire_plugin_handlers(app)  # what connect() does before registering the core handlers
+            adapter._register_handlers(app)
+            chat = {"id": int(chat_id or user_id), "type": chat_type}
+            if chat_type != "private":
+                chat["title"] = "Synthetic group"
+            data = {"update_id": 1, "message": {"message_id": 70, "date": 1_900_000_000, "chat": chat, "text": "/talk",
+                                                "from": {"id": int(user_id), "is_bot": False, "first_name": "Test"},
+                                                "entities": [{"type": "bot_command", "offset": 0, "length": 5}]}}
+            if thread_id is not None:
+                data["message"].update(message_thread_id=int(thread_id), is_topic_message=True)
+
+            async def go():
+                await app.initialize()
+                await app.process_update(Update.de_json(data, app.bot))
+                await app.shutdown()
+            self.loop.run_until_complete(go())
+            assert core == [], "the core command handler must not also answer /talk"
+        self._with_home(home, run)
+        out = []
+        for params in sent:
+            markup = params.get("reply_markup")
+            markup = json.loads(markup) if isinstance(markup, str) else markup
+            url = markup["inline_keyboard"][0][0]["web_app"]["url"] if markup else None
+            thread = params.get("message_thread_id")
+            out.append({"chat_id": int(params["chat_id"]), "text": params["text"], "url": url,
+                        "message_thread_id": int(thread) if thread is not None else None})
+        return out
+
+    def payload(self, caption, paths):
+        from agent.image_routing import build_native_content_parts
+        parts, skipped = build_native_content_parts(caption, list(paths))
+        assert not skipped, skipped
+        return parts
+
+    def finalize(self, home, event, user_message, response, turn_id):
+        import logging
+        from types import SimpleNamespace
+        from agent.turn_finalizer import _apply_output_hooks
+        entry = session_store(home).get_or_create_session(event.source)
+        agent = SimpleNamespace(session_id=entry.session_id, model="synthetic-scripted-model", platform="telegram",
+                                _persist_disabled=False)
+        self._with_home(home, lambda: _apply_output_hooks(
+            agent, response, logging.getLogger("talk-thread-host"), platform="telegram",
+            effective_task_id=entry.session_id, turn_id=turn_id, original_user_message=user_message,
+            messages=[{"role": "user", "content": user_message}, {"role": "assistant", "content": response}]))
+
+
 def make_dispatch(loop):
     from gateway.run import GatewayRunner
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
     runner = object.__new__(GatewayRunner)  # bare runner, as the SDK's own dispatch tests build it
 
     def dispatch(home, event):
+        runner.session_store = session_store(home)  # the profile gateway hands its own store to the hook
         # A profile's gateway runs with HERMES_HOME set to that profile's home; the hook resolves it the same way.
         previous = os.environ.get("HERMES_HOME")
         load_plugin(home)
@@ -157,7 +280,7 @@ def main():
         from hermes_talk.history import NativeHistory
         producer = Producer()
         dispatch = make_dispatch(producer.loop)
-        results = checks.run(lambda home: NativeHistory(home), producer, dispatch, print)
+        results = checks.run(lambda home: NativeHistory(home), producer, dispatch, print, HostExtras(producer.loop))
         failed = [r for r in results if not r[1]]
         print(f"host stage: {len(results) - len(failed)}/{len(results)} checks passed")
         return 1 if failed else 0

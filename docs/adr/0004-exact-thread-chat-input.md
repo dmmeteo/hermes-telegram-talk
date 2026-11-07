@@ -59,5 +59,23 @@ conversation returns the earlier conversation's unheard input, which is then kep
 An oversized leading chat input is carried clipped with an explicit "N more characters were not carried" note,
 so it cannot starve later messages. Regressions with deterministic interleaving are in `tests/thread/checks.py`.
 
-Not resolved here: an ordinary menu launch inside a private-chat topic carries no signed topic, so it still binds
-the main chat lane (see the task report); the Mini App does not yet show a visible "unbound" state.
+Resolved by the second amendment below: launches bind only through a `/talk` handle and unbound ones say so.
+
+## Amendment 2026-11-07 (second): /talk launch handles and the chat agent's reply in the call
+
+Supersedes the `start_param=topic<id>` and bare-menu binding above. Telegram signs no chat or topic for a private-chat
+launch, and a signed `start_param` only proves which link was opened, not where. The thread now comes from the
+gateway, which does see it:
+
+| Question | Decision | Why |
+| --- | --- | --- |
+| Who proves the thread? | `/talk` through `register_telegram_handler` (PTB `CommandHandler`, hoisted ahead of the core command handler by the adapter). It stores a random launch handle for (profile, bot, user, chat, topic) and answers in that chat and topic with a web_app button to the published Mini App URL plus `?launch=<handle>` | Public plugin interface, no BotFather Main Mini App needed, no core or stock-adapter edit |
+| Forged, foreign, replayed | Unknown handle: `invalid`. Another profile, bot or signed user: `foreign`. Unclaimed after 10 minutes: `expired`. Claimed by the first Telegram launch (its initData hash); the same page may reconnect, any other launch gets `used` | A handle alone is worthless without the signed user it names |
+| Ambiguous launches | Unbound, visibly ("Not linked to a chat. Send /talk there to link it.") | No silent main-chat fallback |
+| Photos and files in the call | The chat agent keeps the real multimodal path. `post_llm_call` (fired once per finished turn by `agent/turn_finalizer.py`) matches the turn to the exact cached file the pre-dispatch hook recorded, checks the session's origin through the `SessionStore` the gateway hands to `pre_gateway_dispatch`, and stores the reply once (`m<id>-a`) for the same live conversation | Existing authorized chat agent, no new model route; attribution by unguessable cache path, origin and live binding |
+| Gateway lock contention | The gateway tries the thread lock for at most 0.5 s, then lets the message go to Hermes | One slow SessionDB write must not stall every chat |
+
+Verified in `tests/thread/checks.py` (memory and host stages): real PTB `Application.process_update` with a recording
+request transport, the real `_apply_output_hooks` reaching the registered hook, the real `SessionStore`, and
+`build_native_content_parts` carrying the exact image bytes. Not verified: a real Telegram client opening the button,
+the real chat agent's model output, and whether an operator restart registers `/talk` in the bot menu.

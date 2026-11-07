@@ -47,11 +47,33 @@ def _chat_input(event=None, **kwargs):
     return gateway_hook(event=event, **kwargs)
 
 
+def _chat_reply(**kwargs):
+    """`post_llm_call`: give a live call the chat agent's reply about a photo or file of the call's own thread."""
+    if str(PLUGIN_DIR) not in sys.path:
+        sys.path.insert(0, str(PLUGIN_DIR))
+    try:
+        from hermes_talk.thread_gateway import chat_reply
+        chat_reply(**kwargs)
+    except Exception:  # never disturb the chat agent's turn
+        pass
+
+
+def _talk_command(native, adapter=None):
+    """Telegram `/talk`: offer the Mini App bound to the private chat and topic the command came from."""
+    if str(PLUGIN_DIR) not in sys.path:
+        sys.path.insert(0, str(PLUGIN_DIR))
+    from hermes_talk.thread_gateway import telegram_handlers
+    telegram_handlers(native, adapter)
+
+
 def register(ctx):
     ctx.register_cli_command("talk", "Hermes Telegram Talk voice server", _setup, _run, description=__doc__)
     # In the profile's gateway this sees each inbound message before dispatch; it takes only messages of a live
     # call's own bot, chat, topic and user (see hermes_talk/thread_inbox.py) and passes everything else unchanged.
     ctx.register_hook("pre_gateway_dispatch", _chat_input)
+    ctx.register_hook("post_llm_call", _chat_reply)
+    if hasattr(ctx, "register_telegram_handler"):
+        ctx.register_telegram_handler(_talk_command)
     try:
         _bind_model(ctx)
     except Exception:  # Pulse then degrades to deterministic decisions; the CLI command still registers

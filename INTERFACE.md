@@ -75,9 +75,14 @@ These notes are backend-owned and add no field. Changing or removing a field abo
 
 ## Exact-thread chat input and reply voice (additive; the shapes above are unchanged)
 
-- A call continues the Telegram conversation its signed launch proves: the user's private chat with this bot
-  (initData without `chat_type`, or `chat_type=sender`), optionally a topic of it through `start_param=topic<id>`.
-  Other launches bind nothing. The browser never sends a chat or topic id; any extra field still answers 400.
+- A call continues only the Telegram conversation a `/talk` launch handle proves (issued by the profile's gateway
+  in that private chat or topic). `api/session` and `api/voice` accept an optional `launch` string (the handle from
+  the web_app button URL's `launch` query parameter); a signed `start_param` may carry the same handle. Without a
+  valid handle the call is unbound and takes no chat input. The browser never sends a chat or topic id; any other
+  extra field still answers 400.
+- `api/voice` responses add `thread:{status}`: `bound`, `unbound` (no handle), `expired`, `used` (claimed by another
+  launch), `invalid`, `foreign` (another profile, bot or user), `not_private` or `unavailable`. Reading it claims
+  nothing.
 - `api/context` responses add `sources.inputs` (chat inputs carried whole) only when an update carries chat input. Their text adds a `## Chat input` section
   with lines `- C<n> ...` for text and files the user sent in that exact thread during the call, oldest first, and
   truthful notes for what the voice cannot use (photos, unsupported, oversized or unreadable files). The same

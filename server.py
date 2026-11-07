@@ -45,7 +45,7 @@ TALK_LIMITS = {"bootstrap": 30, "new": 10, "events": 120, "end": 30, "task": 20,
                "task/ack": 60, "context": 30, "context/ack": 30, "pulse/feedback": 30, "voice": 20}
 CALL = {"initData", "conversation_id", "voice_session_id"}
 TALK_ROUTES = {"bootstrap": ({"initData"}, set()),
-               "session": ({"initData", "sdp"}, {"conversation_id"}),
+               "session": ({"initData", "sdp"}, {"conversation_id", "launch"}),
                "events": (CALL | {"events"}, set()),
                "end": (CALL, {"readiness"}),
                "new": ({"initData", "conversation_id"}, set()),
@@ -56,7 +56,7 @@ TALK_ROUTES = {"bootstrap": ({"initData"}, set()),
                "context": (CALL, set()),
                "context/ack": (CALL | {"revision"}, set()),
                "pulse/feedback": (CALL | {"delegation_item_id", "request"}, set()),
-               "voice": ({"initData"}, {"voice"})}
+               "voice": ({"initData"}, {"voice", "launch"})}
 READINESS_STAGES = ("bootstrap", "microphone", "offer", "session", "remote", "handshake", "channel", "peer",
                     "playing", "audio", "usable", "greeting", "greeting_done", "ready")
 READINESS_FAILURES = re.compile(r"(?:connect|greeting):[a-z_]{1,24}|none")
@@ -226,6 +226,8 @@ class VoiceApp:
         self.active = threading.BoundedSemaphore(MAX_ACTIVE_EXCHANGES)
         # Without a Talk runtime the server is the original voice test: one route, fixed persona.
         self.talk = talk
+        if talk is not None and talk.inbox is not None:  # where `/talk` in the gateway points its button
+            talk.inbox.publish(self.origin + base_path, talk.config.profile_id, talk.bot_id, self.allowed_ids)
         self.talk_limiters = {route: MintLimiter(limit, MINT_WINDOW_S, clock) for route, limit in TALK_LIMITS.items()}
 
     @property
@@ -289,7 +291,8 @@ class VoiceApp:
             if route == "context":
                 return self.talk.context(user_id, body["conversation_id"], body["voice_session_id"])
             if route == "voice":
-                return self.talk.set_voice(user_id, body.get("voice"))
+                _, status = self._thread(body, user_id, peek=True)
+                return {**self.talk.set_voice(user_id, body.get("voice")), "thread": {"status": status}}
             if route == "pulse/feedback":
                 return self.talk.pulse_feedback(user_id, body["conversation_id"], body["voice_session_id"],
                                                 body["delegation_item_id"], body["request"])
@@ -318,9 +321,8 @@ class VoiceApp:
             except TalkError as exc:
                 raise ApiError(exc.status, exc.message)
             answer = self._exchange(sdp, self.talk.session_config(instructions, user_id))
-            # The call continues the Telegram chat (and topic) its signed launch proves; never a guessed or last one.
-            thread = launch_thread(init_data_fields(body["initData"]), user_id, self.talk.config.profile_id,
-                                   self.talk.bot_id)
+            # The call continues only the Telegram chat (and topic) its /talk launch handle proves; never a guessed one.
+            thread, _ = self._thread(body, user_id)
             try:
                 voice_session_id = self.talk.started(user_id, conversation_id, cards, report["job_ids"],
                                                      report["job_numbers"], thread)
@@ -330,6 +332,13 @@ class VoiceApp:
                     "conversation_id": conversation_id}
         finally:
             self.active.release()
+
+    def _thread(self, body, user_id, peek=False):
+        launch = body.get("launch")
+        if launch is not None and not isinstance(launch, str):
+            raise ApiError(400, "Malformed launch.")
+        return launch_thread(init_data_fields(body["initData"]), user_id, self.talk.config.profile_id,
+                             self.talk.bot_id, self.talk.inbox, launch, peek=peek)
 
     def _exchange(self, sdp, session):
         try:
