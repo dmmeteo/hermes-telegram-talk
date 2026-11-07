@@ -23,6 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from hermes_talk.store import TalkError
+from hermes_talk.thread_inbox import launch_thread
 
 logger = logging.getLogger("tg-voice")
 
@@ -41,7 +42,7 @@ MINT_LIMIT = 6
 MINT_WINDOW_S = 60.0
 MAX_ACTIVE_EXCHANGES = 2
 TALK_LIMITS = {"bootstrap": 30, "new": 10, "events": 120, "end": 30, "task": 20, "tasks": 240, "task/cancel": 20,
-               "task/ack": 60, "context": 30, "context/ack": 30, "pulse/feedback": 30}
+               "task/ack": 60, "context": 30, "context/ack": 30, "pulse/feedback": 30, "voice": 20}
 CALL = {"initData", "conversation_id", "voice_session_id"}
 TALK_ROUTES = {"bootstrap": ({"initData"}, set()),
                "session": ({"initData", "sdp"}, {"conversation_id"}),
@@ -54,7 +55,8 @@ TALK_ROUTES = {"bootstrap": ({"initData"}, set()),
                "task/ack": (CALL | {"job_id"}, set()),
                "context": (CALL, set()),
                "context/ack": (CALL | {"revision"}, set()),
-               "pulse/feedback": (CALL | {"delegation_item_id", "request"}, set())}
+               "pulse/feedback": (CALL | {"delegation_item_id", "request"}, set()),
+               "voice": ({"initData"}, {"voice"})}
 READINESS_STAGES = ("bootstrap", "microphone", "offer", "session", "remote", "handshake", "channel", "peer",
                     "playing", "audio", "usable", "greeting", "greeting_done", "ready")
 READINESS_FAILURES = re.compile(r"(?:connect|greeting):[a-z_]{1,24}|none")
@@ -153,6 +155,11 @@ def hermes_codex_credentials():
 def session_config():
     return {"model": GPT_LIVE_MODEL, "instructions": PERSONA,
             "audio": {"output": {"voice": GPT_LIVE_VOICE}}, "delegation": {"type": "client"}}
+
+
+def init_data_fields(init_data):
+    """The launch fields of initData that verify_init_data already accepted (signed by Telegram)."""
+    return dict(urllib.parse.parse_qsl(init_data, keep_blank_values=True, strict_parsing=True))
 
 
 def verify_init_data(init_data, bot_token, now):
@@ -281,6 +288,8 @@ class VoiceApp:
                 return self.talk.ack(user_id, body["conversation_id"], body["voice_session_id"], body["job_id"])
             if route == "context":
                 return self.talk.context(user_id, body["conversation_id"], body["voice_session_id"])
+            if route == "voice":
+                return self.talk.set_voice(user_id, body.get("voice"))
             if route == "pulse/feedback":
                 return self.talk.pulse_feedback(user_id, body["conversation_id"], body["voice_session_id"],
                                                 body["delegation_item_id"], body["request"])
@@ -308,10 +317,13 @@ class VoiceApp:
                 conversation_id, instructions, cards, report = self.talk.prepare(user_id, body.get("conversation_id"))
             except TalkError as exc:
                 raise ApiError(exc.status, exc.message)
-            answer = self._exchange(sdp, self.talk.session_config(instructions))
+            answer = self._exchange(sdp, self.talk.session_config(instructions, user_id))
+            # The call continues the Telegram chat (and topic) its signed launch proves; never a guessed or last one.
+            thread = launch_thread(init_data_fields(body["initData"]), user_id, self.talk.config.profile_id,
+                                   self.talk.bot_id)
             try:
                 voice_session_id = self.talk.started(user_id, conversation_id, cards, report["job_ids"],
-                                                     report["job_numbers"])
+                                                     report["job_numbers"], thread)
             except TalkError as exc:  # e.g. api/new rebound the conversation during the exchange
                 raise ApiError(exc.status, exc.message)
             return {"sdp": answer, "type": "answer", "voice_session_id": voice_session_id,

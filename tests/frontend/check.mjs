@@ -139,6 +139,39 @@ test('authentication refusal discards pending events',async()=>{
  await f.run('realFlush(owner)');assert.equal(f.run('owner.pending.length'),0);
  assert.equal(f.run('owner.disabled'),true);
 });
+test('transcript shows interim text, replaces it with the final correction and shows a turn once',()=>{
+ const f=fixture();f.run(`emit({type:'input_transcript.added',item:{text:'Synthetic par'}});
+ emit({type:'input_transcript.added',item:{text:'tial'}});`);
+ assert.equal(f.run('JSON.stringify(transcript.lines)'),JSON.stringify([{role:'user',text:'Synthetic partial',state:'interim'}]));
+ f.run(`emit({type:'turn.done',turn:{id:'u1',role:'user',transcript:'Synthetic corrected final'}});
+ emit({type:'turn.done',turn:{id:'u1',role:'user',transcript:'Synthetic corrected final'}});`);
+ assert.equal(f.run('JSON.stringify(transcript.lines)'),JSON.stringify([{role:'user',text:'Synthetic corrected final',state:'final'}]));
+ assert.equal(f.run('sent.length'),0,'the transcript is display only: nothing is sent for it');
+});
+test('transcript marks an assistant reply the user spoke over and cuts unsettled lines on reconnect',()=>{
+ const f=fixture();f.run(`emit({type:'output_transcript.added',item:{text:'Synthetic long answer '}});
+ emit({type:'input_transcript.added',item:{text:'wait'}});
+ emit({type:'turn.done',turn:{id:'a1',role:'assistant',transcript:'Synthetic long answer'}});
+ emit({type:'output_transcript.added',item:{text:'Half a sentence'}});`);
+ assert.deepEqual(JSON.parse(f.run('JSON.stringify(transcript.lines.map(l=>[l.role,l.state]))')),[['assistant','interrupted'],['user','interim'],['assistant','interim']]);
+ f.run('transcriptCut()');
+ assert.deepEqual(JSON.parse(f.run('JSON.stringify(transcript.lines.map(l=>[l.role,l.state,l.text]))')),[['assistant','interrupted','Synthetic long answer'],['user','cut','wait'],['assistant','cut','Half a sentence']]);
+ assert.equal(f.run('owner.pending.some(e=>e.event.text==="Half a sentence")'),false,'unsettled text is never saved');
+});
+test('reply voice: hidden for one voice, a live change asks for an explicit reconnect',async()=>{
+ const f=fixture();
+ f.run(`voiceState={current:'cove',default:'cove',choices:[{id:'cove',label:'Cove'}],applies:'next_connection'};current.voice='cove';renderVoice(current);`);
+ assert.equal(f.nodes.get('voice-box').hidden,true);
+ f.run(`voiceState={current:'cove',default:'cove',choices:[{id:'cove',label:'Cove'},{id:'marin',label:'Marin'}],applies:'next_connection'};renderVoice(current);`);
+ assert.equal(f.nodes.get('voice-box').hidden,false);assert.equal(f.nodes.get('reconnect').hidden,true);
+ f.run(`globalThis.posted=[];post=async(route,body)=>{posted.push([route,body]);return {voice:{...voiceState,current:body.voice}};};
+ document.getElementById('voice').value='marin';`);
+ await f.run('chooseVoice()');
+ assert.equal(f.run('JSON.stringify(posted)'),JSON.stringify([['voice',{initData:'synthetic',voice:'marin'}]]));
+ assert.equal(f.nodes.get('reconnect').hidden,false,'the live call keeps its voice until an explicit reconnect');
+ assert.equal(f.nodes.get('voice-note').hidden,false);
+ assert.equal(f.run('call===current'),true,'choosing a voice never drops the call by itself');
+});
 let failed=0;
 for(const {name,run} of tests){try{await run();console.log('PASS',name);}catch(e){failed++;console.error('FAIL',name,e.message);}}
 console.log(`${tests.length-failed}/${tests.length} Talk frontend checks passed`);

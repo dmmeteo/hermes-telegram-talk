@@ -15,13 +15,14 @@ from . import activity, pulse, pulse_policy
 from .agent import Readiness
 from .gateway_rpc import task_agent
 from .config import PRIVATE_NAMES
-from .context import compose, update
+from .context import UPDATE_HEADER, chat_section, compose, update
 from .jobs import DELEGATION_ID, OPEN, SUCCEEDED, UNDELIVERED, JobBoard
 from .pulse_engine import SELECT_ON_CALL_S, PulseEngine
 from .pulse_ledger import PulseLedger
 from .pulse_model import PulseModel
 from .receipts import DIRECTIVE, SINCE_KEY, Destination, ReportDesk, TelegramSender
 from .store import SOURCE, TalkError, TalkStore, VoiceScope, clip
+from .thread_inbox import ThreadInbox, history_text, item_line, receipt
 
 logger = logging.getLogger("tg-voice")
 
@@ -35,6 +36,7 @@ CANCEL = re.compile(r"(?i)^\s*(?:please\s+)?(?:cancel|stop)\s+(?:hermes\s+)?task
 RESULT = re.compile(r"(?i)^\s*(?:the\s+)?(?:full\s+)?result\s+of\s+(?:hermes\s+)?task\s*#?\s*(\d{1,4})\s*[.!?]?\s*$")
 
 SYNOPSIS_CHARS = 160
+CHAT_CHARS = 8000  # chat input carried by one context update; the rest follows in the next one
 TASK_PROMPT = (
     "[Hermes Telegram Talk voice task {number}. It was delegated from a Telegram voice call and nobody watches this run "
     "live. Use your tools as needed. Nobody can approve a flagged action during this run: if one is blocked, say "
@@ -86,6 +88,9 @@ class TalkRuntime:
         self.skill = skill
         self.clock = clock
         self._last_greeting = {}
+        # Chat input from the exact Telegram thread a call continues (see thread_inbox.py); needs the profile home.
+        self.inbox = ThreadInbox(home, clock) if home is not None else None
+        self._threads = {}
         self.board = self.desk = None
         if config.tasks.enabled:
             self.agent = agent or task_agent(config.tasks, home)
@@ -279,9 +284,32 @@ class TalkRuntime:
         self._last_greeting[account.key] = line
         return line
 
-    def session_config(self, instructions):
+    def _voice_key(self, user_id):
+        return f"hermes_talk:voice:{self.account(user_id).key}"
+
+    def reply_voice(self, user_id):
+        """The account's chosen reply voice if the config still offers it, else the profile default."""
+        chosen = self.history.get_meta(self._voice_key(user_id)) if user_id is not None else None
+        return chosen if chosen in dict(self.config.voice_choices) else self.config.voice
+
+    def _voice_public(self, user_id):
+        return {"current": self.reply_voice(user_id), "default": self.config.voice,
+                "choices": [{"id": i, "label": label} for i, label in self.config.voice_choices],
+                "applies": "next_connection"}
+
+    def set_voice(self, user_id, voice=None):
+        """Read (voice None) or persist the reply voice for (profile, bot, user). It applies from the next connection:
+        the provider sets the voice when a session is created, so a live call keeps its voice until it reconnects."""
+        if voice is None:
+            return {"voice": self._voice_public(user_id)}
+        if not isinstance(voice, str) or voice not in dict(self.config.voice_choices):
+            raise TalkError(400, "That reply voice is not offered for this profile.")
+        self.history.set_meta(self._voice_key(user_id), voice)
+        return {"voice": self._voice_public(user_id)}
+
+    def session_config(self, instructions, user_id=None):
         return {"model": self.config.model, "instructions": instructions,
-                "audio": {"output": {"voice": self.config.voice}}, "delegation": {"type": "client"}}
+                "audio": {"output": {"voice": self.reply_voice(user_id)}}, "delegation": {"type": "client"}}
 
     def _job_numbers(self, account, conversation_id, job_ids):
         if self.board is None or not job_ids:
@@ -289,12 +317,35 @@ class TalkRuntime:
         wanted = set(job_ids)
         return {j.id: j.number for j in self.board.of_conversation(account.key, conversation_id) if j.id in wanted}
 
-    def started(self, user_id, conversation_id, cards, job_ids=(), job_numbers=None):
+    def started(self, user_id, conversation_id, cards, job_ids=(), job_numbers=None, thread=None):
         account = self.account(user_id)
         voice_session_id = self.store.start_voice_session(account, conversation_id, None, job_ids, job_numbers)
         if cards:
             self.pulse.exposed(account, voice_session_id, cards, "instructions", self.clock())
+        if thread is not None and self.inbox is not None and thread.user_id == user_id and thread.bot_id == self.bot_id:
+            self.inbox.bind(thread, conversation_id, voice_session_id, self.config.voice_session_ttl_s)
+            self._threads[voice_session_id] = thread
         return voice_session_id
+
+    def _chat_items(self, voice_session_id, conversation_id):
+        """Pending chat input of this call's exact thread and conversation: [(name, item)].
+
+        Input an earlier call of the same thread and conversation took but never delivered (a minimized page that
+        reconnected without api/end) belongs to this call too; another thread's or conversation's never does."""
+        thread = self._threads.get(voice_session_id)
+        if thread is None or self.inbox is None:
+            return thread, []
+        items = [(n, i) for n, i in self.inbox.pending(thread.key) if i.get("conversation_id") == conversation_id]
+        return thread, items
+
+    def _keep_chat(self, thread, conversation_id, items):
+        """Append delivered chat input to the conversation once (receipt-deduplicated), then settle it."""
+        for name, item in items:
+            mark = receipt(item)
+            if not self.history.has_receipt(conversation_id, mark):
+                self.history.append(conversation_id, [{"role": "user", "content": redact(history_text(item)),
+                                                        "platform_message_id": mark, "timestamp": self.clock()}])
+            self.inbox.settle(thread.key, name)
 
     def events(self, user_id, conversation_id, voice_session_id, events):
         b = self.config.budgets
@@ -339,6 +390,14 @@ class TalkRuntime:
 
     def end(self, user_id, conversation_id, voice_session_id):
         ended = self.store.end(self.account(user_id), conversation_id, voice_session_id)
+        thread, items = self._chat_items(voice_session_id, conversation_id)
+        if thread is not None:
+            owner = self.inbox.binding(thread.key)
+            if owner is None or owner.get("voice_session_id") == voice_session_id:
+                self.inbox.unbind(thread, voice_session_id)
+                self._keep_chat(thread, conversation_id, items)  # not heard in the call, but kept for the next one
+            # else a newer call of this thread is live and still gets them
+            self._threads.pop(voice_session_id, None)
         self.engine.poke(user_id)  # the call went quiet: read it for memory and run due follow-ups
         return ended
 
@@ -446,17 +505,25 @@ class TalkRuntime:
         revision = record.get("revision", 0) + 1
         text, job_ids, k = update(revision, items, lines, total, note, self.config.budgets.activity_chars
                                   + self.config.budgets.tasks_chars)
+        _, chat = self._chat_items(voice_session_id, conversation_id)
+        chat_text, n = chat_section([redact(item_line(f"C{i + 1}", item)) for i, (_, item) in enumerate(chat)],
+                                    CHAT_CHARS)
+        if chat_text:
+            text = (text + "\n\n" + chat_text) if text else UPDATE_HEADER.format(revision=revision) + chat_text
         if not text:
-            return {"revision": None, "text": "", "sources": {"jobs": 0, "activity": 0}}
+            return {"revision": None, "text": "", "sources": {"jobs": 0, "activity": 0, "inputs": 0}}
         revision = self.store.save_snapshot(account, conversation_id, voice_session_id,
-                                            [card["fp"] for card in cards[:k]], job_ids)
-        sources = {"jobs": len(job_ids), "activity": k}
+                                            [card["fp"] for card in cards[:k]], job_ids, [name for name, _ in chat[:n]])
+        sources = {"jobs": len(job_ids), "activity": k, "inputs": n}
         logger.info("context frame=session.context.append revision=%s sources=%s", revision, json.dumps(sources))
         return {"revision": revision, "text": text, "sources": sources}
 
     def context_ack(self, user_id, conversation_id, voice_session_id, revision):
         account = self.account(user_id)
-        job_ids, cards = self.store.ack_snapshot(account, conversation_id, voice_session_id, revision)
+        job_ids, cards, inputs = self.store.ack_snapshot(account, conversation_id, voice_session_id, revision)
+        thread, chat = self._chat_items(voice_session_id, conversation_id)
+        if inputs and thread is not None:
+            self._keep_chat(thread, conversation_id, [(n, i) for n, i in chat if n in set(inputs)])
         if cards:
             self.pulse.exposed(account, voice_session_id, cards, f"context:{revision}", self.clock())
         if job_ids and self.board is not None:

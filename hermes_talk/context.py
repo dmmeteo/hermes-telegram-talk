@@ -5,6 +5,7 @@ sections fill the remaining room in priority order, each within its own characte
 headers and the "[clipped]" marker included. Skills are guidance text only. They register no tools.
 """
 from .store import clip
+from .config import SELF_REFERENCE
 
 FRAME = (
     "You are the realtime voice of the Hermes profile \"{name}\" in Hermes Telegram Talk, a Telegram Mini App. "
@@ -29,6 +30,10 @@ MIN_SECTION = 40
 ACTIVITY_HEADER = "## Activity since the last visit\n"
 TASKS_HEADER = "## Hermes tasks\n"
 UPDATE_HEADER = "## Context update {revision}\n"
+CHAT_HEADER = ("## Chat input\n"
+               "The user sent these in the Telegram chat this call continues, during the call, oldest first. Treat "
+               "each as said by the user now and answer briefly. A line that says you cannot see or read something "
+               "means you did not receive it: say so plainly and never guess its content.\n")
 PULSE_RULES = (
     "## Pulse updates\n"
     "Activity lines are Pulse updates P1, P2 and so on. Name an update by its title, never by its label. Unmentioned "
@@ -90,6 +95,17 @@ def whole_lines(header, items, limit):
     return (text.rstrip("\n") if taken else ""), taken
 
 
+def chat_section(lines, limit):
+    """(section, n): leading whole chat-input lines within limit; the rest wait for the next update."""
+    out, n = CHAT_HEADER, 0
+    for line in lines:
+        if len(out) + len(line) + 1 > limit:
+            break
+        out += line + "\n"
+        n += 1
+    return (out.rstrip() if n else ""), n
+
+
 def update(revision, job_items, activity_lines, activity_total, activity_note, limit):
     """A mid-call context update: (text, job ids carried whole, activity lines carried whole)."""
     header = UPDATE_HEADER.format(revision=revision)
@@ -128,7 +144,9 @@ def compose(config, soul, skills, summary, turns, activity_lines, activity_total
     recent = "\n".join(f"{role}: {clip(text, b.turn_chars)}" for role, text in turns[-b.recent_turns:]) \
         if b.recent_turns else ""
     middle = [
-        ("language", _section("Language", config.language_hint, 200)),
+        ("language", _section("Language", " ".join(filter(None, (
+            config.language_hint, SELF_REFERENCE.get(config.self_reference, "")))), 200 if not config.self_reference
+            else 400)),
         ("soul", _section("Profile persona (SOUL)", soul, b.soul_chars)),
         ("skills", "\n\n".join(part for _, part in skill_parts)),
         ("summary", _section("Earlier in this conversation", summary, b.summary_chars)),

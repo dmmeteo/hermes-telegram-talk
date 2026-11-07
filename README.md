@@ -27,7 +27,9 @@ Non-goals for this PoC:
 - Any paid API fallback, `/v1/realtime/sessions`, or raw audio storage.
 - Posting voice turns as Telegram messages.
 - Health or location data.
-- Multi-profile activation, a global orchestrator, Discord thread automation, or Shopy.
+- Multi-profile activation, a global orchestrator or Discord thread automation. Shopy has a source example
+  (`talk.shopy.example.yaml`); installing it on the live profile is the manager's.
+- A Mini App uploader or text composer: photos, files and text go to the bot in the Telegram chat itself.
 
 ## Shape
 
@@ -226,6 +228,46 @@ Budgets are this application's character limits. The token window of the GPT-Liv
 endpoint is not published. No setting here claims to match it, so raise budgets only after a live
 qualification shows they're accepted.
 
+## Chat input from the Telegram thread
+
+A call is the voice of the Telegram conversation that opened it, not a separate chat. The Mini App shows the live
+transcript and, when the profile offers several, a reply-voice selector. Everything else goes to the bot in the chat:
+minimize the Mini App, send a text, a file or a photo, come back. Decisions and the inspected interfaces are in
+[docs/adr/0004-exact-thread-chat-input.md](docs/adr/0004-exact-thread-chat-input.md).
+
+- **Which chat.** `api/session` binds the call to (profile, bot, user, chat, topic) from the signed launch only: the
+  user's private chat with this bot, and a topic of it when the Mini App was opened through a `start_param=topic<id>`
+  link. A launch from a group, a channel or another user's chat binds nothing. There is no fallback to a last active
+  chat, and the browser cannot name one.
+- **How it arrives.** `register(ctx)` adds a `pre_gateway_dispatch` hook. In the profile's gateway it sees each inbound
+  message before Hermes' own dispatch and takes it only when the bot (from the Telegram message), chat, topic and
+  sender equal a live binding (`plugin-data/hermes-talk/threads/`). Taken input is written once per message id and edit
+  (fsync) before the hook skips it; if writing fails, the message goes to Hermes as usual. Commands (`/stop`, ...)
+  are never taken.
+- **What the voice gets.** The next in-call context refresh carries a `## Chat input` section (no reconnect, no
+  Pulse wait). Text and UTF-8 text files up to 64 KB (6000 characters each) are given whole. Photos, PDFs, voice
+  notes and files that are too large or not UTF-8 are not given to the voice: the call gets a note saying so and
+  the message continues to the profile's normal chat agent in the same thread, which has Hermes' vision path. The
+  voice model has no verified image input, so it is never told it saw anything.
+- **Exactly once.** An input is stored in the conversation (SessionDB, receipt `talk:chat:...`) when its context
+  update is acked, or at `api/end` if the call never got it. A minimized page that reconnects without `api/end`
+  still gets the earlier call's undelivered input, once. Edits are separate inputs, marked as edited.
+- **Transcript.** Display only, in this page: interim speech is replaced by the final text, interrupted replies are
+  marked, nothing is posted to Telegram. Task reports keep their own routing.
+
+### Reply voice
+
+`voice.choices` lists the provider voices a user may pick (default first). `api/voice` stores the choice per
+(profile, bot, user) in SessionDB meta. The provider sets the voice when a session is created, so the choice applies
+from the next connection; during a call the page offers an explicit Reconnect that keeps the conversation.
+
+### Shopy
+
+`talk.shopy.example.yaml` is a source example for the Shopy profile: `marin` (a female-presenting voice the public
+Hermes GPT-Live module lists for gpt-live-1), `persona.self_reference: feminine` (Ukrainian feminine self-reference)
+and short, polite greetings. Pewds keeps its own config and phrases. The subscription endpoint's acceptance of
+`marin` and how it sounds are not live-qualified.
+
 ## Voice tasks
 
 When `tasks.enabled` is true, the voice model's client delegations become Hermes tasks:
@@ -399,6 +441,7 @@ python3 verify-agent.py --browser <out-dir>              # Chromium delegation j
 python3 verify-integrated.py --browser <out-dir>        # legacy and Talk Chromium inventories, capped containers
 python3 verify-frontend.py --mobile <out-dir>            # Chromium and actual WebKit: cold/warm assets, rotation, retry and native audio unlock
 python3 verify-backend.py --offline     # full backend gate (below)
+python3 verify-thread.py --offline --require-host  # chat input of the exact thread, reply voice, Shopy (real hook)
 python3 verify-pulse.py --offline       # Pulse per-item acceptance through the real routes, memory and SessionDB
 python3 verify-pulse-engine.py --offline  # Pulse engine parity: model selection, memory, follow-ups via ctx.llm (host runtime required)
 python3 verify-frontend.py --offline    # legacy 26 + frontend unit checks + HTTP contract on this backend
@@ -462,6 +505,9 @@ the package's SVG avatar. All identities and text remain synthetic.
 | Voice tasks: native agent, tools, delivery, restart | yes (off by default) | n/a | yes (real `hermes chat`, scripted model) | in fixture (named disposable profile) | no |
 | Delegation wiring in the Talk UI (Chromium, local peers) | yes | n/a | yes (real tasks in the browser job) | n/a | no |
 | Telegram task reports | yes (on with tasks) | n/a | yes (Hermes sender, synthetic Telegram transport) | default on, no egress | no |
+| Exact-thread chat input (text, text files; truthful notes otherwise) | yes | yes | yes (registered gateway hook, adapter-built events, real SessionDB) | in fixture | no |
+| Transcript and reply-voice selector in the Mini App | yes | yes (unit) | n/a | n/a | no |
+| Shopy female/restrained source example | yes | yes | n/a | no | no |
 
 ## Outcome checklist
 

@@ -1,6 +1,8 @@
 # Hermes Telegram Talk
 
-A small English Telegram Mini App for a single authenticated voice conversation. The screen has a profile face, an audio ring, the profile name and Mute. Enable audio or Retry appears only when needed. There is no transcript, history, settings, account picker or task control.
+A small English Telegram Mini App for a single authenticated voice conversation. The screen has a profile face, an audio ring, the profile name, the live transcript of this page's user and assistant speech, and Mute. Enable audio or Retry appears only when needed. A reply-voice selector appears only when the profile offers more than one voice; a change during a call shows a short note and an explicit Reconnect. There is no uploader, text composer, history browser, settings screen, account picker or task control: photos, files and text go to the bot in the Telegram chat itself.
+
+The transcript shows interim speech in muted italics, replaces it with the final text (a correction), shows each turn once, marks an assistant reply the user spoke over as "Interrupted" and an unsettled line cut by a reconnect as "Cut off". It is bounded (100 lines, about 22% of the viewport in portrait, the right column in short landscape) and scrolls; it is display only and is never posted to Telegram. Only final turns are saved, as before.
 
 ## Composition and decisions
 

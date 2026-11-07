@@ -9,6 +9,11 @@ const canvas = document.getElementById("ring");
 const paint = canvas.getContext("2d");
 const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
 const webApp = window.Telegram && window.Telegram.WebApp;
+const transcriptList = document.getElementById("transcript");
+const voiceBox = document.getElementById("voice-box");
+const voiceSelect = document.getElementById("voice");
+const voiceNote = document.getElementById("voice-note");
+const reconnectButton = document.getElementById("reconnect");
 let call = null;
 let conversation = null;
 let exiting = false;
@@ -16,6 +21,13 @@ const APPEND_MAX_BYTES = 500;
 const FINISHED = ["succeeded", "failed", "cancelled", "interrupted"];
 // Statuses that prove the server refused the task before accepting it; anything else may have been accepted.
 const REFUSED = [400, 401, 403, 404, 409, 413, 415, 429, 503];
+const TRANSCRIPT_LINES = 100;
+const TRANSCRIPT_CHARS = 4000;
+// The on-screen transcript of this page: interim fragments per role form one live line that the final turn
+// replaces (a correction); a turn id is shown once; an assistant turn the user spoke over is marked interrupted.
+// It is display only: nothing here is posted to Telegram, and only final turns are saved (see settle).
+const transcript = {lines: [], live: {user: null, assistant: null}, shown: new Set()};
+let voiceState = null;
 const PULSE_FEEDBACK = /^\s*pulse\s+(?:feedback\s+)?(?:card\s+)?p\s*\d{1,3}\b/i;
 
 function initData() {
@@ -185,8 +197,10 @@ function stop(message = "") {
   }
   remoteAudio.pause();
   remoteAudio.srcObject = null;
+  transcriptCut();
   showError(message);
   render();
+  renderVoice(null);
 }
 
 async function flush(owner) {
@@ -224,6 +238,114 @@ async function flush(owner) {
   } finally { owner.busy = false; }
 }
 
+function renderTranscript() {
+  if (typeof document.createElement !== "function" || !transcriptList?.replaceChildren) return;
+  const stick = transcriptList.scrollTop + transcriptList.clientHeight >= transcriptList.scrollHeight - 24;
+  transcriptList.replaceChildren(...transcript.lines.map(line => {
+    const item = document.createElement("li");
+    item.dataset.role = line.role;
+    item.dataset.state = line.state;
+    item.textContent = line.text;
+    const note = line.state === "interrupted" ? "Interrupted" : line.state === "cut" ? "Cut off" : "";
+    if (note) { const small = document.createElement("small"); small.textContent = note; item.append(small); }
+    return item;
+  }));
+  transcriptList.hidden = transcript.lines.length === 0;
+  if (stick) transcriptList.scrollTop = transcriptList.scrollHeight;
+}
+
+function transcriptLine(role) {
+  let line = transcript.live[role];
+  if (!line) {
+    line = {role, text: "", state: "interim"};
+    transcript.live[role] = line;
+    transcript.lines.push(line);
+    if (transcript.lines.length > TRANSCRIPT_LINES) transcript.lines.splice(0, transcript.lines.length - TRANSCRIPT_LINES);
+  }
+  return line;
+}
+
+function transcriptFragment(role, text) {
+  if (typeof text !== "string" || !text) return;
+  const line = transcriptLine(role);
+  line.text = (line.text + text).slice(0, TRANSCRIPT_CHARS);
+  renderTranscript();
+}
+
+function transcriptFinal(role, key, text, interrupted) {
+  if (transcript.shown.has(key)) return;
+  transcript.shown.add(key);
+  const line = transcriptLine(role);
+  line.text = text.slice(0, TRANSCRIPT_CHARS);
+  line.state = interrupted ? "interrupted" : "final";
+  transcript.live[role] = null;
+  renderTranscript();
+}
+
+function transcriptCut() {
+  // A reconnect ends unsettled lines: what was shown stays, marked as never finished; nothing is saved for them.
+  for (const role of ["user", "assistant"]) {
+    const line = transcript.live[role];
+    if (line) { if (line.text) line.state = "cut"; else transcript.lines.splice(transcript.lines.indexOf(line), 1); }
+    transcript.live[role] = null;
+  }
+  renderTranscript();
+}
+
+function renderVoice(current) {
+  if (!voiceBox || !voiceSelect) return;
+  const choices = Array.isArray(voiceState?.choices) ? voiceState.choices : [];
+  voiceBox.hidden = choices.length < 2;
+  if (typeof document.createElement === "function" && voiceSelect.replaceChildren && voiceSelect.dataset.built !== JSON.stringify(choices)) {
+    voiceSelect.replaceChildren(...choices.map(choice => {
+      const option = document.createElement("option");
+      option.value = choice.id; option.textContent = choice.label;
+      return option;
+    }));
+    voiceSelect.dataset.built = JSON.stringify(choices);
+  }
+  if (voiceState) voiceSelect.value = voiceState.current;
+  // The provider sets the voice when a session starts; a live call keeps its voice until it reconnects.
+  const pending = Boolean(current && current.voice && voiceState && current.voice !== voiceState.current);
+  voiceNote.hidden = !pending;
+  reconnectButton.hidden = !pending;
+}
+
+async function loadVoice(current) {
+  try {
+    const data = await post("voice", {initData: current.auth}, {signal: current.abort.signal});
+    if (data.voice && Array.isArray(data.voice.choices) && typeof data.voice.current === "string") {
+      voiceState = data.voice;
+      // The voice this call's session was created with: the account's stored choice when the call started.
+      if (call === current && current.voice === undefined) current.voice = voiceState.current;
+    }
+  } catch (_) { /* no selector without an answer; the call itself is unaffected */ }
+  renderVoice(call);
+}
+
+async function chooseVoice() {
+  const current = call;
+  const auth = current?.auth || initData();
+  if (!auth || !voiceSelect.value || voiceSelect.value === voiceState?.current) return;
+  voiceSelect.disabled = true;
+  try {
+    const data = await post("voice", {initData: auth, voice: voiceSelect.value});
+    voiceState = data.voice;
+    showError();
+  } catch (error) {
+    showError(error.status === 400 ? "That voice is not available." : error.message);
+  } finally {
+    voiceSelect.disabled = false;
+    renderVoice(call);
+  }
+}
+
+function reconnectVoice() {
+  if (!call || reconnectButton.hidden) return;
+  stop();
+  void start();
+}
+
 function settle(current, event) {
   const turn = event.turn;
   if (!turn || !["user", "assistant"].includes(turn.role) || typeof turn.transcript !== "string") return;
@@ -234,6 +356,8 @@ function settle(current, event) {
   if (current.seen.has(key) || (!identity && current.lastSettled === key)) return;
   current.lastSettled = key;
   if (identity) current.seen.add(key);
+  transcriptFinal(turn.role, identity ? `${current.voiceId}:${identity}` : `${current.voiceId}:${turn.role}:${text}:${current.seen.size}:${transcript.lines.length}`,
+    text, turn.role === "assistant" && current.interrupted);
   if (turn.role === "user") current.lastUserText = text;
   const owner = current.conversation;
   if (owner.disabled) return;
@@ -261,7 +385,8 @@ function onMessage(current, message) {
     current.handshake = true; mark(current, "handshake"); advance(current);
   }
   if (["input_transcript.added", "output_transcript.added"].includes(event.type)) current.lastSettled = null;
-  if (event.type === "output_transcript.added") current.answering = true;
+  if (event.type === "output_transcript.added") { current.answering = true; transcriptFragment("assistant", event.item?.text); }
+  if (event.type === "input_transcript.added") transcriptFragment("user", event.item?.text);
   if (event.type === "input_transcript.added" && current.answering) current.interrupted = true;
   if (event.type === "turn.done") {
     settle(current, event);
@@ -561,6 +686,7 @@ async function start() {
       || data.limits.event_batch_max < 1 || data.limits.event_batch_max > 128
       || typeof data.greeting_enabled !== "boolean") throw new Error("Voice configuration is unavailable. Tap Retry.");
     applyProfile(data);
+    void loadVoice(current);  // off the startup path; the selector appears when it answers
     if (!conversation || conversation.id !== data.conversation_id || conversation.auth !== auth) {
       if (conversation) clearTimeout(conversation.retryTimer);
       conversation = {id: data.conversation_id, auth, pending: [], sequence: 0, retries: 0};
@@ -637,6 +763,8 @@ function onPageHide(event) {
   if (conversation) clearTimeout(conversation.retryTimer);
   startButton.removeEventListener("click", start);
   muteButton.removeEventListener("click", toggleMute);
+  voiceSelect?.removeEventListener("change", chooseVoice);
+  reconnectButton?.removeEventListener("click", reconnectVoice);
   remoteAudio.removeEventListener("pause", onAudioPause);
   const avatar = document.getElementById("avatar");
   avatar.onload = avatar.onerror = null;
@@ -661,6 +789,8 @@ if (webApp) { webApp.ready(); webApp.expand(); }
 function bindControls() {
   startButton.addEventListener("click", start);
   muteButton.addEventListener("click", toggleMute);
+  voiceSelect?.addEventListener("change", chooseVoice);
+  reconnectButton?.addEventListener("click", reconnectVoice);
   remoteAudio.addEventListener("pause", onAudioPause);
   window.addEventListener("pagehide", onPageHide);
 }

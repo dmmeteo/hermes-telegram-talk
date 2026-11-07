@@ -6,9 +6,9 @@
 <meta name="color-scheme" content="dark">
 <meta name="theme-color" content="#101416">
 <title>Hermes Telegram Talk</title>
-<link rel="stylesheet" href="app.css?v=34a5beeee57465b2">
+<link rel="stylesheet" href="app.css?v=d436dd49d255b658">
 <script src="https://telegram.org/js/telegram-web-app.js" defer></script>
-<script src="app.js?v=d02df602fea5836a" defer></script>
+<script src="app.js?v=d9e49a961b48952d" defer></script>
 </head>
 <body>
 <main>
@@ -24,7 +24,11 @@
     </div>
     <h2 id="name">Hermes</h2>
   </section>
+  <ol id="transcript" aria-label="Transcript" aria-live="polite" tabindex="0" hidden></ol>
   <div class="actions">
+    <label id="voice-box" hidden><span>Reply voice</span><select id="voice"></select></label>
+    <p id="voice-note" hidden>The new voice starts when you reconnect. The conversation continues.</p>
+    <button id="reconnect" type="button" hidden>Reconnect</button>
     <p id="error" role="alert" hidden></p>
     <button id="start" type="button" hidden>Tap to start</button>
     <button id="mute" type="button" aria-pressed="false" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M6 10v2a6 6 0 0 0 12 0v-2M12 18v3m-4 0h8"/></svg><span>Mute</span></button>

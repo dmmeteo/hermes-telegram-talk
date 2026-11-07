@@ -213,7 +213,7 @@ class TalkStore:
                 raise TalkError(409, "That call has ended. Reopen Talk from the bot.")
             return dict(record)
 
-    def save_snapshot(self, account, conversation_id, voice_session_id, cards, job_ids):
+    def save_snapshot(self, account, conversation_id, voice_session_id, cards, job_ids, inputs=()):
         """Record a mid-call context update; returns its revision. Nothing counts as read until it is acked."""
         with self.lock:
             state = self._owned(account, conversation_id, bound=True)
@@ -221,14 +221,16 @@ class TalkStore:
             snapshots = record.setdefault("snapshots", {})
             revision = record.get("revision", 0) + 1
             record["revision"] = revision
-            snapshots[str(revision)] = {"cards": list(cards), "job_ids": list(job_ids), "acked": False}
+            snapshots[str(revision)] = {"cards": list(cards), "job_ids": list(job_ids), "inputs": list(inputs),
+                                        "acked": False}
             for old in sorted(snapshots, key=int)[:-5]:
                 del snapshots[old]
             self._save(conversation_id, state)
             return revision
 
     def ack_snapshot(self, account, conversation_id, voice_session_id, revision):
-        """Mark a context update appended: (job ids, Pulse cards it carried); a repeated ack changes nothing."""
+        """Mark a context update appended: (job ids, Pulse cards, chat inputs it carried); a repeated ack changes
+        nothing."""
         with self.lock:
             state = self._owned(account, conversation_id)
             record = self._voice_session(state, voice_session_id)
@@ -236,10 +238,10 @@ class TalkStore:
             if snapshot is None:
                 raise TalkError(404, "That context update is not available.")
             if snapshot["acked"]:
-                return [], []
+                return [], [], []
             snapshot["acked"] = True
             self._save(conversation_id, state)
-            return snapshot["job_ids"], snapshot.get("cards") or []
+            return snapshot["job_ids"], snapshot.get("cards") or [], snapshot.get("inputs") or []
 
     def agent_session(self, conversation_id):
         session_id = self.history.get_meta(f"hermes_talk:agent_session:{conversation_id}")

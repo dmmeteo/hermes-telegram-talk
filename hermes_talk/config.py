@@ -126,7 +126,9 @@ class TalkConfig:
     speak_color: str = "#FFB74D"
     model: str = "gpt-live-1-codex"
     voice: str = "cove"
+    voice_choices: tuple = ()  # ((id, label), ...) the user may pick for replies; the default voice is first
     language_hint: str = ""
+    self_reference: str = ""   # "feminine" or "masculine": grammatical gender the voice uses for itself
     greeting_enabled: bool = True
     greeting: str = "Say a short hello."
     greeting_phrases: tuple = ()
@@ -165,6 +167,32 @@ def _phrases(value):
     if not isinstance(value, list) or len(value) > 12:
         raise ConfigError("greeting.phrases must be a list of at most 12 lines")
     return tuple(dict.fromkeys(_text(v, "greeting.phrases[]", 160) for v in value))
+
+
+VOICE_ID = re.compile(r"[a-z][a-z0-9_-]{0,31}")
+SELF_REFERENCE = {"feminine": "Refer to yourself in the feminine grammatical gender (in Ukrainian: \u00abя готова\u00bb, "
+                              "\u00abя зрозуміла\u00bb).",
+                  "masculine": "Refer to yourself in the masculine grammatical gender (in Ukrainian: \u00abя готовий\u00bb, "
+                               "\u00abя зрозумів\u00bb)."}
+
+
+def _voices(value, default):
+    """The reply voices a user may choose: operator-listed provider voice ids, default first; at most 8."""
+    if value is None:
+        return ((default, default.capitalize()),)
+    if not isinstance(value, list) or not 1 <= len(value) <= 8:
+        raise ConfigError("voice.choices must be a list of 1..8 voices")
+    choices = []
+    for entry in value:
+        entry = {"id": entry} if isinstance(entry, str) else entry
+        if not isinstance(entry, dict) or set(entry) - {"id", "label"} or not isinstance(entry.get("id"), str) \
+                or not VOICE_ID.fullmatch(entry["id"]):
+            raise ConfigError("voice.choices[] must be a voice id or {id, label}")
+        choices.append((entry["id"], _text(entry.get("label", entry["id"].capitalize()), "voice.choices[].label", 24)))
+    ids = [c[0] for c in choices]
+    if len(set(ids)) != len(ids) or default not in ids:
+        raise ConfigError("voice.choices must be distinct and include voice.voice")
+    return tuple(sorted(choices, key=lambda c: c[0] != default))
 
 
 def _tasks(data, base_dir):
@@ -232,6 +260,15 @@ def _receipts(data, tasks):
                     attempts=_int(data.get("attempts", 3), "receipts.attempts", 1, 5))
 
 
+def _self_reference(persona):
+    if not isinstance(persona, dict) or set(persona) - {"self_reference"}:
+        raise ConfigError("persona only supports self_reference")
+    value = persona.get("self_reference", "")
+    if value not in ("", *SELF_REFERENCE):
+        raise ConfigError("persona.self_reference must be feminine or masculine")
+    return value
+
+
 def parse_config(data, base_dir):
     if not isinstance(data, dict):
         raise ConfigError("config must be a mapping")
@@ -288,7 +325,9 @@ def parse_config(data, base_dir):
         avatar_path=avatar_path,
         model=_text(voice.get("model", TalkConfig.model), "voice.model", 64),
         voice=_text(voice.get("voice", TalkConfig.voice), "voice.voice", 32),
+        voice_choices=_voices(voice.get("choices"), _text(voice.get("voice", TalkConfig.voice), "voice.voice", 32)),
         language_hint=voice.get("language_hint", "") if isinstance(voice.get("language_hint", ""), str) else "",
+        self_reference=_self_reference(data.get("persona") or {}),
         greeting_enabled=bool(greeting.get("enabled", True)),
         greeting=_text(greeting.get("text", TalkConfig.greeting), "greeting.text", 400),
         greeting_phrases=_phrases(greeting.get("phrases", [])),

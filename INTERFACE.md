@@ -72,3 +72,17 @@ These notes are backend-owned and add no field. Changing or removing a field abo
   or not tasks are enabled and never starts a task.
 - `api/context/ack` marks the Pulse cards of that update exposed, never heard. A card is acknowledged only by a
   settled user turn after an uninterrupted assistant turn of the same call that named it, or by feedback.
+
+## Exact-thread chat input and reply voice (additive; the shapes above are unchanged)
+
+- A call continues the Telegram conversation its signed launch proves: the user's private chat with this bot
+  (initData without `chat_type`, or `chat_type=sender`), optionally a topic of it through `start_param=topic<id>`.
+  Other launches bind nothing. The browser never sends a chat or topic id; any extra field still answers 400.
+- `api/context` responses add `sources.inputs` (chat inputs carried whole). Their text adds a `## Chat input` section
+  with lines `- C<n> ...` for text and files the user sent in that exact thread during the call, oldest first, and
+  truthful notes for what the voice cannot use (photos, unsupported, oversized or unreadable files). The same
+  `api/context/ack` stores each carried input once in the conversation.
+- `POST api/voice {initData, voice?}` -> `{voice:{current, default, choices:[{id,label}], applies:"next_connection"}}`.
+  Without `voice` it reads; with one of `choices[].id` it stores the account's reply voice (400 otherwise). The
+  voice applies when the next session is created; a live call keeps its voice until it reconnects.
+

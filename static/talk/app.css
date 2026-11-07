@@ -31,6 +31,16 @@ button:focus-visible { outline: 3px solid #bfd8ce; outline-offset: 5px; }
 button:disabled { opacity: .45; cursor: default; }
 button[aria-pressed="true"] { background: #d4dfd6; color: #15201a; }
 #start { background: #d4dfd6; color: #15201a; }
+#transcript { list-style: none; margin: 0 0 12px; padding: 0 4px; max-height: min(22svh, 190px); overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 8px; font-size: 15px; line-height: 1.4; }
+#transcript:focus-visible { outline: 3px solid #bfd8ce; outline-offset: 2px; }
+#transcript li { max-width: 88%; padding: 8px 12px; border-radius: 14px; background: #1b2422; overflow-wrap: anywhere; white-space: pre-wrap; }
+#transcript li[data-role="user"] { align-self: flex-end; background: #26332e; }
+#transcript li[data-state="interim"] { color: var(--muted); font-style: italic; }
+#transcript li small { display: block; color: var(--muted); font-size: 12px; font-style: normal; }
+#voice-box { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 14px; }
+#voice { min-height: 44px; min-width: 132px; border: 1px solid #718078; border-radius: 22px; padding: 8px 14px; background: #202a25; color: var(--ink); font: inherit; }
+#voice:focus-visible { outline: 3px solid #bfd8ce; outline-offset: 3px; }
+#voice-note { color: var(--muted); text-align: center; font-size: 14px; max-width: 360px; margin: 0; }
 #error { color: #ffb7ab; text-align: center; font-size: 14px; max-width: 360px; margin: 0; }
-@media (max-height: 500px) and (min-width: 500px) { main { max-width: 900px; padding: 20px 28px; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: auto 1fr; } header { grid-column: 1 / -1; } .presence { min-height: 0; padding: 0; } #orb { width: min(250px, 64vh); } h2 { font-size: 23px; } .actions { justify-content: center; padding: 12px; } }
+@media (max-height: 500px) and (min-width: 500px) { main { max-width: 900px; padding: 20px 28px; display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: auto auto 1fr; } header { grid-column: 1 / -1; } .presence { min-height: 0; padding: 0; grid-row: 2 / 4; } #orb { width: min(250px, 64vh); } h2 { font-size: 23px; } #transcript { grid-column: 2; max-height: calc(100svh - 270px); margin: 8px 0 0; } .actions { grid-column: 2; grid-row: 3; justify-content: center; padding: 12px; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
