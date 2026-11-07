@@ -201,6 +201,36 @@ test('an avatar body completed after call replacement cannot overwrite the new a
  assert.equal(f.nodes.get('avatar').src,'blob:new-call');
  assert.equal(f.run('current.avatarObject'),undefined);
 });
+test('synthetic provider waits for native channel readiness and sends one handshake',async()=>{
+ const html=readFileSync('tests/browser/provider.html','utf8');
+ const sent=[],timers=[];let peer,releaseStats;
+ const channel={id:0,readyState:'open',send:data=>sent.push(JSON.parse(data))};
+ const audioNode=()=>({frequency:{},gain:{},connect(){return this;},start(){},stop(){},stream:{getTracks:()=>[]}});
+ const context=vm.createContext({window:{},setTimeout:fn=>timers.push(fn),
+  AudioContext:class {async resume(){} createOscillator(){return audioNode();} createGain(){return audioNode();} createMediaStreamDestination(){return audioNode();}},
+  RTCPeerConnection:class {
+   constructor(){peer=this;this.iceGatheringState='complete';this.localDescription={sdp:'synthetic'};}
+   async setRemoteDescription(){this.ondatachannel({channel});}
+   async createAnswer(){return {};}
+   async setLocalDescription(){}
+   getStats(){return new Promise(resolve=>{releaseStats=state=>resolve(new Map([['channel',{type:'data-channel',dataChannelIdentifier:0,state}]]));});}
+  },fetch:async url=>url==='/offer'?{status:200,json:async()=>({sdp:'synthetic'})}:new Promise(()=>{})});
+ vm.runInContext(html.match(/<script>([\s\S]*?)<\/script>/)[1],context);
+ for(let n=0;n<12;n++)await Promise.resolve();
+ assert.equal(sent.length,0,'Blink open alone must not send before native SCTP readiness');
+ channel.onopen();
+ releaseStats('connecting');
+ for(let n=0;n<12;n++)await Promise.resolve();
+ assert.equal(sent.length,0,'native connecting must not send a handshake');
+ timers.shift()();
+ for(let n=0;n<12;n++)await Promise.resolve();
+ releaseStats('open');
+ for(let n=0;n<12;n++)await Promise.resolve();
+ channel.onopen();
+ assert.equal(sent.length,1,'duplicate open notifications must not send twice');
+ assert.equal(sent[0].type,'session.started');
+ assert.equal(context.window.peers[0].peer,peer);
+});
 let failed=0;
 for(const {name,run} of tests){try{await run();console.log('PASS',name);}catch(e){failed++;console.error('FAIL',name,e.message);}}
 console.log(`${tests.length-failed}/${tests.length} Talk frontend checks passed`);

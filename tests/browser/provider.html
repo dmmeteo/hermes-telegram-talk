@@ -41,8 +41,22 @@ async function serve() {
     };
     peer.ondatachannel = ({channel}) => {
       entry.channel = channel;
-      // Chromium can hand over an incoming channel that is already open, and then never fires onopen for it.
-      const hello = () => { if (entry.behavior.handshake && !entry.greeted) { entry.greeted = true; entry.send({type:'session.started',session:{id:'synthetic'}}); } };
+      // Blink can report open before the native SCTP channel accepts sends.
+      const hello = async () => {
+        if (!entry.behavior.handshake || entry.greetingPending) return;
+        entry.greetingPending = true;
+        while (channel.readyState === 'open') {
+          const stats = await peer.getStats();
+          const native = [...stats.values()].find(stat => stat.type === 'data-channel' && stat.dataChannelIdentifier === channel.id);
+          if (channel.readyState !== 'open') return;
+          if (native?.state === 'open') {
+            entry.send({type:'session.started',session:{id:'synthetic'}});
+            entry.greeted = true;
+            return;
+          }
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }
+      };
       channel.onopen = hello;
       if (channel.readyState === 'open') hello();
       channel.onmessage = message => {
