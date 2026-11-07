@@ -148,7 +148,7 @@ def run(history_factory, event_factory, dispatch, out):
             assert again["sources"]["inputs"] == 1 and again["revision"] != first["revision"], again
             rig.ack(ids, again["revision"])
             rig.ack(ids, again["revision"])
-            assert rig.context(ids)["sources"]["inputs"] == 0
+            assert "inputs" not in rig.context(ids)["sources"]
             kept = [t for _, t in rig.turns(ids["conversation_id"]) if "buy oat milk" in t]
             assert len(kept) == 1 and kept[0].startswith("[Telegram chat input during the call]"), kept
             # The same voice session is still live: nothing reconnected.
@@ -204,7 +204,7 @@ def run(history_factory, event_factory, dispatch, out):
             text = a.context(ids_topic)["text"]
             assert "for topic 12" in text and "main lane" not in text and "other profile" not in text, text
             ids_b = b.start(start_param="topic12")
-            assert b.context(ids_b)["sources"]["inputs"] == 0
+            assert "inputs" not in b.context(ids_b)["sources"]
         finally:
             b.close()
             a.close()

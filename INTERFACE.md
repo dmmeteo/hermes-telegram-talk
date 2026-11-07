@@ -78,7 +78,7 @@ These notes are backend-owned and add no field. Changing or removing a field abo
 - A call continues the Telegram conversation its signed launch proves: the user's private chat with this bot
   (initData without `chat_type`, or `chat_type=sender`), optionally a topic of it through `start_param=topic<id>`.
   Other launches bind nothing. The browser never sends a chat or topic id; any extra field still answers 400.
-- `api/context` responses add `sources.inputs` (chat inputs carried whole). Their text adds a `## Chat input` section
+- `api/context` responses add `sources.inputs` (chat inputs carried whole) only when an update carries chat input. Their text adds a `## Chat input` section
   with lines `- C<n> ...` for text and files the user sent in that exact thread during the call, oldest first, and
   truthful notes for what the voice cannot use (photos, unsupported, oversized or unreadable files). The same
   `api/context/ack` stores each carried input once in the conversation.

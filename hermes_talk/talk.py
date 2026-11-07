@@ -511,10 +511,12 @@ class TalkRuntime:
         if chat_text:
             text = (text + "\n\n" + chat_text) if text else UPDATE_HEADER.format(revision=revision) + chat_text
         if not text:
-            return {"revision": None, "text": "", "sources": {"jobs": 0, "activity": 0, "inputs": 0}}
+            return {"revision": None, "text": "", "sources": {"jobs": 0, "activity": 0}}
         revision = self.store.save_snapshot(account, conversation_id, voice_session_id,
                                             [card["fp"] for card in cards[:k]], job_ids, [name for name, _ in chat[:n]])
-        sources = {"jobs": len(job_ids), "activity": k, "inputs": n}
+        sources = {"jobs": len(job_ids), "activity": k}
+        if n:
+            sources["inputs"] = n  # additive: present only when the update carries chat input
         logger.info("context frame=session.context.append revision=%s sources=%s", revision, json.dumps(sources))
         return {"revision": revision, "text": text, "sources": sources}
 
