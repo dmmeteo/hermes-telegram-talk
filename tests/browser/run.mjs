@@ -343,7 +343,13 @@ try {
   await talk.selectOption('#voice','marin');assert((await stored).ok(),'choice stored through the authenticated route');
   await until(()=>talk.evaluate(()=>!document.getElementById('reconnect').hidden&&!document.getElementById('voice-note').hidden),'explicit reconnect offered');
   assert((await state(talk)).peers.filter(p=>p==='connected').length===1,'a choice alone keeps the live call');
-  await screenshot(talk,'voice-change-pending');
+  for(const [width,height,name] of [[390,844,'voice-change-pending'],[360,640,'voice-change-pending-360'],[844,390,'voice-change-pending-landscape']]){
+   await talk.setViewportSize({width,height});
+   const m=await talk.locator('#mute').boundingBox(),r=await talk.locator('#reconnect').boundingBox();
+   assert(m&&r&&m.y>=0&&m.y+m.height<=height&&r.y>=0&&r.y+r.height<=height&&r.height>=44,`mute and reconnect both visible while the change is pending ${name}`);
+   await screenshot(talk,name);
+  }
+  await talk.setViewportSize({width:390,height:844});
   await talk.click('#reconnect');await ready(talk);
   const after=await talk.evaluate(()=>({conversation:conversation.id,reconnect:document.getElementById('reconnect').hidden,
    kept:[...document.getElementById('transcript').children].some(li=>li.textContent==='Synthetic corrected reply.')}));

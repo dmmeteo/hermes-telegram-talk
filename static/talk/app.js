@@ -254,6 +254,11 @@ function renderTranscript() {
   if (stick) transcriptList.scrollTop = transcriptList.scrollHeight;
 }
 
+function pinTranscript() {
+  // A rotation or resize keeps the newest line in view when the reader was already at the end.
+  if (transcriptList && !transcriptList.hidden) transcriptList.scrollTop = transcriptList.scrollHeight;
+}
+
 function transcriptLine(role) {
   let line = transcript.live[role];
   if (!line) {
@@ -765,6 +770,7 @@ function onPageHide(event) {
   muteButton.removeEventListener("click", toggleMute);
   voiceSelect?.removeEventListener("change", chooseVoice);
   reconnectButton?.removeEventListener("click", reconnectVoice);
+  window.removeEventListener("resize", pinTranscript);
   remoteAudio.removeEventListener("pause", onAudioPause);
   const avatar = document.getElementById("avatar");
   avatar.onload = avatar.onerror = null;
@@ -791,6 +797,7 @@ function bindControls() {
   muteButton.addEventListener("click", toggleMute);
   voiceSelect?.addEventListener("change", chooseVoice);
   reconnectButton?.addEventListener("click", reconnectVoice);
+  window.addEventListener("resize", pinTranscript);
   remoteAudio.addEventListener("pause", onAudioPause);
   window.addEventListener("pagehide", onPageHide);
 }
