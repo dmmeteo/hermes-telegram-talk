@@ -109,8 +109,10 @@ try {
       await shot(name); checks++;
     }
     await page.setViewportSize({width:390,height:844});
-    await page.locator('#transcript').evaluate(el => { el.scrollTop = 0; });
-    await page.waitForTimeout(100);
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    await page.locator('#transcript').hover();
+    await page.mouse.wheel(0, -10000);
+    await until(() => page.evaluate(() => !followingTranscript && transcriptList.scrollTop < 10), 'reader reaches older messages after viewport settles');
     await provider.evaluate(i => window.peers[i].send({type:'turn.done',turn:{id:'while-reading',role:'assistant',transcript:'Synthetic new message while reading older dialogue.'}}), index);
     await until(() => page.locator('#transcript li').last().innerText().then(text => text.includes('while reading')), 'new message arrived');
     assert(await page.locator('#transcript').evaluate(el => el.scrollTop < 10), 'new message preserves reading position');
@@ -128,7 +130,11 @@ try {
     await page.selectOption('#voice', profile === 'shopy' ? 'cove' : 'marin');
     await until(() => page.locator('#reconnect').isVisible(), 'explicit reconnect contract');
     await page.click('#reconnect');
-    await until(() => page.evaluate(() => call?.phase === 'ready'), 'reconnected');
+    try { await until(() => page.evaluate(() => call?.phase === 'ready'), 'reconnected'); }
+    catch (error) {
+      log('reconnect-failure', {profile, state: await page.evaluate(() => ({phase:call?.phase, error:document.getElementById('error').textContent, peer:call?.peer?.connectionState, stages:call?.stages, playing:call?.playing, audio:call?.audio?.state}))});
+      throw error;
+    }
     assert(!await enabled() && await phase() === 'muted', 'mute survives voice reconnect'); checks++;
     await page.evaluate(() => { document.getElementById('remote').pause(); });
     await until(async () => await phase() === 'blocked', 'blocked playback reflected');
