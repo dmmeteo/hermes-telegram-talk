@@ -383,8 +383,10 @@ def describe_attachment(path, mime, home):
                            "reason": "a file type the call cannot read"}
 
 
-def take_event(event, home, clock=time.time):
-    """The gateway hook body: {"action": "skip"} when the call consumed the event, else None (normal dispatch)."""
+def take_event(event, home, clock=time.time, wait_s=LOCK_WAIT_S, raise_busy=False):
+    """The gateway hook body: {"action": "skip"} when the call consumed the event, else None (normal dispatch).
+
+    A thread lock still held after `wait_s` lets the event go to Hermes (or raises Busy with `raise_busy`)."""
     source = getattr(event, "source", None)
     if source is None or getattr(event, "internal", False) or _value(source, "platform") != "telegram":
         return None
@@ -408,9 +410,11 @@ def take_event(event, home, clock=time.time):
     if not inbox.root.is_dir():
         return None  # no call of this profile ever bound a thread
     try:
-        with inbox.locked(key, wait_s=LOCK_WAIT_S):
+        with inbox.locked(key, wait_s=wait_s):
             return _take_locked(inbox, key, event, user_id, chat_id, message_id, message_type, text, clock, home)
     except Busy:
+        if raise_busy:
+            raise
         return None  # the voice server holds this thread right now; Hermes handles the message as usual
 
 
@@ -457,8 +461,8 @@ def _take_locked(inbox, key, event, user_id, chat_id, message_id, message_type, 
 SESSION_STORE = []  # the gateway's own SessionStore, as handed to pre_gateway_dispatch; read by post_llm_call
 
 
-def gateway_hook(event=None, session_store=None, **_):
-    """`pre_gateway_dispatch` callback (registered in `__init__.register`)."""
+def gateway_hook(event=None, session_store=None, wait_s=LOCK_WAIT_S, raise_busy=False, **_):
+    """`pre_gateway_dispatch` body; the registered callback is `gateway_hook_async`."""
     if session_store is not None and not (SESSION_STORE and SESSION_STORE[0] is session_store):
         SESSION_STORE[:] = [session_store]
     try:
@@ -469,9 +473,26 @@ def gateway_hook(event=None, session_store=None, **_):
     if not home or event is None:
         return None
     try:
-        return take_event(event, home)
+        return take_event(event, home, wait_s=wait_s, raise_busy=raise_busy)
+    except Busy:
+        raise
     except Exception:  # a plugin fault must never drop or block a message
         return None
+
+
+async def gateway_hook_async(event=None, **kwargs):
+    """The registered `pre_gateway_dispatch` callback. Hermes runs a sync callback inline on the gateway's event
+    loop, so a busy thread lock is retried here between awaits: other chats keep running, and after LOCK_WAIT_S
+    the event goes to Hermes as usual."""
+    import asyncio
+    deadline = time.monotonic() + LOCK_WAIT_S
+    while True:
+        try:
+            return gateway_hook(event=event, wait_s=0, raise_busy=True, **kwargs)
+        except Busy:
+            if time.monotonic() >= deadline:
+                return None
+            await asyncio.sleep(0.02)
 
 
 # --- the voice-server side -------------------------------------------------------------------------------------------
@@ -524,5 +545,5 @@ def history_text(item):
     return f"[Telegram {mark} during the call] " + item_line("", item)[3:].strip()
 
 
-__all__ = ["Busy", "Thread", "ThreadInbox", "launch_thread", "take_event", "gateway_hook", "item_line", "history_text",
+__all__ = ["Busy", "Thread", "ThreadInbox", "launch_thread", "take_event", "gateway_hook", "gateway_hook_async", "item_line", "history_text",
            "receipt", "describe_attachment"]

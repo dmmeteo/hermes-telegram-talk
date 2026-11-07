@@ -39,12 +39,12 @@ def _bind_model(ctx):
         pulse_model.bind(llm)
 
 
-def _chat_input(event=None, **kwargs):
+async def _chat_input(event=None, **kwargs):
     """`pre_gateway_dispatch`: hand input from the exact Telegram thread of a live Talk call to that call."""
     if str(PLUGIN_DIR) not in sys.path:
         sys.path.insert(0, str(PLUGIN_DIR))
-    from hermes_talk.thread_inbox import gateway_hook
-    return gateway_hook(event=event, **kwargs)
+    from hermes_talk.thread_inbox import gateway_hook_async
+    return await gateway_hook_async(event=event, **kwargs)
 
 
 def _chat_reply(**kwargs):

@@ -198,6 +198,9 @@ def run(history_factory, event_factory, dispatch, out, extras=None):
             assert "inputs" not in rig.context(ids)["sources"]
             assert rig.call("voice", launch=rig.issue())["thread"]["status"] == "bound"
             expect(400, lambda: rig.call("voice", launch=7))
+            posts = len(rig.fake.posts)
+            expect(400, lambda: rig.call("session", sdp=fx.OFFER, launch=["x"]))
+            assert len(rig.fake.posts) == posts, "a malformed launch never reaches the provider"
         finally:
             rig.close()
 

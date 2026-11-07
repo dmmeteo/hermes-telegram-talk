@@ -309,6 +309,8 @@ class VoiceApp:
         sdp = body["sdp"]
         if not isinstance(sdp, str) or not sdp.startswith("v=0"):
             raise ApiError(400, "Malformed WebRTC offer.")
+        if body.get("launch") is not None and not isinstance(body["launch"], str):
+            raise ApiError(400, "Malformed launch.")  # before any upstream session exists
         if not self.limiter.acquire(user_id):
             raise ApiError(429, "Too many calls started. Wait a minute, then tap Start.")
         if not self.active.acquire(blocking=False):
