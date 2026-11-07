@@ -386,4 +386,128 @@ def run(history_factory, event_factory, dispatch, out):
         ptext, _ = compose(pewds, "", [], "", [], [], 0, "")
         assert "feminine" not in ptext and "masculine" not in ptext
 
+    @check("stale_end_overlapping_new_bind_never_deletes_the_new_binding")
+    def _():
+        # Deterministic interleaving: the old call's end has read the binding (still its own) and is paused before
+        # removing it; a new call of the same thread binds in between. The new binding must survive.
+        import threading
+        rig = Rig(history_factory)
+        try:
+            thread = launch_thread({}, fx.USER_ID, rig.config.profile_id, BOT_ID)
+            old = ThreadInbox(rig.home, rig.clock)
+            old.bind(thread, "conv-A", "voice-A", 600)
+            read, go = threading.Event(), threading.Event()
+            real = old.binding
+
+            def paused(key, live_only=False):
+                data = real(key, live_only)
+                read.set()
+                go.wait(5)
+                return data
+            old.binding = paused
+            ender = threading.Thread(target=old.unbind, args=(thread, "voice-A"))
+            ender.start()
+            assert read.wait(5)
+            binder = threading.Thread(target=ThreadInbox(rig.home, rig.clock).bind,
+                                      args=(thread, "conv-B", "voice-B", 600))
+            binder.start()
+            binder.join(1.0)  # without the lifecycle lock this bind completes here, before the stale unlink
+            go.set()
+            ender.join(5)
+            binder.join(5)
+            assert not ender.is_alive() and not binder.is_alive()
+            now = ThreadInbox(rig.home, rig.clock).binding(thread.key, live_only=True)
+            assert now is not None and now["voice_session_id"] == "voice-B", now
+            # and the later, now stale, end of A still leaves B alone
+            assert ThreadInbox(rig.home, rig.clock).unbind(thread, "voice-A") is False
+            assert ThreadInbox(rig.home, rig.clock).binding(thread.key)["voice_session_id"] == "voice-B"
+        finally:
+            rig.close()
+
+    @check("take_racing_end_is_kept_once_never_stranded")
+    def _():
+        # The gateway has read a live binding and is paused before storing; the call ends meanwhile. The input
+        # must end up in the conversation exactly once (or pass to the chat agent), never skipped and stranded.
+        import threading
+        rig = Rig(history_factory)
+        try:
+            ids = rig.start()
+            read, go, result = threading.Event(), threading.Event(), []
+            real = ThreadInbox.binding
+
+            def paused(self, key, live_only=False):
+                data = real(self, key, live_only)
+                if threading.current_thread().name == "take" and live_only:
+                    read.set()
+                    go.wait(5)
+                return data
+            ThreadInbox.binding = paused
+            try:
+                taker = threading.Thread(name="take", target=lambda: result.append(
+                    dispatch(rig.home, event_factory(text="Synthetic racing input", message_id=990))))
+                taker.start()
+                assert read.wait(5)
+                ender = threading.Thread(target=lambda: rig.call("end", **ids))
+                ender.start()
+                ender.join(1.0)  # without the lock the end flushes and unbinds here, before the input is stored
+                go.set()
+                taker.join(5)
+                ender.join(5)
+            finally:
+                ThreadInbox.binding = real
+            texts = [t for _, t in rig.turns(ids["conversation_id"])]
+            kept = sum("Synthetic racing input" in t for t in texts)
+            stranded = _inbox_names(rig, key_main)
+            assert stranded == [], stranded
+            assert (result == [SKIP] and kept == 1) or (result == [None] and kept == 0), (result, kept, texts)
+        finally:
+            rig.close()
+
+    @check("unheard_input_of_an_unended_call_reaches_the_reopened_call_once")
+    def _():
+        rig = Rig(history_factory)
+        try:
+            first = rig.start()
+            assert dispatch(rig.home, event_factory(text="Synthetic unheard", message_id=995)) == SKIP
+            # the page closed without api/end; the same thread reopens (same conversation) and binds again
+            again = rig.start()
+            assert again["conversation_id"] == first["conversation_id"]
+            update = rig.context(again)
+            assert update["text"].count("Synthetic unheard") == 1, update["text"]
+            rig.ack(again, update["revision"])
+            rig.call("end", **first)  # the stale end of the first call changes nothing
+            rig.call("end", **again)
+            texts = [t for _, t in rig.turns(first["conversation_id"])]
+            assert sum("Synthetic unheard" in t for t in texts) == 1, texts
+            assert _inbox_names(rig, key_main) == []
+        finally:
+            rig.close()
+
+    @check("oversized_leading_input_cannot_starve_later_messages")
+    def _():
+        rig = Rig(history_factory)
+        try:
+            ids = rig.start()
+            docs = rig.home / "cache" / "documents"
+            docs.mkdir(parents=True, exist_ok=True)
+            for n in (1, 2):
+                (docs / f"big{n}.txt").write_text(("Synthetic line %d. " % n) * 300, encoding="utf-8")
+            album = event_factory(message_id=1001, message_type="document",
+                                  media=[(str(docs / "big1.txt"), "text/plain"), (str(docs / "big2.txt"), "text/plain")])
+            assert dispatch(rig.home, album) is None  # an album goes on to the chat agent as well
+            assert dispatch(rig.home, event_factory(text="Synthetic after album", message_id=1002)) == SKIP
+            seen = []
+            for _ in range(3):
+                update = rig.context(ids)
+                if not update.get("revision"):
+                    break
+                seen.append(update["text"])
+                rig.ack(ids, update["revision"])
+            joined = "\n".join(seen)
+            assert "more characters of this input were not carried" in joined, joined[:300]
+            assert sum("Synthetic after album" in t for t in seen) == 1, len(seen)
+            assert _inbox_names(rig, key_main) == []
+        finally:
+            rig.close()
+
     return results

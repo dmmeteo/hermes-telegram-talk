@@ -14,6 +14,8 @@ agent, which has the real multimodal path. If writing fails the event passes unt
 The voice server reads pending items of its own binding in `api/context`, appends them once (acked) to the
 conversation through SessionDB with a `talk:chat:...` receipt, and flushes the rest into history at `api/end`.
 """
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -115,20 +117,49 @@ class ThreadInbox:
     def _inbox(self, key):
         return self.root / f"inbox-{_digest(key)}"
 
+    @contextlib.contextmanager
+    def locked(self, key):
+        """Hold this thread's lifecycle lock across processes (voice server and gateway).
+
+        Bind, end and take each read the binding and then act on it; under one exclusive `flock` per thread key a
+        stale call's end can never delete a newer call's binding, and the gateway can never store input for a
+        binding that ends (and flushes) in between. The lock file itself is never removed."""
+        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(self.root / f"lock-{_digest(key)}", os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)  # closing releases the flock
+
     # Voice-server side ------------------------------------------------------------------------------------------
     def bind(self, thread, conversation_id, voice_session_id, ttl_s):
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self._inbox(thread.key).mkdir(exist_ok=True, mode=0o700)
-        self._prune(thread.key)
-        _write(self._bind_path(thread.key), {**asdict(thread), "key": thread.key, "conversation_id": conversation_id,
-                                             "voice_session_id": voice_session_id,
-                                             "expires_at": self.clock() + ttl_s})
+        """Make this call the thread's live binding; returns input earlier calls took but never settled.
 
-    def unbind(self, thread, voice_session_id):
-        """End the binding only if it still belongs to this call (a newer call of the same thread keeps its own)."""
-        current = self.binding(thread.key)
-        if current is not None and current.get("voice_session_id") == voice_session_id:
-            self._bind_path(thread.key).unlink(missing_ok=True)
+        The returned [(name, item)] belong to other conversations (their call ended without api/end); the caller
+        keeps them in their own conversation's history so nothing is stranded by the newer binding."""
+        with self.locked(thread.key):
+            self._inbox(thread.key).mkdir(exist_ok=True, mode=0o700)
+            self._prune(thread.key)
+            _write(self._bind_path(thread.key), {**asdict(thread), "key": thread.key,
+                                                 "conversation_id": conversation_id,
+                                                 "voice_session_id": voice_session_id,
+                                                 "expires_at": self.clock() + ttl_s})
+            return [(n, i) for n, i in self.pending(thread.key) if i.get("conversation_id") != conversation_id]
+
+    def unbind(self, thread, voice_session_id, flush=None):
+        """End the binding only if it still belongs to this call (a newer call of the same thread keeps its own).
+
+        True when this call owned (or nobody held) the binding. `flush(items)` then receives this call's pending
+        input under the same lock, so a concurrent take either lands before the flush or sees no binding."""
+        with self.locked(thread.key):
+            current = self.binding(thread.key)
+            owned = current is None or current.get("voice_session_id") == voice_session_id
+            if current is not None and owned:
+                self._bind_path(thread.key).unlink(missing_ok=True)
+            if owned and flush is not None:
+                flush(self.pending(thread.key))
+            return owned
 
     def binding(self, key, live_only=False):
         try:
@@ -293,6 +324,14 @@ def take_event(event, home, clock=time.time):
     thread_id = getattr(source, "thread_id", None)
     key = f"tg{bot_id}:{user_id}:{chat_id}:{thread_id or '-'}"
     inbox = ThreadInbox(home, clock)
+    if not inbox.root.is_dir():
+        return None  # no call of this profile ever bound a thread
+    with inbox.locked(key):
+        return _take_locked(inbox, key, event, user_id, chat_id, message_id, message_type, text, clock, home)
+
+
+def _take_locked(inbox, key, event, user_id, chat_id, message_id, message_type, text, clock, home):
+    """Check the live binding and store the input under the thread lock (see ThreadInbox.locked)."""
     binding = inbox.binding(key, live_only=True)
     if binding is None or str(binding.get("user_id")) != user_id or binding.get("chat_id") != chat_id:
         return None

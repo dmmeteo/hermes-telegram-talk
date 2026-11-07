@@ -95,11 +95,22 @@ def whole_lines(header, items, limit):
     return (text.rstrip("\n") if taken else ""), taken
 
 
+CLIP_NOTE = " [... {n} more characters of this input were not carried into the call]"
+
+
 def chat_section(lines, limit):
-    """(section, n): leading whole chat-input lines within limit; the rest wait for the next update."""
+    """(section, n): leading whole chat-input lines within limit; the rest wait for the next update.
+
+    A first line that alone exceeds the limit is carried clipped, with an explicit note of how much was left out,
+    so one oversized input (an album of text files) cannot starve every later message."""
     out, n = CHAT_HEADER, 0
     for line in lines:
         if len(out) + len(line) + 1 > limit:
+            if n == 0:
+                room = limit - len(out) - len(CLIP_NOTE) - 24
+                if room > 0:
+                    out += line[:room] + CLIP_NOTE.format(n=len(line) - room) + "\n"
+                    n = 1
             break
         out += line + "\n"
         n += 1

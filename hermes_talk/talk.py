@@ -323,7 +323,9 @@ class TalkRuntime:
         if cards:
             self.pulse.exposed(account, voice_session_id, cards, "instructions", self.clock())
         if thread is not None and self.inbox is not None and thread.user_id == user_id and thread.bot_id == self.bot_id:
-            self.inbox.bind(thread, conversation_id, voice_session_id, self.config.voice_session_ttl_s)
+            orphans = self.inbox.bind(thread, conversation_id, voice_session_id, self.config.voice_session_ttl_s)
+            with self.inbox.locked(thread.key):
+                self._keep_chat(thread, None, orphans)  # an earlier conversation's unheard input, kept in its own
             self._threads[voice_session_id] = thread
         return voice_session_id
 
@@ -339,12 +341,18 @@ class TalkRuntime:
         return thread, items
 
     def _keep_chat(self, thread, conversation_id, items):
-        """Append delivered chat input to the conversation once (receipt-deduplicated), then settle it."""
+        """Append chat input to its conversation once (receipt-deduplicated), then settle it.
+
+        Callers hold the thread lock (`ThreadInbox.locked`), so an ack and an end of the same thread cannot both
+        pass the receipt check. conversation_id None keeps each item in the conversation it was taken for."""
         for name, item in items:
+            target = conversation_id or item.get("conversation_id")
+            if not isinstance(target, str) or not target:
+                continue
             mark = receipt(item)
-            if not self.history.has_receipt(conversation_id, mark):
-                self.history.append(conversation_id, [{"role": "user", "content": redact(history_text(item)),
-                                                        "platform_message_id": mark, "timestamp": self.clock()}])
+            if not self.history.has_receipt(target, mark):
+                self.history.append(target, [{"role": "user", "content": redact(history_text(item)),
+                                              "platform_message_id": mark, "timestamp": self.clock()}])
             self.inbox.settle(thread.key, name)
 
     def events(self, user_id, conversation_id, voice_session_id, events):
@@ -390,13 +398,13 @@ class TalkRuntime:
 
     def end(self, user_id, conversation_id, voice_session_id):
         ended = self.store.end(self.account(user_id), conversation_id, voice_session_id)
-        thread, items = self._chat_items(voice_session_id, conversation_id)
-        if thread is not None:
-            owner = self.inbox.binding(thread.key)
-            if owner is None or owner.get("voice_session_id") == voice_session_id:
-                self.inbox.unbind(thread, voice_session_id)
-                self._keep_chat(thread, conversation_id, items)  # not heard in the call, but kept for the next one
-            # else a newer call of this thread is live and still gets them
+        thread = self._threads.get(voice_session_id)
+        if thread is not None and self.inbox is not None:
+            def flush(pending):  # not heard in the call, but kept for the next one (runs under the thread lock)
+                self._keep_chat(thread, conversation_id,
+                                [(n, i) for n, i in pending if i.get("conversation_id") == conversation_id])
+            # A newer call of this thread that already holds the binding keeps it and still gets the input.
+            self.inbox.unbind(thread, voice_session_id, flush)
             self._threads.pop(voice_session_id, None)
         self.engine.poke(user_id)  # the call went quiet: read it for memory and run due follow-ups
         return ended
@@ -523,9 +531,11 @@ class TalkRuntime:
     def context_ack(self, user_id, conversation_id, voice_session_id, revision):
         account = self.account(user_id)
         job_ids, cards, inputs = self.store.ack_snapshot(account, conversation_id, voice_session_id, revision)
-        thread, chat = self._chat_items(voice_session_id, conversation_id)
-        if inputs and thread is not None:
-            self._keep_chat(thread, conversation_id, [(n, i) for n, i in chat if n in set(inputs)])
+        thread = self._threads.get(voice_session_id)
+        if inputs and thread is not None and self.inbox is not None:
+            with self.inbox.locked(thread.key):
+                _, chat = self._chat_items(voice_session_id, conversation_id)
+                self._keep_chat(thread, conversation_id, [(n, i) for n, i in chat if n in set(inputs)])
         if cards:
             self.pulse.exposed(account, voice_session_id, cards, f"context:{revision}", self.clock())
         if job_ids and self.board is not None:

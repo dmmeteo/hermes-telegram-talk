@@ -47,3 +47,17 @@ Interfaces inspected on the target core (`prime-tgt-cli-1103/target-sdk`, read-o
 - A Mini App opened from the menu inside a DM topic binds the main chat lane (Telegram does not sign the topic);
   only a `topic<id>` direct link binds a topic. Real-phone behaviour, background audio and the provider's
   acceptance of `marin` are not qualified here.
+
+## Amendment 2026-11-07: one lifecycle lock per thread
+
+Bind, end (unbind plus flush) and the gateway's take each read the binding and then act on it. They now run under one
+exclusive `flock` per thread key (`ThreadInbox.locked`, a lock file that is never removed). A stale call's end can
+therefore never delete a newer call's binding, and an input stored by a take that read a live binding is either
+flushed by that end or delivered to the next call, never skipped and stranded. Context acks and end flushes keep
+input under the same lock, so the receipt check and the append cannot interleave. A new binding of a different
+conversation returns the earlier conversation's unheard input, which is then kept in that conversation's history.
+An oversized leading chat input is carried clipped with an explicit "N more characters were not carried" note,
+so it cannot starve later messages. Regressions with deterministic interleaving are in `tests/thread/checks.py`.
+
+Not resolved here: an ordinary menu launch inside a private-chat topic carries no signed topic, so it still binds
+the main chat lane (see the task report); the Mini App does not yet show a visible "unbound" state.
