@@ -24,7 +24,9 @@ logs = io.StringIO()
 stats = {'resolves': 0, 'posts': 0}
 home = f.write_home(tempfile.mkdtemp(prefix='synthetic-talk-'))
 history = MemoryHistory()
-talk = TalkRuntime(parse_config(f.config_data(), home), f.BOT_TOKEN, history,
+# Two reply voices, so the selector is part of every layout this inventory checks (synthetic config).
+talk = TalkRuntime(parse_config(f.config_data(voice={'voice': 'cove', 'choices': ['cove', 'marin']}), home), f.BOT_TOKEN,
+                   history,
                    soul=f.file_soul(home), skill=f.file_skill(home))
 
 

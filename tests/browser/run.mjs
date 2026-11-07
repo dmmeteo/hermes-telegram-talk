@@ -317,11 +317,45 @@ try {
   assert(await page.evaluate(()=>localStorage.length===0&&sessionStorage.length===0),'no browser persistence');
   await page.unroute('**/api/bootstrap');
  });
+ await step('transcript-and-reply-voice-at-phone-widths',async()=>{
+  const talk=await open();await ready(talk);const i=await lastPeer();
+  for(let n=0;n<14;n++)await send(i,{type:'turn.done',turn:{id:`overflow-${n}`,role:n%2?'assistant':'user',
+   transcript:`Synthetic transcript line ${n}. `+'A long synthetic sentence that wraps on a phone screen. '.repeat(2)}});
+  await send(i,{type:'output_transcript.added',item:{text:'Synthetic interim reply'}});
+  const t=await until(()=>talk.evaluate(()=>{const l=document.getElementById('transcript');const last=l.lastElementChild;
+   return last?.dataset.state==='interim'&&{hidden:l.hidden,items:l.children.length,scroll:l.scrollHeight>l.clientHeight,
+   atEnd:l.scrollTop+l.clientHeight>=l.scrollHeight-30,text:last.textContent};}),'interim line rendered');
+  assert(!t.hidden&&t.items>=15&&t.scroll&&t.atEnd&&t.text==='Synthetic interim reply','bounded transcript scrolls and follows the newest line');
+  await send(i,{type:'turn.done',turn:{id:'interim-final',role:'assistant',transcript:'Synthetic corrected reply.'}});
+  await until(()=>talk.evaluate(()=>document.getElementById('transcript').lastElementChild.textContent==='Synthetic corrected reply.'),'final text replaces the interim line');
+  for(const [width,height,name] of [[390,844,'transcript-390-portrait'],[360,640,'transcript-360-portrait'],[844,390,'transcript-landscape']]){
+   await talk.setViewportSize({width,height});const b=await talk.locator('#mute').boundingBox();const v=await talk.locator('#voice').boundingBox();
+   assert(b&&b.y>=0&&b.y+b.height<=height&&v&&v.height>=44&&v.y+v.height<=height,`mute and voice selector visible ${name}`);
+   assert(await talk.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`no horizontal overflow ${name}`);
+   await screenshot(talk,name);
+  }
+  await talk.setViewportSize({width:390,height:844});
+  const options=await talk.evaluate(()=>[...document.querySelectorAll('#voice option')].map(o=>o.value));
+  assert(JSON.stringify(options)==='["cove","marin"]','selector lists the configured reply voices');
+  await talk.focus('#voice');await screenshot(talk,'voice-selector-focused');
+  const conversationId=await talk.evaluate(()=>conversation.id);
+  const stored=talk.waitForResponse(r=>r.url().endsWith('/api/voice')&&r.request().postData().includes('marin'));
+  await talk.selectOption('#voice','marin');assert((await stored).ok(),'choice stored through the authenticated route');
+  await until(()=>talk.evaluate(()=>!document.getElementById('reconnect').hidden&&!document.getElementById('voice-note').hidden),'explicit reconnect offered');
+  assert((await state(talk)).peers.filter(p=>p==='connected').length===1,'a choice alone keeps the live call');
+  await screenshot(talk,'voice-change-pending');
+  await talk.click('#reconnect');await ready(talk);
+  const after=await talk.evaluate(()=>({conversation:conversation.id,reconnect:document.getElementById('reconnect').hidden,
+   kept:[...document.getElementById('transcript').children].some(li=>li.textContent==='Synthetic corrected reply.')}));
+  assert(after.conversation===conversationId&&after.reconnect&&after.kept,'reconnect continues the same conversation and transcript');
+  await screenshot(talk,'voice-after-reconnect');
+  await talk.context().close();
+ });
  await step('no-uncaught-browser-errors',async()=>{assert(errors.length===0,JSON.stringify(errors));});
 } finally {
  for(const context of contexts)await context.close();
  await nativePolicyBrowser?.close();await visibilityBrowser?.close();visibilityChrome?.kill('SIGTERM');await browser.close();fixture.kill('SIGTERM');
 }
-log('summary',{passes,failures,mandatory:27});
-assert(passes+failures===27,'complete mandatory inventory ran');
+log('summary',{passes,failures,mandatory:28});
+assert(passes+failures===28,'complete mandatory inventory ran');
 process.exitCode=failures?1:0;
