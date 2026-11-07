@@ -40,7 +40,7 @@ async function open(){
  await page.goto(APP+'#tgWebAppData='+encodeURIComponent(identity.initData));
  return {ctx,page};
 }
-const ready=page=>until(async()=>['listening','speaking'].includes(await page.evaluate(()=>document.getElementById('orb').dataset.state)),'call ready',30000);
+const ready=page=>until(async()=>['listening','speaking','silent'].includes(await page.evaluate(()=>document.getElementById('orb').dataset.state)),'call ready',30000);
 const peer=()=>provider.evaluate(()=>window.peers.length-1);
 const send=(index,event)=>provider.evaluate(({index,event})=>window.peers[index].send(event),{index,event});
 const got=(index,filter)=>provider.evaluate(({index,filter})=>window.peers[index].got.filter(e=>new Function('e',`return ${filter}`)(e)),{index,filter});

@@ -6,14 +6,21 @@
 <meta name="color-scheme" content="dark">
 <meta name="theme-color" content="#101416">
 <title>Hermes Telegram Talk</title>
-<link rel="stylesheet" href="app.css?v=d3af0034b46a5c93">
+<link rel="stylesheet" href="app.css?v=7fb0fc95f4f93ba1">
 <script src="https://telegram.org/js/telegram-web-app.js" defer></script>
-<script src="app.js?v=e0c19874e1a2e30d" defer></script>
+<script src="app.js?v=e7be3a05ece853fb" defer></script>
 </head>
 <body>
 <main>
-  <header><span class="brand-mark" aria-hidden="true">h.</span><h1>Hermes <span>Telegram Talk</span></h1></header>
-  <section class="presence" aria-label="Voice conversation">
+  <ol id="transcript" aria-label="Transcript" aria-live="polite" tabindex="0" hidden></ol>
+  <div class="actions">
+    <p id="call-status" role="status">Connecting</p>
+    <p id="thread-note" role="status" hidden></p>
+    <p id="error" role="alert" hidden></p>
+    <button id="start" type="button" hidden>Tap to start</button>
+    <div class="control-row">
+      <button id="menu-toggle" type="button" aria-label="Call menu" aria-expanded="false" aria-controls="call-menu">•••</button>
+      <section class="presence" aria-label="Voice conversation">
     <div id="orb" data-state="connecting" role="img" aria-label="Connecting. Microphone paused.">
       <canvas id="ring" width="640" height="640" aria-hidden="true"></canvas>
       <div class="portrait">
@@ -22,16 +29,16 @@
       </div>
       <span class="state-mark" aria-hidden="true"></span>
     </div>
-    <h2 id="name">Hermes</h2>
-  </section>
-  <ol id="transcript" aria-label="Transcript" aria-live="polite" tabindex="0" hidden></ol>
-  <div class="actions">
-    <div id="voice-box" hidden><label for="voice">Reply voice</label><select id="voice"></select><button id="reconnect" type="button" hidden>Reconnect</button></div>
-    <p id="voice-note" hidden>The new voice starts after Reconnect.</p>
-    <p id="thread-note" role="status" hidden></p>
-    <p id="error" role="alert" hidden></p>
-    <button id="start" type="button" hidden>Tap to start</button>
-    <button id="mute" type="button" aria-pressed="false" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M6 10v2a6 6 0 0 0 12 0v-2M12 18v3m-4 0h8"/></svg><span>Mute</span></button>
+        <h2 id="name">Hermes</h2>
+      </section>
+    <button id="mute" type="button" aria-pressed="false" aria-label="Mute microphone" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M6 10v2a6 6 0 0 0 12 0v-2M12 18v3m-4 0h8"/></svg><span>Mute</span></button>
+    </div>
+    <section id="call-menu" aria-label="Call menu" hidden>
+      <div id="voice-box" hidden><label for="voice">Reply voice</label><select id="voice"></select><button id="reconnect" type="button" hidden>Reconnect</button></div>
+      <p id="voice-note" hidden>The new voice starts after Reconnect.</p>
+      <p class="catalogue-note">Native subscription voice catalogue. Availability can vary by account.</p>
+      <button id="end" type="button">End call</button>
+    </section>
   </div>
 </main>
 <audio id="remote" autoplay playsinline></audio>

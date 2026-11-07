@@ -172,6 +172,18 @@ test('reply voice: hidden for one voice, a live change asks for an explicit reco
  assert.equal(f.nodes.get('voice-note').hidden,false);
  assert.equal(f.run('call===current'),true,'choosing a voice never drops the call by itself');
 });
+test('silent media is neutral and only enabled microphone energy means listening',()=>{
+ const f=fixture();f.run(`current.phase='ready';current.handshake=true;updateMic(current);render();`);
+ assert.equal(f.nodes.get('orb').dataset.state,'silent');
+ f.run(`current.inputLevel=.1;render();`);assert.equal(f.nodes.get('orb').dataset.state,'listening');
+ f.run(`current.muted=true;updateMic(current);current.outputLevel=.2;render();`);
+ assert.equal(f.run('track.enabled'),false);assert.equal(f.nodes.get('orb').dataset.state,'muted');
+ f.run(`current.muted=false;current.playing=false;render();`);assert.notEqual(f.nodes.get('orb').dataset.state,'speaking');
+});
+test('mute preference survives a replacement call and audio state transitions',()=>{
+ const f=fixture();f.run(`current.phase='ready';toggleMute();current.phase='blocked';updateMic(current);current.phase='ready';updateMic(current);`);
+ assert.equal(f.run('track.enabled'),false);assert.equal(f.run('microphoneMuted'),true);
+});
 let failed=0;
 for(const {name,run} of tests){try{await run();console.log('PASS',name);}catch(e){failed++;console.error('FAIL',name,e.message);}}
 console.log(`${tests.length-failed}/${tests.length} Talk frontend checks passed`);

@@ -6,7 +6,7 @@ profile:
   display_name: Shopy
 appearance:
   listen_color: "#4FC3F7"
-  speak_color: "#F48FB1"
+  speak_color: "#FFB74D"
 voice:
   model: gpt-live-1-codex
   voice: marin               # female-presenting vendor voice listed for gpt-live-1 (Hermes tools/voice_live.py);

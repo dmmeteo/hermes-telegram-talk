@@ -22,6 +22,23 @@ async function serve() {
     entry.gain = gain;
     entry.send = event => entry.channel.send(JSON.stringify(event));
     destination.stream.getTracks().forEach(track => peer.addTrack(track, destination.stream));
+    peer.ontrack = event => {
+      entry.receivedAudio = document.createElement('audio');
+      entry.receivedAudio.autoplay = true;
+      entry.receivedAudio.volume = .01;
+      entry.receivedAudio.srcObject = event.streams[0] || new MediaStream([event.track]);
+      document.body.append(entry.receivedAudio);
+      void entry.receivedAudio.play();
+      entry.audio = audio;
+      const source = audio.createMediaStreamSource(event.streams[0] || new MediaStream([event.track]));
+      entry.input = audio.createAnalyser();
+      source.connect(entry.input);
+      entry.sink = audio.createGain();
+      entry.sink.gain.value = 0;
+      entry.input.connect(entry.sink).connect(audio.destination);
+      entry.samples = new Float32Array(entry.input.fftSize);
+      entry.energy = () => { entry.input.getFloatTimeDomainData(entry.samples); return Math.sqrt(entry.samples.reduce((sum, v) => sum + v*v, 0) / entry.samples.length); };
+    };
     peer.ondatachannel = ({channel}) => {
       entry.channel = channel;
       // Chromium can hand over an incoming channel that is already open, and then never fires onopen for it.

@@ -22,6 +22,11 @@ const THREAD_NOTES = {unbound: "Not linked to a chat. Send /talk there to link i
   invalid: "Talk link not valid. Send /talk in the chat again.", foreign: "Talk link is for another account.",
   not_private: "Chat input works only in a private chat.", unavailable: "Chat input is unavailable here."};
 const reconnectButton = document.getElementById("reconnect");
+const menuButton = document.getElementById("menu-toggle");
+const callMenu = document.getElementById("call-menu");
+const endButton = document.getElementById("end");
+let microphoneMuted = false;
+let followingTranscript = true;
 let call = null;
 let conversation = null;
 let exiting = false;
@@ -84,19 +89,28 @@ function updateMic(current) {
 
 function render() {
   const current = call;
+  const mediaReady = current && current.phase === "ready" && current.playing && current.audio?.state === "running"
+    && current.peer?.connectionState === "connected";
   const state = !current ? "idle" : current.phase === "blocked" ? "blocked"
     : current.phase !== "ready" ? "connecting" : current.muted ? "muted"
-    : current.outputLevel > .015 ? "speaking" : "listening";
+    : !mediaReady ? "blocked" : current.outputLevel > .015 && !remoteAudio.muted && remoteAudio.volume !== 0
+      ? "speaking" : current.inputLevel > .005 && current.stream?.getAudioTracks().some(track => track.enabled && track.readyState !== "ended")
+      ? "listening" : "silent";
   orb.dataset.state = state;
   orb.setAttribute("aria-label", ({idle: "Call stopped.", blocked: "Tap to enable audio. Microphone paused.",
     connecting: "Connecting. Microphone paused.", listening: "Listening.", speaking: "Speaking.",
-    muted: "Microphone muted."})[state]);
+    silent: "Connected. Quiet.", muted: "Microphone muted."})[state]);
+  const status = document.getElementById("call-status");
+  const label = orb.getAttribute?.("aria-label") || state;
+  if (status.textContent !== label) status.textContent = label;
+  if (endButton) endButton.disabled = !current;
+  muteButton.setAttribute("aria-label", current?.muted ? "Unmute microphone" : "Mute microphone");
   muteButton.disabled = !current || current.phase !== "ready";
   muteButton.setAttribute("aria-pressed", String(Boolean(current?.muted)));
   muteButton.querySelector("span").textContent = current?.muted ? "Unmute" : "Mute";
   startButton.hidden = Boolean(current && current.phase !== "blocked" && !current.conversation?.saveFailed);
   startButton.textContent = current?.phase === "blocked" ? "Enable audio"
-    : current?.conversation?.saveFailed ? "Retry saving" : "Retry";
+    : current?.conversation?.saveFailed ? "Retry saving" : errorBox.textContent ? "Retry" : "Connect";
   draw(current);
 }
 
@@ -111,8 +125,8 @@ function rms(analyser, samples) {
 function draw(current) {
   const state = orb.dataset.state;
   const css = getComputedStyle(orb);
-  const level = current && current.phase === "ready"
-    ? Math.min(1, (state === "speaking" ? current.outputLevel : current.muted ? 0 : current.inputLevel) * 5) : 0;
+  const level = current && ["speaking", "listening"].includes(state)
+    ? Math.min(1, (state === "speaking" ? current.outputLevel : current.inputLevel) * 5) : 0;
   paint.clearRect(0, 0, 640, 640);
   paint.beginPath(); paint.arc(320, 320, 248, 0, Math.PI * 2);
   paint.strokeStyle = "#2d3933"; paint.lineWidth = 2; paint.stroke();
@@ -184,6 +198,8 @@ function stop(message = "") {
   if (current) {
     current.abort.abort();
     clearTimeout(current.timeout);
+    clearTimeout(current.avatarTimer);
+    if (current.avatarObject) URL.revokeObjectURL(current.avatarObject);
     clearTimeout(current.greetingTimer);
     clearTimeout(current.disconnectTimeout);
     cancelAnimationFrame(current.frame);
@@ -248,7 +264,7 @@ async function flush(owner) {
 
 function renderTranscript() {
   if (typeof document.createElement !== "function" || !transcriptList?.replaceChildren) return;
-  const stick = transcriptList.scrollTop + transcriptList.clientHeight >= transcriptList.scrollHeight - 24;
+  const stick = followingTranscript;
   transcriptList.replaceChildren(...transcript.lines.map(line => {
     const item = document.createElement("li");
     item.dataset.role = line.role;
@@ -264,7 +280,7 @@ function renderTranscript() {
 
 function pinTranscript() {
   // A rotation or resize keeps the newest line in view when the reader was already at the end.
-  if (transcriptList && !transcriptList.hidden) transcriptList.scrollTop = transcriptList.scrollHeight;
+  if (followingTranscript && transcriptList && !transcriptList.hidden) transcriptList.scrollTop = transcriptList.scrollHeight;
 }
 
 function transcriptLine(role) {
@@ -358,6 +374,8 @@ async function chooseVoice() {
 
 function reconnectVoice() {
   if (!call || reconnectButton.hidden) return;
+  if (callMenu) callMenu.hidden = true;
+  menuButton?.setAttribute("aria-expanded", "false");
   stop();
   void start();
 }
@@ -654,14 +672,36 @@ function applyProfile(data) {
   if (typeof data.profile?.display_name !== "string" || !/^#[0-9a-f]{6}$/i.test(data.appearance?.listen_color)
     || !/^#[0-9a-f]{6}$/i.test(data.appearance?.speak_color)) throw new Error("Voice configuration is unavailable. Tap Retry.");
   document.getElementById("name").textContent = data.profile.display_name;
-  document.documentElement.style.setProperty("--listen", data.appearance.listen_color);
-  document.documentElement.style.setProperty("--speak", data.appearance.speak_color);
+  document.documentElement.style.setProperty("--listen", "#4FC3F7");
+  document.documentElement.style.setProperty("--speak", "#FFB74D");
   const avatar = document.getElementById("avatar");
   const path = new URL(data.profile.avatar_url || "", location.href);
   if (path.origin === location.origin && path.pathname === "/tg-voice/avatar" && !path.search && !path.hash && !path.username && !path.password) {
     avatar.onload = () => { avatar.hidden = false; document.getElementById("face").setAttribute("hidden", ""); };
     avatar.onerror = () => { avatar.hidden = true; document.getElementById("face").removeAttribute("hidden"); };
     avatar.src = path.href;
+  }
+}
+
+async function refreshAvatar(current) {
+  try {
+    const response = await fetch("api/avatar", {method: "POST", credentials: "same-origin",
+      headers: {"Content-Type": "application/json"}, body: JSON.stringify({initData: current.auth}), signal: current.abort.signal});
+    if (!response.ok || call !== current) return;
+    const blob = await response.blob();
+    if (!["image/png", "image/jpeg", "image/svg+xml"].includes(blob.type) || blob.size > 1024 * 1024) return;
+    const avatar = document.getElementById("avatar");
+    const previous = current.avatarObject;
+    current.avatarObject = URL.createObjectURL(blob);
+    avatar.src = current.avatarObject;
+    if (previous) URL.revokeObjectURL(previous);
+  } catch (_) { /* Keep the last good image on a temporary failure. */ }
+  finally {
+    if (call === current) {
+      const delay = current.avatarRequested ? 30000 : 1000;
+      current.avatarRequested = true;
+      current.avatarTimer = setTimeout(() => void refreshAvatar(current), delay);
+    }
   }
 }
 
@@ -679,7 +719,7 @@ async function start() {
   if (!auth) { stop("Open Hermes Telegram Talk from Telegram to sign in."); return; }
   const current = { auth, phase: "connecting", abort: new AbortController(), nodes: [], began: performance.now(), stages: {},
     seen: new Set(), delegations: new Set(), jobs: new Map(), spoken: new Set(), cut: new Set(), polls: 0,
-    muted: false, inputLevel: 0, outputLevel: 0 };
+    muted: microphoneMuted, inputLevel: 0, outputLevel: 0 };
   call = current; showError(); render();
   try {
     current.audio = new AudioContext();
@@ -702,6 +742,7 @@ async function start() {
       || data.limits.event_batch_max < 1 || data.limits.event_batch_max > 128
       || typeof data.greeting_enabled !== "boolean") throw new Error("Voice configuration is unavailable. Tap Retry.");
     applyProfile(data);
+    void refreshAvatar(current);
     void loadVoice(current);  // off the startup path; the selector appears when it answers
     if (!conversation || conversation.id !== data.conversation_id || conversation.auth !== auth) {
       if (conversation) clearTimeout(conversation.retryTimer);
@@ -777,6 +818,10 @@ function onPageHide(event) {
   exiting = true;
   stop();
   if (conversation) clearTimeout(conversation.retryTimer);
+  menuButton?.removeEventListener("click", toggleMenu);
+  endButton?.removeEventListener("click", endCall);
+  document.removeEventListener?.("keydown", closeMenu);
+  transcriptList?.removeEventListener("scroll", trackTranscriptScroll);
   startButton.removeEventListener("click", start);
   muteButton.removeEventListener("click", toggleMute);
   voiceSelect?.removeEventListener("change", chooseVoice);
@@ -800,10 +845,26 @@ function onAudioPause() {
 }
 function toggleMute() {
   if (call?.phase !== "ready") return;
-  call.muted = !call.muted; updateMic(call);
+  microphoneMuted = !call.muted; call.muted = microphoneMuted; updateMic(call);
 }
 if (webApp) { webApp.ready(); webApp.expand(); }
+function toggleMenu() {
+  callMenu.hidden = !callMenu.hidden;
+  menuButton.setAttribute("aria-expanded", String(!callMenu.hidden));
+  if (!callMenu.hidden) voiceSelect?.focus?.();
+}
+function closeMenu(event) {
+  if (event.key === "Escape" && !callMenu.hidden) { toggleMenu(); menuButton.focus(); }
+}
+function endCall() { stop(); callMenu.hidden = true; menuButton.setAttribute("aria-expanded", "false"); }
+function trackTranscriptScroll() {
+  followingTranscript = transcriptList.scrollTop + transcriptList.clientHeight >= transcriptList.scrollHeight - 24;
+}
 function bindControls() {
+  menuButton?.addEventListener("click", toggleMenu);
+  endButton?.addEventListener("click", endCall);
+  document.addEventListener?.("keydown", closeMenu);
+  transcriptList?.addEventListener("scroll", trackTranscriptScroll);
   startButton.addEventListener("click", start);
   muteButton.addEventListener("click", toggleMute);
   voiceSelect?.addEventListener("change", chooseVoice);

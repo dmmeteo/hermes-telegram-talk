@@ -22,6 +22,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from hermes_talk.avatar import BotAvatar, telegram_photo
 from hermes_talk.store import TalkError
 from hermes_talk.thread_inbox import launch_thread
 
@@ -42,7 +43,7 @@ MINT_LIMIT = 6
 MINT_WINDOW_S = 60.0
 MAX_ACTIVE_EXCHANGES = 2
 TALK_LIMITS = {"bootstrap": 30, "new": 10, "events": 120, "end": 30, "task": 20, "tasks": 240, "task/cancel": 20,
-               "task/ack": 60, "context": 30, "context/ack": 30, "pulse/feedback": 30, "voice": 20}
+               "task/ack": 60, "context": 30, "context/ack": 30, "pulse/feedback": 30, "voice": 20, "avatar": 12}
 CALL = {"initData", "conversation_id", "voice_session_id"}
 TALK_ROUTES = {"bootstrap": ({"initData"}, set()),
                "session": ({"initData", "sdp"}, {"conversation_id", "launch"}),
@@ -56,7 +57,7 @@ TALK_ROUTES = {"bootstrap": ({"initData"}, set()),
                "context": (CALL, set()),
                "context/ack": (CALL | {"revision"}, set()),
                "pulse/feedback": (CALL | {"delegation_item_id", "request"}, set()),
-               "voice": ({"initData"}, {"voice", "launch"})}
+               "voice": ({"initData"}, {"voice", "launch"}), "avatar": ({"initData"}, set())}
 READINESS_STAGES = ("bootstrap", "microphone", "offer", "session", "remote", "handshake", "channel", "peer",
                     "playing", "audio", "usable", "greeting", "greeting_done", "ready")
 READINESS_FAILURES = re.compile(r"(?:connect|greeting):[a-z_]{1,24}|none")
@@ -84,7 +85,7 @@ STATIC_FILES = {"": ("index.html", "text/html; charset=utf-8"),
                 "app.js": ("app.js", "text/javascript; charset=utf-8"),
                 "app.css": ("app.css", "text/css; charset=utf-8")}
 CSP = ("default-src 'none'; script-src 'self' https://telegram.org; style-src 'self'; "
-       "connect-src 'self'; media-src 'self' blob:; img-src 'self' data:; base-uri 'none'; "
+       "connect-src 'self'; media-src 'self' blob:; img-src 'self' blob: data:; base-uri 'none'; "
        "form-action 'none'; frame-ancestors 'self' https://web.telegram.org")
 
 PERSONA = (
@@ -210,7 +211,7 @@ class MintLimiter:
 
 class VoiceApp:
     def __init__(self, bot_token, allowed_ids, origin, base_path="/tg-voice/",
-                 resolve=hermes_codex_credentials, post=post_sdp, clock=time.time, talk=None):
+                 resolve=hermes_codex_credentials, post=post_sdp, clock=time.time, talk=None, avatar_fetch=telegram_photo):
         if not bot_token or not allowed_ids:
             raise ValueError("bot token and allowed user ids are required")
         if not base_path.startswith("/") or not base_path.endswith("/"):
@@ -226,6 +227,10 @@ class VoiceApp:
         self.active = threading.BoundedSemaphore(MAX_ACTIVE_EXCHANGES)
         # Without a Talk runtime the server is the original voice test: one route, fixed persona.
         self.talk = talk
+        self.avatar = None
+        if talk is not None:
+            path = talk.config.avatar_path
+            self.avatar = BotAvatar(bot_token, talk.bot_id, (path.read_bytes(), AVATAR_TYPES[path.suffix.lower()]), avatar_fetch)
         if talk is not None and talk.inbox is not None:  # where `/talk` in the gateway points its button
             talk.inbox.publish(self.origin + base_path, talk.config.profile_id, talk.bot_id, self.allowed_ids)
         self.talk_limiters = {route: MintLimiter(limit, MINT_WINDOW_S, clock) for route, limit in TALK_LIMITS.items()}
@@ -270,6 +275,8 @@ class VoiceApp:
         if not self.talk_limiters[route].acquire(user_id):
             raise ApiError(429, "Too many requests. Wait a minute, then try again.")
         try:
+            if route == "avatar":
+                return self.avatar.image()
             if route == "bootstrap":
                 return self.talk.bootstrap(user_id, self.avatar_url)
             if route == "new":
@@ -432,7 +439,12 @@ def make_handler(app):
                 if len(raw) != length:
                     self.close_connection = True
                     return
-                self._json(200, app.handle(route, raw))
+                result = app.handle(route, raw)
+                if route == "avatar":
+                    image, kind = result
+                    self._send(200, image, kind, {"Cache-Control": "no-store", "Content-Security-Policy": "default-src 'none'; sandbox"})
+                else:
+                    self._json(200, result)
             except ApiError as exc:
                 self.close_connection = True
                 self._json(exc.status, {"error": exc.message})

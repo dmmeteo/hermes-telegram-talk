@@ -231,7 +231,7 @@ qualification shows they're accepted.
 ## Chat input from the Telegram thread
 
 A call is the voice of the Telegram conversation that opened it, not a separate chat. The Mini App shows the live
-transcript and, when the profile offers several, a reply-voice selector. Everything else goes to the bot in the chat:
+transcript above a compact bottom row. The three-dot menu contains the reply-voice selector and End call. Everything else goes to the bot in the chat:
 minimize the Mini App, send a text, a file or a photo, come back. Decisions and the inspected interfaces are in
 [docs/adr/0004-exact-thread-chat-input.md](docs/adr/0004-exact-thread-chat-input.md).
 
@@ -274,9 +274,11 @@ minimize the Mini App, send a text, a file or a photo, come back. Decisions and 
 
 ### Reply voice
 
-`voice.choices` lists the provider voices a user may pick (default first). `api/voice` stores the choice per
+`voice.choices` adds configured voices and labels to the complete nine-entry native subscription catalogue, with the profile default first. The three-dot menu contains the selector. `api/voice` stores the choice per
 (profile, bot, user) in SessionDB meta. The provider sets the voice when a session is created, so the choice applies
 from the next connection; during a call the page offers an explicit Reconnect that keeps the conversation.
+
+Bot avatars refresh through authenticated same-origin image responses, using a bounded per-bot cache and local fallback. See [the compact UI and catalogue decision](docs/adr/0005-compact-talk-media-and-avatar.md) for provenance and qualification limits.
 
 ### Shopy
 

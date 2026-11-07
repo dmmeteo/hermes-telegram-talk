@@ -436,8 +436,10 @@ def run(history_factory, event_factory, dispatch, out, extras=None):
         try:
             assert "voice" not in rig.call("bootstrap")  # the frozen bootstrap shape is unchanged
             boot = rig.call("voice")
-            assert boot["voice"] == {"current": "cove", "default": "cove", "applies": "next_connection",
-                                     "choices": [{"id": "cove", "label": "Cove"}, {"id": "marin", "label": "Marin"}]}
+            assert boot["voice"]["current"] == "cove" and boot["voice"]["default"] == "cove"
+            assert boot["voice"]["applies"] == "next_connection"
+            assert {v["id"] for v in boot["voice"]["choices"]} == {
+                "arbor", "breeze", "cove", "ember", "juniper", "maple", "sol", "spruce", "vale", "marin"}
             assert rig.call("voice", voice="marin")["voice"]["current"] == "marin"
             expect(400, lambda: rig.call("voice", voice="shimmer"))
             expect(400, lambda: rig.call("voice", voice="marin", user_id=fx.OTHER_USER_ID))

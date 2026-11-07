@@ -23,7 +23,7 @@ runtime = TalkRuntime(parse_config(data, home), f.BOT_TOKEN, MemoryHistory(),
                       soul=f.file_soul(home), skill=f.file_skill(home))
 upstream = f.FakeUpstream()
 app = server.VoiceApp(f.BOT_TOKEN, {f.USER_ID}, "http://127.0.0.1:8801",
-                      resolve=upstream.resolve, post=upstream.post, talk=runtime)
+                      resolve=upstream.resolve, post=upstream.post, talk=runtime, avatar_fetch=lambda *_: None)
 app.limiter.limit = 1000
 for limiter in app.talk_limiters.values():
     limiter.limit = 1000

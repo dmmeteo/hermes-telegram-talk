@@ -72,7 +72,7 @@ const state=page=>page.evaluate(()=>({phase:document.getElementById('orb').datas
  gum:window.__gum,tracks:window.__streams.flatMap(s=>s.getTracks()).map(t=>({enabled:t.enabled,state:t.readyState})),
  peers:window.__pcs.map(p=>p.connectionState),audio:window.__audios.map(a=>a.state),
  playing:!document.getElementById('remote').paused,analysers:window.__analysers,raf:window.__raf}));
-const ready=async page=>{try{return await until(async()=>{const s=await state(page);return ['listening','speaking'].includes(s.phase)&&s.tracks.some(t=>t.enabled)&&s;},'call ready');}catch(error){error.message+=' '+JSON.stringify(await state(page));throw error;}};
+const ready=async page=>{try{return await until(async()=>{const s=await state(page);return ['listening','speaking','silent'].includes(s.phase)&&s.tracks.some(t=>t.enabled)&&s;},'call ready');}catch(error){error.message+=' '+JSON.stringify(await state(page));throw error;}};
 const lastPeer=()=>provider.evaluate(()=>window.peers.length-1);
 const send=(index,event)=>provider.evaluate(({index,event})=>window.peers[index].send(event),{index,event});
 const gain=(index,value)=>provider.evaluate(({index,value})=>{window.peers[index].gain.gain.value=value;},{index,value});
@@ -89,13 +89,13 @@ try {
   assert(s.gum===1&&s.peers.length===1&&s.playing&&bytes>0,'one actual peer, mic, output and incoming RTP');
   return {inboundBytes:bytes};
  });
- await step('portrait-dark-avatar-ring-and-only-mute',async()=>{
+ await step('portrait-dark-bottom-controls-and-menu',async()=>{
   assert(await page.title()==='Hermes Telegram Talk','title');
-  const d=await page.evaluate(()=>({buttons:[...document.querySelectorAll('button')].filter(b=>!b.hidden).map(b=>b.textContent.trim()),
+  const d=await page.evaluate(()=>({buttons:[...document.querySelectorAll('button')].filter(b=>b.getClientRects().length).map(b=>b.textContent.trim()),
    overflow:document.documentElement.scrollWidth>innerWidth,face:document.getElementById('avatar').complete,
    name:document.getElementById('name').textContent,bg:getComputedStyle(document.body).backgroundColor}));
   assert(await page.evaluate(()=>getComputedStyle(document.getElementById('face')).display==='none' && !document.getElementById('avatar').hidden),'configured profile avatar painted');
-  assert(JSON.stringify(d.buttons)==='["Mute"]'&&!d.overflow&&d.face&&d.name==='Synthetic Talk'&&d.bg==='rgb(16, 20, 22)','minimal dark avatar UI');
+  assert(JSON.stringify(d.buttons)==='["•••","Mute"]'&&!d.overflow&&d.face&&d.name==='Synthetic Talk'&&d.bg==='rgb(16, 20, 22)','minimal dark avatar UI');
   await screenshot(page,'mobile-390-listening');return d;
  });
  await step('real-incoming-energy-drives-speaking-ring',async()=>{
@@ -103,7 +103,7 @@ try {
   await until(async()=>{const s=await state(page);return s.phase==='speaking'&&s.analysers.at(-1)?.last>.02;},'measured incoming energy');
   const after=await page.locator('#ring').screenshot();assert(!before.equals(after),'rendered ring changed with measured energy');
   await screenshot(page,'mobile-390-speaking');await gain(index,0);
-  await until(async()=>(await state(page)).phase==='listening','silence returns to listening');
+  await until(async()=>['listening','silent'].includes((await state(page)).phase),'silence returns to listening');
  });
  await step('real-outgoing-microphone-energy-and-configured-colors',async()=>{
   await until(async()=>(await state(page)).analysers[0]?.max>.005,'actual fake microphone energy measured');
@@ -329,14 +329,16 @@ try {
   await send(i,{type:'turn.done',turn:{id:'interim-final',role:'assistant',transcript:'Synthetic corrected reply.'}});
   await until(()=>talk.evaluate(()=>document.getElementById('transcript').lastElementChild.textContent==='Synthetic corrected reply.'),'final text replaces the interim line');
   for(const [width,height,name] of [[390,844,'transcript-390-portrait'],[360,640,'transcript-360-portrait'],[844,390,'transcript-landscape']]){
-   await talk.setViewportSize({width,height});const b=await talk.locator('#mute').boundingBox();const v=await talk.locator('#voice').boundingBox();
+   await talk.setViewportSize({width,height});const b=await talk.locator('#mute').boundingBox();
+   if(await talk.locator('#call-menu').isHidden())await talk.click('#menu-toggle');
+   const v=await talk.locator('#voice').boundingBox();
    assert(b&&b.y>=0&&b.y+b.height<=height&&v&&v.height>=44&&v.y+v.height<=height,`mute and voice selector visible ${name}`);
    assert(await talk.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`no horizontal overflow ${name}`);
    await screenshot(talk,name);
   }
   await talk.setViewportSize({width:390,height:844});
   const options=await talk.evaluate(()=>[...document.querySelectorAll('#voice option')].map(o=>o.value));
-  assert(JSON.stringify(options)==='["cove","marin"]','selector lists the configured reply voices');
+  assert(JSON.stringify([...options].sort())===JSON.stringify(['arbor','breeze','cove','ember','juniper','maple','marin','sol','spruce','vale'].sort()),'selector lists native subscription voices and configured Marin');
   await talk.focus('#voice');await screenshot(talk,'voice-selector-focused');
   const conversationId=await talk.evaluate(()=>conversation.id);
   const stored=talk.waitForResponse(r=>r.url().endsWith('/api/voice')&&r.request().postData().includes('marin'));

@@ -69,7 +69,7 @@ try {
         await page.goto(`${origin}/tg-voice/#tgWebAppData=${encodeURIComponent(identity)}`);
         await page.waitForTimeout(1700);
         const requests = (await state()).requests.slice(before);
-        const geometry = await page.evaluate(() => ({header: getComputedStyle(document.querySelector('header')).display,
+        const geometry = await page.evaluate(() => ({header: document.querySelector('header') === null,
           face: document.getElementById('face').getBoundingClientRect().toJSON(),
           overflow: document.documentElement.scrollWidth > innerWidth, name: document.getElementById('name').textContent,
           avatar: !document.getElementById('avatar').hidden && document.getElementById('avatar').naturalWidth > 0,
@@ -78,7 +78,7 @@ try {
         log(name + '-observed', {errors, requests, geometry});
         await shot(page, name);
         assert(errors.length === 0, `startup page errors: ${errors.join('; ')}`);
-        assert(geometry.header === 'flex' && !geometry.overflow, 'styled header and bounded layout');
+        assert(geometry.header && !geometry.overflow, 'app heading removed and bounded layout');
         assert(geometry.name === 'Synthetic Talk' && geometry.avatar, 'bootstrap replaces default name and paints configured avatar');
         assert(geometry.error.includes('Microphone access denied') && geometry.gum === 1, 'visible permission error');
         assert(geometry.control.width >= 44 && geometry.control.y >= 0 && geometry.control.y + geometry.control.height <= height, 'retry visible inside viewport');
@@ -144,7 +144,7 @@ try {
       const page = await context.newPage();
       await page.goto(`${origin}/tg-voice/`);
       await until(() => page.locator('#error').innerText().then(text => text.includes('Telegram')), 'missing-auth state');
-      assert(await page.evaluate(() => getComputedStyle(document.querySelector('header')).display === 'flex' && document.documentElement.scrollWidth <= innerWidth), 'desktop layout');
+      assert(await page.evaluate(() => document.querySelector('header') === null && document.documentElement.scrollWidth <= innerWidth), 'desktop layout');
       await page.addInitScript(() => {
         window.__mediaDevices = navigator.mediaDevices;  // pinned, as above
         navigator.mediaDevices.getUserMedia = async () => { throw new DOMException('Synthetic denial', 'NotAllowedError'); };

@@ -1,16 +1,18 @@
 # Hermes Telegram Talk
 
-A small English Telegram Mini App for a single authenticated voice conversation. The screen has a profile face, an audio ring, the profile name, the live transcript of this page's user and assistant speech, and Mute. Enable audio or Retry appears only when needed. A reply-voice selector appears only when the profile offers more than one voice; a change during a call shows a short note and an explicit Reconnect. When the launch is not linked to a chat thread (no `/talk` button, or an expired or used one), one short muted line says so ("Not linked to a chat. Send /talk there to link it."); a linked call shows nothing extra. There is no uploader, text composer, history browser, settings screen, account picker or task control: photos, files and text go to the bot in the Telegram chat itself.
+A dark English Telegram Mini App for a single authenticated voice conversation. The dialogue fills the screen above a compact persistent bottom row. Three dots open the call menu on the left, a larger round profile avatar sits in the center, and a round microphone control sits on the right. The app has no heading of its own. Telegram's outer container chrome stays outside the page.
 
-The transcript shows interim speech in muted italics, replaces it with the final text (a correction), shows each turn once, marks an assistant reply the user spoke over as "Interrupted" and an unsettled line cut by a reconnect as "Cut off". It is bounded (100 lines, about 22% of the viewport in portrait, the right column in short landscape) and scrolls; it is display only and is never posted to Telegram. Only final turns are saved, as before.
+The menu contains Reply voice and End call. Connect, Retry saving, Retry and Enable audio remain discoverable when needed. An unlinked launch shows "Not linked to a chat. Send /talk there to link it." A voice change during a call offers an explicit Reconnect. The catalogue qualification is visible in the menu.
+
+The transcript shows interim text, final corrections, Interrupted and Cut off labels as before. It keeps at most 100 lines and scrolls through the remaining height. It follows new text while the reader is at the end and preserves older reading positions on updates and rotation. It is display only. Final turns retain their existing persistence path.
 
 ## Composition and decisions
 
 The packet settles a calm dark mobile direction. The Stripe.dev quiet technical dossier informs neutral material, restrained light type and fine circular line art. Its desktop night-owl and mobile hero references were viewed. We omit the editorial grid and decorative console. This is a working mobile screen, not a copy of that landing page. No moodboard or variant exploration was needed.
 
-Chosen tokens are background #101416, text #EDF2EE and secondary text #A7B6AE. Listening and speaking colors come from authenticated bootstrap. The ring uses local and incoming Web Audio RMS measurements. Silence leaves a thin circle; energy changes its width and radius. There is no random or time-driven voice effect. A diamond marks connecting, a dot marks listening/speaking and a dash plus broken circle marks mute. Accessible labels identify each state. Reduced motion keeps fixed geometry while the measured audio still selects listening/speaking color and label.
+Chosen tokens are background #101416, text #EDF2EE and secondary text #A7B6AE. Blue identifies measured microphone input and orange identifies measured assistant output for both profiles. Silence and unusable media states are neutral. The ring uses local and incoming Web Audio RMS measurements. Silence leaves a thin circle; energy changes its width and radius. There is no random or time-driven voice effect. A diamond marks connecting, a dot marks listening/speaking and a dash plus broken circle marks mute. Accessible labels identify each state. Reduced motion keeps fixed geometry while the measured audio still selects listening/speaking color and label.
 
-The font is the device's system sans serif. No font download, third-party avatar or tracking request is introduced. An original inline SVG face is the fallback. Only the same-origin `/tg-voice/avatar` path can replace it. Touch targets exceed 44 px and keyboard focus has a visible outline. Portrait centers the face above Mute. Short landscape places the face and action side by side.
+The font is the device's system sans serif. No font download, third-party avatar or tracking request is introduced. An original inline SVG face is the fallback. The same-origin local fallback loads first. Authenticated same-origin `api/avatar` image bytes replace it through a short-lived blob URL. Touch targets exceed 44 px and keyboard focus has a visible outline. Portrait and landscape keep the same bottom row. The 52 px controls flank a 96 px avatar ring, reduced to 72 px in short landscape.
 
 ## Ownership and deployment boundary
 
@@ -26,7 +28,7 @@ Subscription events use `session.started`/`session.updated`, `input_transcript.a
 
 Mic tracks are disabled until peer connection, open data channel, subscription handshake, running AudioContext and successful output playback. When greeting is enabled, a single supported `session.context.append` in the speakable channel requests the configured opening. Final assistant text plus quiet measured output completes the opening. This follows the inspected subscription protocol. No shared interface file was changed. The frozen bootstrap does not advertise the configured event text cap. This client uses the backend default of 2000 characters and preserves longer text in Unicode-safe chunks. Integration must retain that cap or expose the configured value before using a lower cap.
 
-Autoplay denial or suspended audio keeps the mic disabled and exposes Enable audio. The browser may require that tap. A finite readiness deadline makes an absent handshake or greeting recoverable. Mute affects the actual outgoing track and survives a temporary connection interruption.
+Autoplay denial or suspended audio keeps the mic disabled and exposes Enable audio. The browser may require that tap. A finite readiness deadline makes an absent handshake or greeting recoverable. Mute affects the actual outgoing track and survives retry, reconnect and temporary connection interruption within the page.
 
 ## Exit and screen lock
 
@@ -41,3 +43,9 @@ Browser verification runs both the original `python3 verify.py --browser OUT` an
 To change ring behavior edit `static/talk/app.js` draw/sample functions, then run the full offline and browser inventories. To change the screen edit `static/talk/index.html` and `app.css`, then inspect desktop, 390 px portrait, short landscape, focus and reduced motion screenshots.
 
 The frontend slice's [task report](/home/me/.hermes/run/coding/prime-tgv2-front-1102/report.md) records its exact accepted source, screenshots and complete pass/fail inventory. Implemented and fixture-tested behavior is distinct from deployed and physical-device acceptance. Independent multi-model review is outside this worker's admitted single-model assignment; self-review and runtime verification are recorded without claiming that coverage.
+
+## Compact UI review
+
+The user-provided phone screenshot was inspected. Its oversized avatar, repeated heading and always-visible selector are deliberately replaced by the requested dialogue-first hierarchy. The existing dark palette, system font and restrained circular ring remain. See [ADR 0005](docs/adr/0005-compact-talk-media-and-avatar.md) for media, catalogue and avatar ownership.
+
+The separate `tests/compact/run.py OUT` gate exercises both synthetic profiles, actual outbound WebRTC receiver energy, mute and reconnect, blocked output, long-dialogue geometry, reading position, menu, End call and unlinked launch. The canonical mobile gate continues to exercise Chromium and WebKit. Exact final revision screenshot paths and review dispositions are recorded in the delivery report under `/home/me/.hermes/profiles/prime/run/coding/prime-talk-compact-codex-1107/report.md`.

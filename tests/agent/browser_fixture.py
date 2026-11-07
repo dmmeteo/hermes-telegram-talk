@@ -56,7 +56,7 @@ def relay(url, headers, body):
 
 
 app = server.VoiceApp(f.BOT_TOKEN, {f.USER_ID}, "http://127.0.0.1:8811",
-                      resolve=lambda: (f.SYNTHETIC_TOKEN, server._jwt_account(f.SYNTHETIC_TOKEN)), post=relay, talk=talk)
+                      resolve=lambda: (f.SYNTHETIC_TOKEN, server._jwt_account(f.SYNTHETIC_TOKEN)), post=relay, talk=talk, avatar_fetch=lambda *_: None)
 app.limiter.limit = 100
 for limiter in app.talk_limiters.values():
     limiter.limit = 1000

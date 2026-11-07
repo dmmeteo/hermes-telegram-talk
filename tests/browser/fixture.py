@@ -26,8 +26,14 @@ stats = {'resolves': 0, 'posts': 0}
 home = f.write_home(tempfile.mkdtemp(prefix='synthetic-talk-'))
 history = MemoryHistory()
 # Two reply voices, so the selector is part of every layout this inventory checks (synthetic config).
-talk = TalkRuntime(parse_config(f.config_data(voice={'voice': 'cove', 'choices': ['cove', 'marin']}), home), f.BOT_TOKEN,
-                   history,
+data = f.config_data(voice={'voice': 'cove', 'choices': ['cove', 'marin']})
+if os.environ.get('TALK_COMPACT_PROFILE') == 'pewds':
+    data['profile'].update(id='pewds', display_name='Synthetic Pewds')
+if os.environ.get('TALK_COMPACT_PROFILE') == 'shopy':
+    data['profile'].update(id='shopy', display_name='Synthetic Shopy')
+    data['voice']['voice'] = 'marin'
+    data['persona'] = {'self_reference': 'feminine'}
+talk = TalkRuntime(parse_config(data, home), f.BOT_TOKEN, history,
                    soul=f.file_soul(home), skill=f.file_skill(home), home=home)
 # What `/talk` in the synthetic user's private chat would hand the Mini App: one launch bound to that chat.
 LAUNCH = talk.inbox.issue_launch(Thread(talk.config.profile_id, talk.bot_id, f.USER_ID, str(f.USER_ID)))
@@ -50,7 +56,7 @@ def relay(url, headers, body):
 
 
 app = server.VoiceApp(f.BOT_TOKEN, {f.USER_ID, f.OTHER_USER_ID}, 'http://127.0.0.1:8801',
-                      resolve=resolve, post=relay, talk=talk)
+                      resolve=resolve, post=relay, talk=talk, avatar_fetch=lambda *_: None)
 app.limiter.limit = 100
 for limiter in app.talk_limiters.values():
     limiter.limit = 500

@@ -176,12 +176,16 @@ SELF_REFERENCE = {"feminine": "Refer to yourself in the feminine grammatical gen
                                "\u00abя зрозумів\u00bb)."}
 
 
+SUBSCRIPTION_VOICES = tuple((name, name.capitalize()) for name in
+                            ("arbor", "breeze", "cove", "ember", "juniper", "maple", "sol", "spruce", "vale"))
+
+
 def _voices(value, default):
-    """The reply voices a user may choose: operator-listed provider voice ids, default first; at most 8."""
+    """The reply voices a user may choose: native subscription catalogue plus configured voices, default first."""
     if value is None:
-        return ((default, default.capitalize()),)
-    if not isinstance(value, list) or not 1 <= len(value) <= 8:
-        raise ConfigError("voice.choices must be a list of 1..8 voices")
+        value = [default]
+    if not isinstance(value, list) or not 1 <= len(value) <= 64:
+        raise ConfigError("voice.choices must be a list of 1..64 voices")
     choices = []
     for entry in value:
         entry = {"id": entry} if isinstance(entry, str) else entry
@@ -192,6 +196,7 @@ def _voices(value, default):
     ids = [c[0] for c in choices]
     if len(set(ids)) != len(ids) or default not in ids:
         raise ConfigError("voice.choices must be distinct and include voice.voice")
+    choices.extend(choice for choice in SUBSCRIPTION_VOICES if choice[0] not in ids)
     return tuple(sorted(choices, key=lambda c: c[0] != default))
 
 
