@@ -31,7 +31,20 @@ activity:
   enabled: true
   window_hours: 168
   sources: [cli, telegram, discord, cron, kanban, desktop]
-tasks:
-  enabled: false
+tasks:                       # same task setup as talk.example.yaml; replace the placeholder id and workdir
+  enabled: true
+  user_ids: [123456789]      # PLACEHOLDER: the operator's numeric Telegram id, also in TG_VOICE_ALLOWED_USER_IDS
+  toolsets: [hermes-telegram]
+  workdir: .                 # relative to this file; point it at an existing local project directory
+  max_concurrent: 1
+  max_open_per_user: 3
+  run_budget_seconds: 600
+  max_turns: 30
+  request_chars: 2000
+  result_chars: 1500
+receipts:
+  enabled: true
+  max_chars: 700
+  attempts: 3
 privacy:
   persist_audio: false

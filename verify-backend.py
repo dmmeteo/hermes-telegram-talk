@@ -380,6 +380,39 @@ def context_budgets_clip_every_section(h):
 
 
 @check
+def shipped_examples_turn_on_bounded_voice_tasks_for_a_placeholder_operator(h):
+    from hermes_talk.config import Budgets, Receipts, Tasks, load_config
+    for example in ("talk.example.yaml", "talk.shopy.example.yaml"):
+        cfg = load_config(ROOT / example)
+        assert cfg.tasks == Tasks(enabled=True, user_ids=(123456789,), toolsets=("hermes-telegram",), workdir=ROOT,
+                                  max_concurrent=1, max_open_per_user=3, run_budget_s=600, max_turns=30,
+                                  request_chars=2000, result_chars=1500), (example, cfg.tasks)
+        assert cfg.receipts == Receipts(enabled=True, destinations=(), max_chars=700, attempts=3), \
+            (example, cfg.receipts)
+        assert cfg.budgets == Budgets(instructions_chars=12000, soul_chars=4000, skill_chars=1500, skills_chars=3000,
+                                      summary_chars=1200, recent_turns=8, turn_chars=300, activity_items=5,
+                                      activity_chars=1200, event_batch_max=20, event_text_chars=2000), \
+            (example, cfg.budgets)
+        assert fx.USER_ID not in cfg.tasks.user_ids and fx.OTHER_USER_ID not in cfg.tasks.user_ids
+        if h.native:
+            import toolsets
+            assert all(toolsets.validate_toolset(name) for name in cfg.tasks.toolsets), cfg.tasks.toolsets
+    pewds = load_config(ROOT / "talk.example.yaml")
+    assert (pewds.profile_id, pewds.voice, pewds.greeting_phrases) == ("pewds", "cove", ()), pewds
+    bare = parse_config({"profile": {"id": "x"}}, h.home)
+    assert (bare.tasks.enabled, bare.tasks.user_ids, bare.tasks.toolsets, bare.receipts.enabled) == \
+        (False, (), (), False), bare
+    usable = {"enabled": True, "user_ids": [123456789], "toolsets": ["hermes-telegram"], "workdir": "."}
+    for broken in ({**usable, "user_ids": []}, {k: v for k, v in usable.items() if k != "user_ids"},
+                   {k: v for k, v in usable.items() if k != "toolsets"}, {**usable, "workdir": "no-such-project"}):
+        try:
+            parse_config({"profile": {"id": "x"}, "tasks": broken}, h.home)
+        except ConfigError:
+            continue
+        raise AssertionError(f"accepted unusable tasks {broken}")
+
+
+@check
 def activity_briefing_is_scoped_truthful_and_cursored(h):
     h.seed("Synthetic deploy check", turns=[("user", "go"), ("assistant", "deployed fine")], end_reason="done",
            age_s=600)

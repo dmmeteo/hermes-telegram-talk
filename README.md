@@ -417,7 +417,24 @@ See [talk.example.yaml](talk.example.yaml). It sets:
 - the greeting;
 - the skill allowlist and budgets;
 - activity window and sources;
+- voice tasks, on: the `hermes-telegram` toolset, one process at a time, 3 open tasks per user, a 600 s run
+  budget, 30 turns, 2000-character requests and 1500-character results;
+- task reports in Telegram, on: 700 characters, 3 send attempts;
 - `privacy.persist_audio: false`, the only accepted value.
+
+`talk.shopy.example.yaml` uses the same task and report settings.
+
+Before the first call, edit two task values in your copy. The placeholders load without error, so nothing warns you:
+1. **`tasks.user_ids`.** The example lists `123456789`, a placeholder. Replace it with the operator's numeric
+   Telegram id. That id must also be in `TG_VOICE_ALLOWED_USER_IDS`. Anyone not in both lists cannot start a task,
+   so with the placeholder left in, every delegation is refused.
+2. **`tasks.workdir`.** Tasks run in this directory. It is relative to the config file, so `.` is the directory that
+   holds the config. Set it to an existing local project directory. A directory that does not exist stops the
+   config from loading.
+
+The parser itself keeps tasks off. A config with no `tasks` block, or with `enabled: false`, starts no task. Hermes
+must know every name in `tasks.toolsets` (see "Voice tasks" for readiness). To turn tasks off, set
+`tasks.enabled: false`.
 
 Typical changes:
 - **Add a voice skill.** Put its name in `context.skills`.
