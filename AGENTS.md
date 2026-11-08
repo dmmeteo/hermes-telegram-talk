@@ -27,7 +27,8 @@ override (see `docs/adr/0002-pulse-engine-model-route.md`); tests reach `tests/p
 never a provider. Never add a model-role slot, credential or billing path for Pulse.
 Pulse read state is per card and per call: being in the instructions is exposure, never hearing; only a named,
 answered mention or feedback acknowledges a card (see README "Pulse" and `docs/adr/0001-pulse-per-item-evidence.md`). For task, context or delegation changes, `python3 verify-agent.py --require-hermes` must print `TALK_AGENT_OK` and
-`python3 verify-agent.py --browser <out-dir>` `TALK_AGENT_BROWSER_OK`. Voice tasks run as native Hermes sessions:
+`python3 verify-agent.py --browser <out-dir>` `TALK_AGENT_BROWSER_OK`. For queue or execution-isolation changes,
+`python3 verify-agent.py --rpc-target <SDK> --concurrency` must print `TALK_CONCURRENCY_OK` (see `docs/adr/0006-same-call-isolated-task-queue.md`). Voice tasks run as native Hermes sessions:
 either `hermes chat` single-query processes or (manager-authorized 2026-11-03, for current cores whose CLI rejects
 `--run-budget`) a thin plugin-side client of the canonical public gateway RPC (`session.create` with `run_budget`,
 `session.interrupt`, finite single-query turns under the profile's own `approvals.single_query_mode`; never

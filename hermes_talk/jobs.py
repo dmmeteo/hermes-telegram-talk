@@ -13,7 +13,14 @@ interrupted and never rerun, because its side effects are unknown. Receipt is se
 client, or call instructions the assistant then spoke in). It never means the result was heard.
 The chat report of a finished job is a third, separate state (receipts.py); report_to holds the
 destination bound when the job was accepted.
+
+Execution is frozen when a job is accepted. A canonical job continues its conversation's one native session,
+so one runs per conversation at a time. An isolated job (tasks.execution: isolated) gets its own native
+session and a bounded context frozen at acceptance, never resumes or rebinds the conversation's session, and
+runs beside its siblings unless their declared workdir writer scopes overlap. Every outcome takes the next
+result_seq of its conversation when it becomes terminal: the order in which results are handed to the call.
 """
+import hashlib
 import json
 import logging
 import re
@@ -21,6 +28,7 @@ import secrets
 import threading
 import time
 from dataclasses import asdict, dataclass, field, replace
+from pathlib import PurePosixPath
 
 from .agent import alive, process_start, read_outcome
 from .store import TalkError, clip
@@ -41,6 +49,10 @@ JOB_ID = re.compile(r"jb_[A-Za-z0-9_-]{16,64}")
 DELEGATION_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 JOB_PREFIX = "hermes_talk:job:"
 STOP_RETRY_MIN_S, STOP_RETRY_MAX_S, STOP_RECHECK_S = 1.0, 8.0, 10.0  # gateway stop: retry backoff, re-request
+CANONICAL, ISOLATED = "canonical", "isolated"
+READ_ONLY, WHOLE_WORKDIR = "", "."
+WRITES = re.compile(r"(?im)^\s*writes\s*:\s*(.+?)\s*$")
+READS_ONLY = re.compile(r"(?im)^\s*read[\s_-]*only\s*\.?\s*$")
 SPOKEN_STATE = {SUCCEEDED: "finished", FAILED: "failed", CANCELLED: "was cancelled",
                 INTERRUPTED: "was interrupted when Talk restarted; it was not rerun"}
 
@@ -77,6 +89,11 @@ class Job:
     acks: int = 0
     notes: tuple = field(default_factory=tuple)
     report_to: dict = None
+    execution: str = CANONICAL
+    writer: str = WHOLE_WORKDIR
+    context: str = None
+    context_sha256: str = None
+    result_seq: int = None
 
     @property
     def terminal(self):
@@ -100,7 +117,8 @@ class Job:
     def public(self, report=None):
         """The browser's view: no prompt, process, native session, scope or destination details."""
         return {"id": self.id, "number": self.number, "delegation_item_id": self.delegation_id,
-                "voice_session_id": self.voice_session_id, "state": self.state, "receipt": self.receipt,
+                "voice_session_id": self.voice_session_id, "generation": self.generation,
+                "result_seq": self.result_seq, "state": self.state, "receipt": self.receipt,
                 "result": self.result if self.terminal else "", "error": self.error,
                 "spoken": self.spoken() if self.terminal else "",
                 "report": report.public() if report is not None else None}
@@ -119,10 +137,47 @@ class Job:
 
 
 def new_job(scope, conversation_id, voice_session_id, generation, delegation_id, number, request, now,
-            report_to=None):
+            report_to=None, execution=CANONICAL, writer=WHOLE_WORKDIR):
     return Job(id="jb_" + secrets.token_urlsafe(18), scope=scope, conversation_id=conversation_id,
                voice_session_id=voice_session_id, generation=generation, delegation_id=delegation_id,
-               number=number, request=request, created=now, report_to=report_to)
+               number=number, request=request, created=now, report_to=report_to, execution=execution,
+               writer=writer)
+
+
+def writer_scope(request):
+    """(request without its directive, writer scope) for an isolated task.
+
+    "READ ONLY" claims nothing; "WRITES: <path>" claims that path inside the task workdir; no directive claims the
+    whole workdir. A claim is a scheduling promise between sibling tasks, not a sandbox: the tools are unchanged."""
+    reads, writes = READS_ONLY.search(request), WRITES.search(request)
+    if reads and writes:
+        raise TalkError(400, "A task is either READ ONLY or WRITES one place, not both. Nothing was started.")
+    if reads is None and writes is None:
+        return request, WHOLE_WORKDIR
+    match = reads or writes
+    stripped = (request[:match.start()] + request[match.end():]).strip()
+    if reads:
+        return stripped, READ_ONLY
+    path = PurePosixPath(writes.group(1).strip().strip("\"'`"))
+    if path.is_absolute() or ".." in path.parts or not str(path):
+        raise TalkError(400, "WRITES must name a path inside the task workdir. Nothing was started.")
+    return stripped, str(path)
+
+
+def claims(job):
+    """What a running job holds exclusively: its conversation's canonical session, or its workdir writer scope."""
+    if job.execution != ISOLATED:
+        return {("session", job.conversation_id)}
+    return set() if job.writer == READ_ONLY else {("workdir", job.writer)}
+
+
+def _covers(a, b):
+    return a == WHOLE_WORKDIR or b == WHOLE_WORKDIR or a == b or b.startswith(a + "/") or a.startswith(b + "/")
+
+
+def overlap(mine, theirs):
+    return any(k1 == k2 and (v1 == v2 if k1 == "session" else _covers(v1, v2))
+               for k1, v1 in mine for k2, v2 in theirs)
 
 
 def dump(job):
@@ -182,9 +237,12 @@ class JobBoard:
         return job
 
     def _finish(self, job, full=None):
-        """Persist a terminal job, then its report (before any send), then hand the report to the sender."""
+        """Persist a terminal job with its conversation's next result_seq, then its report (before any send), then
+        hand the report to the sender. Callers hold the lock, so result_seq is a strict order of outcomes."""
         self.handles.pop(job.id, None)
-        job = self._save(job)
+        seq = 1 + max((j.result_seq or 0 for j in self.jobs.values()
+                       if j.scope == job.scope and j.conversation_id == job.conversation_id), default=0)
+        job = self._save(replace(job, result_seq=seq, context=None))
         if self.desk is not None:
             try:
                 self.desk.prepare(job, job.error if full is None else full)
@@ -223,8 +281,12 @@ class JobBoard:
             job = self.jobs.get(self.history.get_meta(delegation_key(scope, conversation_id, generation, delegation_id)) or "")
         return job if job is not None and job.scope == scope and job.conversation_id == conversation_id else None
 
-    def submit(self, scope, conversation_id, voice_session_id, generation, delegation_id, request, report_to=None):
-        """(job, created). A repeated delegation of the same call returns its existing job and starts nothing."""
+    def submit(self, scope, conversation_id, voice_session_id, generation, delegation_id, request, report_to=None,
+               writer=WHOLE_WORKDIR):
+        """(job, created). A repeated delegation of the same call returns its existing job and starts nothing.
+
+        An isolated job's context is built and frozen here, so a queued or restarted job runs on what the call had
+        said when it delegated, whatever happens in between."""
         with self.lock:
             key = delegation_key(scope, conversation_id, generation, delegation_id)
             existing = self.jobs.get(self.history.get_meta(key) or "")
@@ -233,26 +295,40 @@ class JobBoard:
             if sum(1 for j in self.jobs.values() if j.scope == scope and j.state in OPEN) >= self.tasks.max_open_per_user:
                 raise TalkError(429, "Too many Hermes tasks are already open. Wait for one to finish or cancel one.")
             number = 1 + max((j.number for j in self.jobs.values() if j.conversation_id == conversation_id), default=0)
-            job = self._save(new_job(scope, conversation_id, voice_session_id, generation, delegation_id, number,
-                                     request, self.clock(), report_to))
+            execution = self.tasks.execution
+            job = new_job(scope, conversation_id, voice_session_id, generation, delegation_id, number, request,
+                          self.clock(), report_to, execution, writer if execution == ISOLATED else WHOLE_WORKDIR)
+            if execution == ISOLATED:
+                try:
+                    context, _ = self.prompt_for(job)
+                except Exception as exc:
+                    job = self._finish(job.to(FAILED, finished=self.clock(),
+                                              error=f"The task could not be prepared ({type(exc).__name__}). Nothing ran."))
+                else:
+                    job = self._save(replace(job, context=context,
+                                             context_sha256=hashlib.sha256(context.encode()).hexdigest()))
+            else:
+                job = self._save(job)
             self.history.set_meta(key, job.id)
         self.pump()
         return self.jobs[job.id], True
 
     def pump(self):
-        """Start accepted jobs, oldest first, while slots are free; a job that failed to start takes no slot."""
+        """Start accepted jobs, oldest first, while slots are free; a job that failed to start takes no slot.
+
+        A job waits while a running one holds an overlapping claim (claims()); later jobs may pass it."""
         with self.lock:
-            running = [j for j in self.jobs.values() if j.state == RUNNING]
-            busy = {j.conversation_id for j in running}
-            slots = self.tasks.max_concurrent - len(running)
+            held = [claims(j) for j in self.jobs.values() if j.state == RUNNING]
+            slots = self.tasks.max_concurrent - len(held)
             for job in sorted((j for j in self.jobs.values() if j.state == ACCEPTED), key=lambda j: (j.created, j.id)):
                 if slots <= 0:
                     break
-                if job.conversation_id in busy:
+                mine = claims(job)
+                if any(overlap(mine, other) for other in held):
                     continue
                 if self._launch(job):
                     slots -= 1
-                    busy.add(job.conversation_id)
+                    held.append(mine)
 
     def _adopt_gateway(self, job):
         """A gateway job outlives Talk: follow its admission, or admit it once if Talk stopped before the receipt."""
@@ -271,12 +347,20 @@ class JobBoard:
         with self.lock:
             return self._save(replace(self.jobs[job_id], **fields))
 
+    def _prepare(self, job):
+        """(prompt, resume): an isolated job's frozen context in a new session, else the canonical session's turn."""
+        if job.execution == ISOLATED:
+            if not job.context:
+                raise ValueError("an isolated job has no frozen context")
+            return job.context, None
+        return self.prompt_for(job)
+
     def _launch(self, job):
         """True when a native process now runs the job; otherwise the job has failed and nothing ran."""
         if self.gateway:
             return self._launch_gateway(job)
         try:
-            prompt, resume = self.prompt_for(job)
+            prompt, resume = self._prepare(job)
         except Exception as exc:
             self._finish(job.to(FAILED, finished=self.clock(),
                                 error=f"The task could not be prepared ({type(exc).__name__}). Nothing ran."))
@@ -298,7 +382,7 @@ class JobBoard:
     def _launch_gateway(self, job):
         """True when the gateway admitted the job; otherwise it has failed and nothing was admitted."""
         try:
-            prompt, resume = self.prompt_for(job)
+            prompt, resume = self._prepare(job)
         except Exception as exc:
             self._finish(job.to(FAILED, finished=self.clock(),
                                 error=f"The task could not be prepared ({type(exc).__name__}). Nothing ran."))
@@ -394,7 +478,8 @@ class JobBoard:
         now = self.clock()
         if outcome is not None and outcome.session_id:
             job = replace(job, native_session_id=outcome.session_id)
-            self.bind(job, outcome.session_id)
+            if job.execution != ISOLATED:  # an isolated session never becomes the conversation's own
+                self.bind(job, outcome.session_id)
         limit = self.tasks.result_chars
         full = None
         if self.gateway and job.admission_id and outcome is None:

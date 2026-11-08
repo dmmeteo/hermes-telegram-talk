@@ -16,7 +16,7 @@ from .agent import Readiness
 from .gateway_rpc import task_agent
 from .config import PRIVATE_NAMES
 from .context import UPDATE_HEADER, chat_section, compose, update
-from .jobs import DELEGATION_ID, OPEN, SUCCEEDED, UNDELIVERED, JobBoard
+from .jobs import DELEGATION_ID, ISOLATED, OPEN, SUCCEEDED, UNDELIVERED, WHOLE_WORKDIR, JobBoard, writer_scope
 from .pulse_engine import SELECT_ON_CALL_S, PulseEngine
 from .pulse_ledger import PulseLedger
 from .pulse_model import PulseModel
@@ -199,7 +199,8 @@ class TalkRuntime:
         if self.board is None:
             return []
         jobs = self.board.of_conversation(account.key, conversation_id)
-        done = [(j.id, "- " + redact(j.spoken()), self._synopsis(j)) for j in jobs
+        done = [(j.id, "- " + redact(j.spoken()), self._synopsis(j))
+                for j in sorted(jobs, key=lambda j: (j.result_seq or 0, j.number))
                 if j.terminal and j.receipt == UNDELIVERED and j.voice_session_id != exclude_voice_session]
         running = [(f"open:{j.id}", f"- Hermes task {j.number} ({clip(redact(j.request), 80)}) is {j.state}.", "")
                    for j in jobs if j.state in OPEN]
@@ -225,6 +226,14 @@ class TalkRuntime:
             note += (f" Only if the user explicitly asks for the report to go to one of: {names}, end the delegated "
                      "task with a line \"REPORT TO: <name>\"; it then goes there instead.")
         return note
+
+    def _parallel_note(self):
+        if self.board is None or self.config.tasks.execution != ISOLATED:
+            return ""
+        return (" Several tasks can run at once, each in its own Hermes session. If a task only reads, checks or "
+                "looks something up, end it with a line \"READ ONLY\". If it changes files, end it with a line "
+                "\"WRITES: <folder or file inside the task folder>\". Tasks that may write the same place run one "
+                "after another, and a task without either line waits for every other writing task.")
 
     def _report_to(self, user_id, request):
         """(request without a directive, bound destination): the user's own chat unless they named a configured one."""
@@ -263,7 +272,8 @@ class TalkRuntime:
         job_items = self._job_items(account, conversation_id)
         instructions, report = compose(c, soul, [s for s in skills if s[1]], redact(state.get("summary") or ""),
                                        turns, lines, total, note, self.readiness(user_id).ready,
-                                       job_items, self._reports_note(user_id), self._greeting_line(account))
+                                       job_items, self._reports_note(user_id) + self._parallel_note(),
+                                       self._greeting_line(account))
         # Only cards the final text carries whole are exposed; none counts as heard until the call shows it.
         carried = [card["fp"] for card in cards[: report["activity_items"]]]
         report["job_ids"] = [i for i in report["job_ids"] if not i.startswith("open:")]
@@ -410,7 +420,10 @@ class TalkRuntime:
         return ended
 
     def _task_prompt(self, job):
-        """(prompt, resume): the request once, after the bounded voice turns that preceded it."""
+        """(prompt, resume): the request once, after the bounded voice turns that preceded it.
+
+        A canonical job resumes the conversation's native session. An isolated job starts its own, so its prompt
+        also carries the conversation's earlier task outcomes, bounded like the turns."""
         b = self.config.budgets
         request = job.request.strip()
         turns = [(role, text) for role, text in self.history.recent(job.conversation_id, b.recent_turns)
@@ -419,8 +432,16 @@ class TalkRuntime:
         parts = [TASK_PROMPT.format(number=job.number)]
         if voice:
             parts.append("Voice conversation so far (oldest first):\n" + voice)
+        if job.execution != ISOLATED:
+            parts.append(f"TASK: {request}")
+            return "\n\n".join(parts), self.store.agent_session(job.conversation_id)
+        earlier = [j for j in self.board.of_conversation(job.scope, job.conversation_id) if j.terminal]
+        earlier.sort(key=lambda j: (j.result_seq or 0, j.number))
+        if earlier:
+            parts.append("Earlier Hermes tasks of this conversation (oldest first):\n" + clip(
+                "\n".join("- " + clip(redact(j.spoken()), b.turn_chars) for j in earlier), b.tasks_chars))
         parts.append(f"TASK: {request}")
-        return "\n\n".join(parts), self.store.agent_session(job.conversation_id)
+        return "\n\n".join(parts), None
 
     def _tasks_for(self, user_id):
         readiness = self.readiness(user_id)
@@ -471,10 +492,13 @@ class TalkRuntime:
                     reply += " That is as much of the result as voice keeps."
             return {"job": self._public_job(job), "created": False, "channel": "speakable", "reply": reply}
         request, report_to = self._report_to(user_id, request)
+        writer = WHOLE_WORKDIR
+        if self.config.tasks.execution == ISOLATED:
+            request, writer = writer_scope(request)
         if not request:
             raise TalkError(400, "A task request must say what to do.")
         job, created = self.board.submit(account.key, conversation_id, voice_session_id, record.get("generation", 0),
-                                         delegation_item_id, " ".join(request.split()), report_to)
+                                         delegation_item_id, " ".join(request.split()), report_to, writer)
         reply = (f"Hermes is working on this as background task {job.number}. Its result will follow on this "
                  "delegation; do not guess it." if created and job.state in OPEN else
                  f"This was already sent to Hermes as task {job.number}; it is {job.state}.")

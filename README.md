@@ -357,7 +357,17 @@ timeout or any unclassified error is uncertain too, never retried. A send whose 
 refused, rate limit) go back to pending, at most `receipts.attempts` times, with the same stored text; the task never
 reruns. A sent report records the Bot API message id.
 
-Limits: `tasks.max_concurrent` (1..2) processes, `tasks.max_open_per_user` open jobs, `tasks.request_chars`,
+### Same-call task queue (experiment)
+
+`tasks.execution: isolated` lets one call keep several tasks running ([ADR 0006](docs/adr/0006-same-call-isolated-task-queue.md)).
+Each task gets its own native Hermes session and a bounded context frozen when it is delegated (the voice turns and
+the conversation's earlier task outcomes); none resumes or rebinds the conversation's own session. Up to 3 run and 13
+stay open per user; the next delegation is refused. A delegation ending `READ ONLY` claims nothing, `WRITES: <path>`
+claims that path inside `tasks.workdir`, and no line claims the whole workdir: tasks whose claims overlap run one after
+another. Claims are scheduling promises, not a sandbox. Outcomes reach the call in completion order (`result_seq`),
+each once. `python3 verify-agent.py --rpc-target <SDK> --concurrency` runs the whole experiment offline.
+
+Limits: `tasks.max_concurrent` (1..2, isolated 1..3) runs, `tasks.max_open_per_user` (1..5, isolated 1..13) open jobs, `tasks.request_chars`,
 `tasks.result_chars`, `tasks.max_turns` and `tasks.run_budget_seconds` (Hermes' own budget, then a stop 60 s later).
 Every task route is rate limited per user and accepts 32 KiB.
 

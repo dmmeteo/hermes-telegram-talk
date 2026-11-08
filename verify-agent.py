@@ -421,9 +421,9 @@ def cross_user_denial(model):
         e.close()
 
 
-def cross_profile_denial(model):
-    a = Env(model)
-    b = Env(model, profile="other")
+def cross_profile_denial(model, **tasks):
+    a = Env(model, **tasks)
+    b = Env(model, profile="other", **tasks)
     try:
         conv, vs = a.call()
         _, body = a.task(conv, vs, "slow 1", "del_p1")
@@ -440,7 +440,7 @@ def cross_profile_denial(model):
                                                                      scope=job.scope.replace("synthetic:", "other:"))))
         root = a.root
         a.close(keep=True)
-        a = Env(model, root=root)
+        a = Env(model, root=root, **tasks)
         assert forged_id in a.talk.board.jobs
         forged = {"ack": a.post("task/ack", {"conversation_id": conv, "voice_session_id": vs, "job_id": forged_id})[0],
                   "cancel": a.post("task/cancel", {"conversation_id": conv, "job_id": forged_id})[0]}
@@ -1539,9 +1539,9 @@ def _fault(agent, inject):
     return real
 
 
-def rpc_lost_admission_ack(model):
+def rpc_lost_admission_ack(model, **tasks):
     """The real gateway admits the prompt, then the acknowledgement is lost: Talk reconciles the same admission."""
-    e = gateway_env(model)
+    e = gateway_env(model, **tasks)
     try:
         seen = {}
 
@@ -1669,6 +1669,295 @@ def rpc_composite_toolsets(model):
         e.close()
 
 
+ISOLATED_TASKS = {"execution": "isolated", "max_concurrent": 3, "max_open_per_user": 13}
+
+
+def isolated_env(model, **kw):
+    return gateway_env(model, **ISOLATED_TASKS, **kw)
+
+
+class Sampler:
+    """The board's running set every 50 ms: the observed peak and every pair of task numbers seen running together."""
+
+    def __init__(self, board):
+        self.board, self.peak, self.pairs, self.done = board, 0, set(), threading.Event()
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        while not self.done.is_set():
+            with self.board.lock:
+                running = sorted(j.number for j in self.board.jobs.values() if j.state == "running")
+            self.peak = max(self.peak, len(running))
+            self.pairs.update((a, b) for a in running for b in running if a < b)
+            time.sleep(0.05)
+
+
+def peak_overlap(jobs):
+    """The most persisted [started, finished] run intervals that overlap at one instant."""
+    edges = sorted([(j.started, 1) for j in jobs if j.started] + [(j.finished, -1) for j in jobs if j.started])
+    peak = depth = 0
+    for _, step in edges:
+        depth += step
+        peak = max(peak, depth)
+    return peak
+
+
+def session_users(e, session_id):
+    snapshot = e.talk.agent.call("session.resume", session_id=session_id)
+    return [str(m.get("content")) for m in snapshot["messages"] if m.get("role") == "user"], snapshot
+
+
+def wait_jobs(e, ids, timeout=150, states=TERMINAL):
+    """Waits on the board itself: api/tasks lists only open, undelivered and the latest ten jobs."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        current = {i: e.talk.board.jobs[i].state for i in ids}
+        if all(state in states for state in current.values()):
+            return current
+        time.sleep(0.3)
+    raise AssertionError(f"jobs did not settle: {current}")
+
+
+def same_call_three_active_ten_waiting(model):
+    """One authenticated call delegates thirteen tasks: three run at once in their own native sessions, ten wait,
+    the fourteenth is refused. Queued and running cancels, a duplicate delegation, a reconnect, out-of-order
+    completion, ordered and deduplicated result ingestion, and denial for another user."""
+    e = isolated_env(model)
+    tag = secrets.token_hex(4)
+    slow = {n: f"slow {base}.{secrets.randbelow(90) + 10}" for n, base in ((1, 16), (2, 7), (3, 11), (4, 60))}
+    texts = {n: slow.get(n, f"answer-{tag}-{n}") for n in range(1, 14)}
+    try:
+        conv, vs = e.call()
+        e.events(conv, vs, ("user", f"context-{tag}: compare three suppliers for the kitchen"),
+                 ("assistant", "I will hand that to Hermes."))
+        sampler = Sampler(e.talk.board)
+        ids = {}
+        for n in range(1, 14):
+            status, body = e.task(conv, vs, texts[n] + "\nREAD ONLY", f"del_q{n}_{tag}")
+            assert status == 200 and body["created"], (n, status, body)
+            ids[n] = body["job"]["id"]
+        status, refused = e.task(conv, vs, f"answer-{tag}-14\nREAD ONLY", f"del_q14_{tag}")
+        assert status == 429, ("saturation refuses the fourteenth", status, refused)
+        board = e.talk.board
+        assert len(board.jobs) == 13 and not requests_with(model, f"answer-{tag}-14"), "the refusal created nothing"
+        snap = {n: board.jobs[i] for n, i in ids.items()}
+        running = sorted(n for n, j in snap.items() if j.state == "running")
+        waiting = sorted(n for n, j in snap.items() if j.state == "accepted")
+        assert running == [1, 2, 3] and waiting == list(range(4, 14)), (running, waiting)
+        sessions = {n: snap[n].native_session_id for n in running}
+        assert len(set(sessions.values())) == 3 and all(sessions.values()), sessions
+        assert all(snap[n].admission_id for n in running), "each active job holds its own gateway admission"
+        together = None
+        deadline = time.time() + 20
+        while together is None and time.time() < deadline:
+            live = {n: e.talk.agent.call("session.resume", session_id=sid, omit_messages=True).get("running")
+                    for n, sid in sessions.items()}
+            if all(live.values()):
+                together = {"at": time.time(), "sessions_running": live}
+            time.sleep(0.2)
+        assert together, "the gateway reported all three native sessions running at one instant"
+        assert all(requests_with(model, f"TASK: {slow[n]}") for n in (1, 2, 3)), "three turns reached the model"
+        again = e.task(conv, vs, texts[2] + "\nREAD ONLY", f"del_q2_{tag}")[1]
+        assert again["created"] is False and again["job"]["id"] == ids[2], again
+        status, body = e.post("task/cancel", {"conversation_id": conv, "job_id": ids[13]})
+        assert status == 200 and body["job"]["state"] == "cancelled", body
+        foreign = {route: e.post(route, {"conversation_id": conv, "job_id": ids[5],
+                                         **({"voice_session_id": vs} if route == "task/ack" else {})},
+                                 user=fx.OTHER_USER_ID)[0] for route in ("task/cancel", "task/ack")}
+        foreign["tasks"] = e.post("tasks", {"conversation_id": conv, "voice_session_id": vs}, user=fx.OTHER_USER_ID)[0]
+        assert set(foreign.values()) == {404}, foreign
+        wait_jobs(e, [ids[4]], timeout=60, states=("running",))
+        status, body = e.post("task/cancel", {"conversation_id": conv, "job_id": ids[4]})
+        assert status == 200 and body["job"]["id"] == ids[4], body
+        wait_jobs(e, [ids[2], ids[3]])
+        for n in (2, 3):
+            first = e.post("task/ack", {"conversation_id": conv, "voice_session_id": vs, "job_id": ids[n]})[1]["job"]
+            repeat = e.post("task/ack", {"conversation_id": conv, "voice_session_id": vs, "job_id": ids[n]})[1]["job"]
+            assert first["receipt"] == repeat["receipt"] == "delivered", (first, repeat)
+        assert e.post("end", {"conversation_id": conv, "voice_session_id": vs})[0] == 200
+        conv2, vs2 = e.call()
+        assert conv2 == conv and vs2 != vs, "the reconnect continues the same conversation in a new call"
+        generations = (e.talk.store.voice_session(e.talk.account(fx.USER_ID), conv, vs).get("generation"),
+                       e.talk.store.voice_session(e.talk.account(fx.USER_ID), conv, vs2).get("generation"))
+        stale = e.task(conv, vs, f"answer-{tag}-stale\nREAD ONLY", f"del_stale_{tag}")[0]
+        assert stale == 409 and not requests_with(model, f"answer-{tag}-stale"), "the ended call delegates nothing"
+        wait_jobs(e, list(ids.values()), timeout=180)
+        sampler.done.set()
+        cross_call = e.post("task/ack", {"conversation_id": conv, "voice_session_id": vs2, "job_id": ids[1]})[0]
+        assert cross_call == 409, "a result is acknowledged only in the call that delegated it"
+        status, update = e.post("context", {"conversation_id": conv, "voice_session_id": vs2})
+        assert status == 200 and update["revision"], update
+        carried = set(e.talk.store.voice_session(e.talk.account(fx.USER_ID), conv, vs2).get("job_ids") or ())
+        order = [n for n in sorted(ids, key=lambda n: board.jobs[ids[n]].result_seq)
+                 if n not in (2, 3) and ids[n] not in carried]
+        positions = [update["text"].find(f"Hermes task {n} (") for n in order]
+        assert all(p >= 0 for p in positions) and positions == sorted(positions), ("ingested in result order", order, positions)
+        assert e.post("context/ack", {"conversation_id": conv, "voice_session_id": vs2,
+                                      "revision": update["revision"]})[0] == 200
+        assert e.post("context", {"conversation_id": conv, "voice_session_id": vs2})[1]["revision"] is None, \
+            "an ingested result is never handed over twice"
+        jobs = {n: board.jobs[i] for n, i in ids.items()}
+        states = {n: j.state for n, j in jobs.items()}
+        assert states[4] == "cancelled" and states[13] == "cancelled", states
+        assert all(states[n] == "succeeded" for n in (1, 2, 3, *range(5, 13))), states
+        seqs = sorted(j.result_seq for j in jobs.values())
+        assert seqs == list(range(1, 14)), seqs
+        finished = [jobs[n].finished for n in sorted(jobs, key=lambda n: jobs[n].result_seq)]
+        assert finished == sorted(finished), "result_seq follows completion"
+        assert jobs[2].result_seq < jobs[3].result_seq < jobs[1].result_seq, "out-of-order completion keeps its order"
+        assert jobs[13].native_session_id is None and jobs[13].admission_id is None, "a queued cancel never ran"
+        assert not requests_with(model, f"answer-{tag}-13")
+        admitted = {n: j.native_session_id for n, j in jobs.items() if n != 13}
+        assert len(set(admitted.values())) == 12, "every admitted job ran in its own native session"
+        assert e.talk.store.agent_session(conv) is None, "no isolated session became the conversation's own"
+        isolation = {}
+        for n, sid in admitted.items():
+            users, snapshot = session_users(e, sid)
+            own = [u for u in users if f"TASK: {texts[n]}" in u]
+            others = [m for m in range(1, 14) if m != n and any(f"TASK: {texts[m]}\n" in u + "\n" for u in users)]
+            assert len(own) == 1 and not others, (n, len(own), others)
+            assert f"voice task {n}." in own[0] and f"context-{tag}" in own[0], "the frozen context reached the session"
+            isolation[n] = {"session": sid, "user_turns": len(users), "running": snapshot["running"],
+                            "context_sha256_matches": hashlib.sha256(own[0].encode()).hexdigest() == jobs[n].context_sha256}
+        for n in range(5, 13):
+            assert f"answer-{tag}-{n}" in jobs[n].result and all(
+                f"answer-{tag}-{m}" not in jobs[n].result.replace(f"answer-{tag}-{n}", "") for m in range(1, 14)), n
+        assert all("SCRIPTED-SLOW-DONE" in jobs[n].result for n in (1, 2, 3)), "slow results correlate to their jobs"
+        assert sampler.peak == 3 and peak_overlap(list(jobs.values())) <= 3, (sampler.peak, peak_overlap(list(jobs.values())))
+        assert {(1, 2), (1, 3), (2, 3)} <= sampler.pairs, sampler.pairs
+        with board.lock:
+            before = board.jobs[ids[2]]
+            board._settle(ids[2])
+            board.mark_delivered([ids[5]], "context")
+            board.mark_delivered([ids[5]], "context")
+        assert board.jobs[ids[2]] == before, "a repeated completion changes nothing"
+        assert len([x for x in board.jobs[ids[5]].notes if x.startswith("delivered:")]) == 1
+        return {"tag": tag, "submitted": 13, "refused_at_saturation": 429, "first_active": running,
+                "first_waiting": waiting, "gateway_three_running": together, "sampled_peak": sampler.peak,
+                "interval_peak": peak_overlap(list(jobs.values())), "states": states,
+                "result_seq": {n: j.result_seq for n, j in jobs.items()},
+                "numbers_by_result_seq": sorted(jobs, key=lambda n: jobs[n].result_seq),
+                "native_sessions": len(set(admitted.values())), "isolation": isolation,
+                "generations": generations, "stale_call_task": stale, "cross_call_ack": cross_call,
+                "foreign_user": foreign, "context_order": order, "carried_in_instructions": len(carried),
+                "canonical_session": None,
+                "model": "scripted-deterministic-model (labelled offline responses)"}
+    finally:
+        e.close()
+
+
+def writer_scope_conflicts(model):
+    """Independent writers and readers run together; overlapping writer scopes and an undeclared writer wait; a
+    scope outside the workdir is refused."""
+    e = isolated_env(model)
+    tag = secrets.token_hex(4)
+    plan = {1: f"slow 6.{secrets.randbelow(90) + 10}\nWRITES: notes",
+            2: f"slow 6.{secrets.randbelow(90) + 10}\nWRITES: drafts",
+            3: f"answer-{tag}-3\nWRITES: notes/today.md",
+            4: f"answer-{tag}-4",
+            5: f"answer-{tag}-5\nREAD ONLY"}
+    try:
+        conv, vs = e.call()
+        status, body = e.task(conv, vs, "anything\nWRITES: ../outside", f"del_w0_{tag}")
+        assert status == 400 and not e.talk.board.jobs, ("a scope outside the workdir starts nothing", status, body)
+        ids = {}
+        for n, text in plan.items():
+            status, body = e.task(conv, vs, text, f"del_w{n}_{tag}")
+            assert status == 200 and body["created"], (n, body)
+            ids[n] = body["job"]["id"]
+        board = e.talk.board
+        early = {n: board.jobs[i].state for n, i in ids.items()}
+        assert early[1] == early[2] == "running" and early[3] == early[4] == "accepted", early
+        writers = {n: board.jobs[i].writer for n, i in ids.items()}
+        assert writers == {1: "notes", 2: "drafts", 3: "notes/today.md", 4: ".", 5: ""}, writers
+        wait_jobs(e, list(ids.values()), timeout=120)
+        jobs = {n: board.jobs[i] for n, i in ids.items()}
+        assert all(j.state == "succeeded" for j in jobs.values()), {n: j.state for n, j in jobs.items()}
+        assert jobs[3].started >= jobs[1].finished, "a nested writer waits for its parent scope"
+        assert jobs[4].started >= max(jobs[1].finished, jobs[2].finished, jobs[3].finished), \
+            "an undeclared writer waits for every writer"
+        assert jobs[1].started < jobs[2].finished and jobs[2].started < jobs[1].finished, "independent writers overlap"
+        assert jobs[5].started < min(jobs[1].finished, jobs[3].started), "a reader passes the waiting writers"
+        return {"writers": writers, "early": early,
+                "intervals": {n: [round(j.started, 2), round(j.finished, 2)] for n, j in jobs.items()},
+                "outside_workdir": 400}
+    finally:
+        e.close()
+
+
+def isolated_restart_adoption(model):
+    """Talk dies with three isolated runs admitted and two queued: the runs are adopted, never replayed, and the
+    queued ones start after the restart on the context frozen when they were delegated."""
+    root = Path(tempfile.mkdtemp(prefix="talk-iso-restart-"))
+    home, work = root / "profiles" / "synthetic", root / "work"
+    work.mkdir(parents=True)
+    fx.write_home(home)
+    (home / "config.yaml").write_text(model_config(model))
+    data = talk_data(work, receipts={"enabled": False}, **ISOLATED_TASKS)
+    (root / "talk.yaml").write_text(json.dumps(data))
+    conv, vs = prepare_call(home, data)
+    env = {**os.environ, "HERMES_HOME": str(home), "TG_VOICE_BOT_TOKEN": fx.BOT_TOKEN, "TELEGRAM_PROXY": BLACKHOLE,
+           "TG_VOICE_ALLOWED_USER_IDS": f"{fx.USER_ID},{fx.OTHER_USER_ID}"}
+    port = free_port()
+    procs = [serve(root, port, env)]
+    call = {"initData": init(), "conversation_id": conv, "voice_session_id": vs}
+    tag = secrets.token_hex(4)
+    texts = {n: f"slow 9.{secrets.randbelow(90) + 10}" for n in (1, 2, 3)}
+    texts.update({4: f"answer-{tag}-4", 5: f"answer-{tag}-5"})
+    try:
+        ids = {}
+        for n, text in texts.items():
+            status, body = request(port, "task", {**call, "initData": init(), "delegation_item_id": f"del_r{n}_{tag}",
+                                                  "request": text + "\nREAD ONLY"})
+            assert status == 200 and body["created"], body
+            ids[n] = body["job"]["id"]
+        deadline = time.time() + 60
+        while not all(requests_with(model, f"TASK: {texts[n]}") for n in (1, 2, 3)) and time.time() < deadline:
+            time.sleep(0.2)
+        procs[0].send_signal(signal.SIGKILL)
+        procs[0].wait(10)
+        before = {n: stored_job(home, i) for n, i in ids.items()}
+        assert all(before[n].state == "running" and before[n].admission_id for n in (1, 2, 3)), before
+        assert all(before[n].state == "accepted" and before[n].context for n in (4, 5)), before
+        assert gateway_pids(root), "the gateway keeps the admitted work after Talk dies"
+        procs.append(serve(root, port, env))
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            jobs = {j["id"]: j for j in request(port, "tasks", {**call, "initData": init()})[1]["jobs"]}
+            if all(jobs[i]["state"] in TERMINAL for i in ids.values()):
+                break
+            time.sleep(0.3)
+        after = {n: stored_job(home, i) for n, i in ids.items()}
+        assert all(j.state == "succeeded" for j in after.values()), {n: j.state for n, j in after.items()}
+        assert all("adopted after restart" in after[n].notes for n in (1, 2, 3)), "admitted runs were adopted"
+        assert all(after[n].admission_id == before[n].admission_id for n in (1, 2, 3)), "no second admission"
+        assert all(len(requests_with(model, f"TASK: {t}")) == 1 for t in texts.values()), "no run was replayed"
+        assert all(after[n].context_sha256 == before[n].context_sha256 for n in (4, 5)), "the frozen context held"
+        assert len({j.native_session_id for j in after.values()}) == 5, "five isolated native sessions"
+        assert sorted(j.result_seq for j in after.values()) == [1, 2, 3, 4, 5]
+        return {"jobs": {n: {"admission": after[n].admission_id, "result_seq": after[n].result_seq,
+                             "context_sha256": after[n].context_sha256} for n in after}, "server_restarts": 1}
+    finally:
+        for p in procs:
+            if p.poll() is None:
+                p.terminate()
+                p.wait(10)
+        reap_gateways(root)
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def isolated_lost_admission_ack(model):
+    return rpc_lost_admission_ack(model, **ISOLATED_TASKS)
+
+
+def isolated_cross_profile_denial(model):
+    return cross_profile_denial(model, **ISOLATED_TASKS)
+
+
+CONCURRENCY_CHECKS = (same_call_three_active_ten_waiting, writer_scope_conflicts, isolated_restart_adoption,
+                      isolated_lost_admission_ack, isolated_cross_profile_denial)
+
+
 RPC_CHECKS = (rpc_composite_toolsets, rpc_tool_resume_idempotency, rpc_destructive_denial, rpc_cancel_no_late_effect, rpc_budget_timeout,
               rpc_restart_adoption, rpc_lost_admission_ack, rpc_genuine_refusal, rpc_stop_survives_outage,
               background_result_delivery, persistent_two_call_history, delegation_id_dedup,
@@ -1676,7 +1965,7 @@ RPC_CHECKS = (rpc_composite_toolsets, rpc_tool_resume_idempotency, rpc_destructi
               telegram_ambiguous_send, cross_user_denial, unauthenticated_job_denial)
 
 
-def run_inner(receipts, only, rpc_target=None):
+def run_inner(receipts, only, rpc_target=None, concurrency=False):
     global TELEGRAM
     from scripted_model import ScriptedModel
     from synthetic_telegram import SyntheticTelegram
@@ -1688,7 +1977,8 @@ def run_inner(receipts, only, rpc_target=None):
     if rpc_target:
         import hermes_cli
         assert Path(hermes_cli.__file__).resolve().is_relative_to(Path(rpc_target).resolve()), hermes_cli.__file__
-    selected = [fn for fn in (RPC_CHECKS if rpc_target else CHECKS) if not only or fn.__name__ in only]
+    suite = CONCURRENCY_CHECKS if concurrency else RPC_CHECKS if rpc_target else CHECKS
+    selected = [fn for fn in suite if not only or fn.__name__ in only]
     for fn in selected:
         started = time.time()
         try:
@@ -1748,11 +2038,15 @@ def main():
     parser.add_argument("--browser", metavar="OUT_DIR")
     parser.add_argument("--receipts", metavar="DIR")
     parser.add_argument("--rpc-target", metavar="SDK")
+    parser.add_argument("--concurrency", action="store_true",
+                        help="the same-call isolated task queue experiment (needs --rpc-target)")
     parser.add_argument("--only", action="append", default=[])
     parser.add_argument("--inner", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.concurrency and not args.rpc_target:
+        parser.error("--concurrency runs on the gateway transport and needs --rpc-target")
     if args.inner:
-        return run_inner(args.receipts, args.only, args.rpc_target)
+        return run_inner(args.receipts, args.only, args.rpc_target, args.concurrency)
     runtime = hermes_python()
     if not runtime:
         print("SKIPPED agent checks: no Hermes runtime found; set HERMES_TALK_HERMES_PYTHON")
@@ -1768,13 +2062,13 @@ def main():
         env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "HERMES_HOME": scratch}
         if args.rpc_target:
             sdk = Path(args.rpc_target).resolve()
-            cmd += ["--rpc-target", str(sdk)]
+            cmd += ["--rpc-target", str(sdk)] + (["--concurrency"] if args.concurrency else [])
             # A synthetic HOME and temp dir: the pinned source stays read-only and no user state is touched.
             env.update(PYTHONPATH=str(sdk), HOME=scratch, TMPDIR=scratch)
         result = subprocess.run(cmd, cwd=scratch, env=env, timeout=1500)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
-    tag = "TALK_AGENT_RPC_" if args.rpc_target else "TALK_AGENT_"
+    tag = "TALK_CONCURRENCY_" if args.concurrency else "TALK_AGENT_RPC_" if args.rpc_target else "TALK_AGENT_"
     print(tag + ("OK" if result.returncode == 0 else "FAILED"))
     return result.returncode
 

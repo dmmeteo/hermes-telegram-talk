@@ -44,6 +44,7 @@ class Tasks:
     workdir: Path = None
     max_concurrent: int = 1
     max_open_per_user: int = 3
+    execution: str = "canonical"
     run_budget_s: int = 600
     max_turns: int = 30
     request_chars: int = 2000
@@ -207,11 +208,16 @@ def _voices(value, default):
     return tuple(sorted(choices, key=lambda c: c[0] != default))
 
 
+# Upper bounds of (max_concurrent, max_open_per_user) per execution mode. Canonical tasks continue the
+# conversation's one native session, so a conversation runs one at a time; isolated tasks each get their own.
+EXECUTION_BOUNDS = {"canonical": (2, 5), "isolated": (3, 13)}
+
+
 def _tasks(data, base_dir):
     if not isinstance(data, dict):
         raise ConfigError("tasks must be a mapping")
     unknown = set(data) - {"enabled", "user_ids", "toolsets", "workdir", "max_concurrent", "max_open_per_user",
-                           "run_budget_seconds", "max_turns", "request_chars", "result_chars"}
+                           "execution", "run_budget_seconds", "max_turns", "request_chars", "result_chars"}
     if unknown:
         raise ConfigError(f"unknown tasks keys: {sorted(unknown)}")
     if not data.get("enabled", False):
@@ -227,10 +233,14 @@ def _tasks(data, base_dir):
     workdir = (Path(base_dir) / _text(data.get("workdir", "."), "tasks.workdir", 300)).resolve()
     if not workdir.is_dir():
         raise ConfigError("tasks.workdir must be an existing directory")
+    execution = data.get("execution", "canonical")
+    if execution not in EXECUTION_BOUNDS:
+        raise ConfigError(f"tasks.execution must be one of {sorted(EXECUTION_BOUNDS)}")
+    concurrent, open_jobs = EXECUTION_BOUNDS[execution]
     return Tasks(enabled=True, user_ids=tuple(dict.fromkeys(users)), toolsets=tuple(dict.fromkeys(toolsets)),
-                 workdir=workdir,
-                 max_concurrent=_int(data.get("max_concurrent", 1), "tasks.max_concurrent", 1, 2),
-                 max_open_per_user=_int(data.get("max_open_per_user", 3), "tasks.max_open_per_user", 1, 5),
+                 workdir=workdir, execution=execution,
+                 max_concurrent=_int(data.get("max_concurrent", 1), "tasks.max_concurrent", 1, concurrent),
+                 max_open_per_user=_int(data.get("max_open_per_user", 3), "tasks.max_open_per_user", 1, open_jobs),
                  run_budget_s=_int(data.get("run_budget_seconds", 600), "tasks.run_budget_seconds", 20, 3600),
                  max_turns=_int(data.get("max_turns", 30), "tasks.max_turns", 1, 200),
                  request_chars=_int(data.get("request_chars", 2000), "tasks.request_chars", 20, 4000),
