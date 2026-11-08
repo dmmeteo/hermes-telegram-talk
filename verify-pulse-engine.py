@@ -7,7 +7,7 @@ re-runs itself under a real Hermes runtime (HERMES_TALK_HERMES_PYTHON, else the 
 ~/.hermes/installs/*/environments/*/venv/bin/python) with a disposable HERMES_HOME under TMPDIR
 that installs and enables this plugin and names a local deterministic model
 (tests/pulse/model_fixture.py) as the profile's model. The engine reaches that model only
-through the real route: Hermes' plugin loader runs hermes-talk's register(ctx), which binds
+through the real route: Hermes' plugin loader runs hermes-telegram-talk's register(ctx), which binds
 ctx.llm (agent.plugin_llm.PluginLlm), and every Pulse call goes through the host's call_llm over
 HTTP. Calls, events, feedback and call ends go through the real /tg-voice/ routes with signed
 synthetic initData; storage is Hermes' own SessionDB. Synthetic text only; no paid or live
@@ -122,8 +122,8 @@ class World(vb.Harness):
 def the_engine_reaches_the_model_only_through_the_host_plugin_llm(w):
     llm = pulse_model.bound()
     assert type(llm).__module__ == "agent.plugin_llm" and type(llm).__name__ == "PluginLlm", type(llm)
-    assert getattr(llm, "_plugin_id", None) == "hermes-talk", llm._plugin_id
-    assert w.talk.engine.model.available() and w.talk.engine.model.label() == "plugin_llm:hermes-talk"
+    assert getattr(llm, "_plugin_id", None) == "hermes-telegram-talk", llm._plugin_id
+    assert w.talk.engine.model.available() and w.talk.engine.model.label() == "plugin_llm:hermes-telegram-talk"
     return {"route": f"{type(llm).__module__}.{type(llm).__name__}", "plugin_id": llm._plugin_id}
 
 
@@ -140,7 +140,7 @@ def the_model_selects_the_briefing_not_the_status_ranking(w):
     assert titles == ["Synthetic invoice draft", "Synthetic deploy check"], shown
     assert "fixture-model judged 'Synthetic invoice draft'" in brief(instructions), brief(instructions)
     state = w.state()
-    assert state["selection"]["by"] == "model" and state["selection"]["model"] == "plugin_llm:hermes-talk"
+    assert state["selection"]["by"] == "model" and state["selection"]["model"] == "plugin_llm:hermes-telegram-talk"
     decisions = {state["items"][fp]["title"]: d for fp, d in state["selection"]["decisions"].items()}
     assert decisions["Synthetic routine sync"] == {"decision": "skipped", "skip": "minor",
                                                    "why": "fixture-model judged 'Synthetic routine sync'"}
@@ -613,7 +613,7 @@ def rating_reasons_leave_lessons_that_change_delivery(w):
 
 @step
 def without_a_model_route_the_engine_degrades_and_says_so(w):
-    pulse_model.bind(None)  # as in a Hermes whose plugin loader gave hermes-talk no ctx.llm
+    pulse_model.bind(None)  # as in a Hermes whose plugin loader gave hermes-telegram-talk no ctx.llm
     w.reopen()
     try:
         w.seed("Synthetic offline note", turns=[("user", "go"), ("assistant", "noted")], end_reason="done", age_s=0)
@@ -638,8 +638,8 @@ def run_host():
     home = fx.write_home(Path(tempfile.mkdtemp(prefix="talk-pulse-engine-", dir=tmp)))
     (home / "config.yaml").write_text(
         f"model:\n  default: scripted-pulse-model\n  provider: custom\n  base_url: {model.base_url}\n"
-        "  api_key: synthetic-local-key\nplugins:\n  enabled:\n    - hermes-talk\n")
-    target = home / "plugins" / "hermes-talk"
+        "  api_key: synthetic-local-key\nplugins:\n  enabled:\n    - hermes-telegram-talk\n")
+    target = home / "plugins" / "hermes-telegram-talk"
     target.mkdir(parents=True)
     for name in PLUGIN_FILES:
         src = ROOT / name

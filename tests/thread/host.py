@@ -24,14 +24,14 @@ PLUGIN_FILES = ("plugin.yaml", "__init__.py", "server.py", "hermes_talk", "stati
 
 def install_plugin(home):
     """The plugin as an immutable read-only directory copy, enabled in the home's config.yaml."""
-    target = Path(home) / "plugins" / "hermes-talk"
+    target = Path(home) / "plugins" / "hermes-telegram-talk"
     target.mkdir(parents=True)
     for name in PLUGIN_FILES:
         src = ROOT / name
         (shutil.copytree if src.is_dir() else shutil.copy2)(src, target / name)
     for path in [*target.rglob("*"), target]:
         path.chmod(path.stat().st_mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
-    (Path(home) / "config.yaml").write_text("plugins:\n  enabled:\n    - hermes-talk\n")
+    (Path(home) / "config.yaml").write_text("plugins:\n  enabled:\n    - hermes-telegram-talk\n")
 
 
 def load_plugin(home):
@@ -41,7 +41,7 @@ def load_plugin(home):
     discover_plugins()
     manager = get_plugin_manager()
     listed = {p["name"]: p for p in manager.list_plugins()}
-    assert listed.get("hermes-talk", {}).get("enabled") and not listed["hermes-talk"].get("error"), listed
+    assert listed.get("hermes-telegram-talk", {}).get("enabled") and not listed["hermes-telegram-talk"].get("error"), listed
     hooks = manager._hooks.get("pre_gateway_dispatch") or []
     assert [h for h in hooks if h.__name__ == "_chat_input"], hooks
     return manager

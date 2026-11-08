@@ -32,7 +32,7 @@ def _bind_model(ctx):
     Only the Talk voice server imports hermes_talk.pulse_model before it loads the profile's plugins, so only
     there is anything bound; in every other Hermes process this neither imports nor changes anything."""
     pulse_model = sys.modules.get("hermes_talk.pulse_model")
-    if pulse_model is None or getattr(pulse_model, "PLUGIN_ID", None) != "hermes-talk":
+    if pulse_model is None or getattr(pulse_model, "PLUGIN_ID", None) != "hermes-telegram-talk":
         return
     llm = getattr(ctx, "llm", None)
     if llm is not None:

@@ -20,7 +20,7 @@ discover_plugins()` is the public loader that runs each enabled plugin's `regist
 
 ## Decision
 
-All Pulse model calls go through hermes-talk's own `ctx.llm`, with no override and no task slot
+All Pulse model calls go through hermes-telegram-talk's own `ctx.llm`, with no override and no task slot
 (`hermes_talk/pulse_model.py`). `register(ctx)` binds it; the voice server, which `hermes talk serve` starts under
 the same Hermes interpreter and home, calls `discover_plugins()` once from the Pulse worker, 30 s after it
 started serving (never before: discovery of every enabled plugin takes seconds, and a server that accepts but

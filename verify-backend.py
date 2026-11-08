@@ -667,22 +667,22 @@ def configured_talk_serves_the_talk_ui_and_legacy_keeps_its_page(h):
 def plugin_registers_in_a_disposable_home():
     home = Path(tempfile.mkdtemp(prefix="talk-plugin-"))
     try:
-        target = home / "plugins" / "hermes-talk"
+        target = home / "plugins" / "hermes-telegram-talk"
         target.mkdir(parents=True)
         for name in PLUGIN_FILES:
             src = ROOT / name
             (shutil.copytree if src.is_dir() else shutil.copy2)(src, target / name)
-        (home / "config.yaml").write_text("plugins:\n  enabled:\n    - hermes-talk\n")
+        (home / "config.yaml").write_text("plugins:\n  enabled:\n    - hermes-telegram-talk\n")
         os.environ["HERMES_HOME"] = str(home)
         from hermes_cli.plugins import PluginManager
         manager = PluginManager()
         manager.discover_and_load(force=True)
         listed = {p["name"]: p for p in manager.list_plugins()}
-        assert "hermes-talk" in listed, sorted(listed)
-        entry = listed["hermes-talk"]
+        assert "hermes-telegram-talk" in listed, sorted(listed)
+        entry = listed["hermes-telegram-talk"]
         assert entry.get("enabled") and not entry.get("error"), entry
         assert "talk" in manager._cli_commands, sorted(manager._cli_commands)
-        assert manager._cli_commands["talk"]["plugin"] == "hermes-talk"
+        assert manager._cli_commands["talk"]["plugin"] == "hermes-telegram-talk"
     finally:
         shutil.rmtree(home, ignore_errors=True)
 
@@ -696,12 +696,12 @@ def cli_serves_talk_in_a_disposable_profile():
     home = fx.write_home(root / "profiles" / "synthetic")
     proc = None
     try:
-        target = home / "plugins" / "hermes-talk"
+        target = home / "plugins" / "hermes-telegram-talk"
         target.mkdir(parents=True)
         for name in PLUGIN_FILES:
             src = ROOT / name
             (shutil.copytree if src.is_dir() else shutil.copy2)(src, target / name)
-        (home / "config.yaml").write_text("plugins:\n  enabled:\n    - hermes-talk\n")
+        (home / "config.yaml").write_text("plugins:\n  enabled:\n    - hermes-telegram-talk\n")
         (home / "talk.yaml").write_text(json.dumps(fx.config_data()))
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
@@ -773,7 +773,7 @@ def installed_plugin_serves_talk_from_a_named_profile():
         assert out.returncode == 0, out.stderr[-600:]
         profile = user_home / ".hermes" / "profiles" / "synthetic"
         fx.write_home(profile)
-        target = profile / "plugins" / "hermes-talk"
+        target = profile / "plugins" / "hermes-telegram-talk"
         target.mkdir(parents=True)
         for name in PLUGIN_FILES:
             src = ROOT / name
@@ -781,10 +781,10 @@ def installed_plugin_serves_talk_from_a_named_profile():
         for path in [target, *target.rglob("*")]:
             path.chmod(path.stat().st_mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
         with (profile / "config.yaml").open("a") as config:
-            config.write("plugins:\n  enabled:\n    - hermes-talk\n")
+            config.write("plugins:\n  enabled:\n    - hermes-telegram-talk\n")
         out = native("-p", "synthetic", "plugins", "list", "--plain", "--no-bundled")
         listed = [line.split() for line in out.stdout.splitlines()]
-        assert out.returncode == 0 and ["enabled", "user", "0.2.0", "hermes-talk"] in listed, out.stdout[-600:]
+        assert out.returncode == 0 and ["enabled", "user", "0.2.0", "hermes-telegram-talk"] in listed, out.stdout[-600:]
         (profile / "talk.yaml").write_text(json.dumps(fx.config_data()))
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))

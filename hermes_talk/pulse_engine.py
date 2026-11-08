@@ -11,7 +11,7 @@ import logging
 import threading
 
 from . import pulse, pulse_claims, pulse_followup, pulse_memory, pulse_policy, pulse_select
-from .pulse_model import ModelUnavailable
+from .pulse_model import PLUGIN_ID, ModelUnavailable
 
 logger = logging.getLogger("tg-voice")
 
@@ -112,7 +112,7 @@ class PulseEngine:
             except Exception as exc:  # no route: every step keeps degrading visibly
                 route = None
                 logger.warning("pulse model route could not be loaded (%s)", type(exc).__name__)
-            logger.info("pulse model route: %s", "plugin_llm:hermes-talk" if route is not None else "none (fallback)")
+            logger.info("pulse model route: %s", f"plugin_llm:{PLUGIN_ID}" if route is not None else "none (fallback)")
         try:
             self.users |= self.known_users()
         except Exception as exc:  # the worker still runs for accounts whose calls end from now on

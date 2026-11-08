@@ -2,7 +2,7 @@
 
 Upstream Conduit Pulse makes every selection, memory and follow-up call through
 ``ctx.llm.complete_structured`` (pulse.py ``_memory_llm``). Talk does the same: the
-``hermes-talk`` plugin's ``register(ctx)`` binds its own ``ctx.llm`` here, and the voice
+``hermes-telegram-talk`` plugin's ``register(ctx)`` binds its own ``ctx.llm`` here, and the voice
 server, which ``hermes talk serve`` starts under the same Hermes interpreter and home, loads
 the profile's plugins through the public ``hermes_cli.plugins.discover_plugins`` (from its Pulse
 worker, after it is already serving) so that binding happens in its process too. The host owns provider, model, auth, timeouts and
@@ -18,7 +18,7 @@ import threading
 
 logger = logging.getLogger("tg-voice")
 
-PLUGIN_ID = "hermes-talk"
+PLUGIN_ID = "hermes-telegram-talk"
 CALL_TIMEOUT_S = 60.0
 
 _lock = threading.Lock()
@@ -42,7 +42,7 @@ def bound():
 
 
 def load_host():
-    """Discover the profile's plugins through the public loader, so hermes-talk binds its ctx.llm here."""
+    """Discover the profile's plugins through the public loader, so hermes-telegram-talk binds its ctx.llm here."""
     if bound() is not None:
         return bound()
     try:
