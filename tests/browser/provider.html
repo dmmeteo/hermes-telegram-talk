@@ -1,0 +1,87 @@
+<!doctype html><meta charset="utf-8"><title>Synthetic subscription peer</title>
+<script>
+window.peers = [];
+window.behavior = { handshake: true, greeting: true };
+async function serve() {
+  const audio = new AudioContext();
+  await audio.resume();
+  for (;;) {
+    const response = await fetch('/offer');
+    if (response.status !== 200) continue;
+    const {sdp} = await response.json();
+    const peer = new RTCPeerConnection();
+    const entry = {peer, got: [], behavior: {...window.behavior}};
+    window.peers.push(entry);
+    const oscillator = audio.createOscillator();
+    const gain = audio.createGain();
+    const destination = audio.createMediaStreamDestination();
+    oscillator.frequency.value = 440;
+    gain.gain.value = 0;
+    oscillator.connect(gain).connect(destination);
+    oscillator.start();
+    entry.gain = gain;
+    entry.send = event => entry.channel.send(JSON.stringify(event));
+    destination.stream.getTracks().forEach(track => peer.addTrack(track, destination.stream));
+    peer.ontrack = event => {
+      entry.receivedAudio = document.createElement('audio');
+      entry.receivedAudio.autoplay = true;
+      entry.receivedAudio.volume = .01;
+      entry.receivedAudio.srcObject = event.streams[0] || new MediaStream([event.track]);
+      document.body.append(entry.receivedAudio);
+      void entry.receivedAudio.play();
+      entry.audio = audio;
+      const source = audio.createMediaStreamSource(event.streams[0] || new MediaStream([event.track]));
+      entry.input = audio.createAnalyser();
+      source.connect(entry.input);
+      entry.sink = audio.createGain();
+      entry.sink.gain.value = 0;
+      entry.input.connect(entry.sink).connect(audio.destination);
+      entry.samples = new Float32Array(entry.input.fftSize);
+      entry.energy = () => { entry.input.getFloatTimeDomainData(entry.samples); return Math.sqrt(entry.samples.reduce((sum, v) => sum + v*v, 0) / entry.samples.length); };
+    };
+    peer.ondatachannel = ({channel}) => {
+      entry.channel = channel;
+      // Blink can report open before the native SCTP channel accepts sends.
+      const hello = async () => {
+        if (!entry.behavior.handshake || entry.greetingPending) return;
+        entry.greetingPending = true;
+        while (channel.readyState === 'open') {
+          const stats = await peer.getStats();
+          const native = [...stats.values()].find(stat => stat.type === 'data-channel' && stat.dataChannelIdentifier === channel.id);
+          if (channel.readyState !== 'open') return;
+          if (native?.state === 'open') {
+            entry.send({type:'session.started',session:{id:'synthetic'}});
+            entry.greeted = true;
+            return;
+          }
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }
+      };
+      channel.onopen = hello;
+      if (channel.readyState === 'open') hello();
+      channel.onmessage = message => {
+        const event = JSON.parse(message.data);
+        entry.got.push(event);
+        if (event.type === 'session.context.append' && entry.behavior.greeting) {
+          gain.gain.value = .18;
+          entry.send({type:'output_transcript.added',item:{text:'Hello '}});
+          setTimeout(() => {
+            entry.send({type:'turn.done',turn:{id:'opening',role:'assistant',transcript:'Hello from the synthetic peer.'}});
+            gain.gain.value = 0;
+          }, 700);
+        }
+      };
+      channel.onclose = () => { oscillator.stop(); destination.stream.getTracks().forEach(t => t.stop()); peer.close(); };
+    };
+    await peer.setRemoteDescription({type:'offer',sdp});
+    await peer.setLocalDescription(await peer.createAnswer());
+    await new Promise(resolve => {
+      if (peer.iceGatheringState === 'complete') return resolve();
+      peer.onicegatheringstatechange = () => peer.iceGatheringState === 'complete' && resolve();
+      setTimeout(resolve,1500);
+    });
+    await fetch('/answer',{method:'POST',body:JSON.stringify({sdp:peer.localDescription.sdp})});
+  }
+}
+serve();
+</script>

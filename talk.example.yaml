@@ -1,0 +1,61 @@
+# Hermes Telegram Talk configuration example. Copy next to the profile (not into this repo) and edit.
+# Every value here is public. Secrets never go in this file: the bot token and allowlist come from
+# TG_VOICE_BOT_TOKEN / TG_VOICE_ALLOWED_USER_IDS, and GPT-Live credentials from the profile's Codex sign-in.
+profile:
+  id: pewds                  # must equal the HERMES_HOME profile ("default" for ~/.hermes)
+  display_name: Pewds
+  # avatar: avatar.png       # local .svg/.png/.jpg relative to this file; URLs are refused. Default: neutral SVG.
+appearance:
+  listen_color: "#4FC3F7"
+  speak_color: "#FFB74D"
+voice:
+  model: gpt-live-1-codex
+  voice: cove
+  language_hint: "Speak Ukrainian unless the user switches language."
+  session_ttl_minutes: 120   # an unended call is marked expired after this; the conversation itself never resets
+greeting:
+  enabled: true
+  text: "Greet the user in one short sentence."
+  # phrases:                 # optional ready greetings for this profile only; one short line per call, chosen locally
+  #   - "Привіт! Я на зв’язку. Що робимо?"
+context:
+  skills: []                 # allowlist of skill names read through the host skill loader; empty = none
+  budgets:                   # application character limits, not provider tokens
+    instructions_chars: 12000
+    soul_chars: 4000
+    skill_chars: 1500
+    skills_chars: 3000
+    summary_chars: 1200
+    recent_turns: 8
+    turn_chars: 300
+    activity_items: 5
+    activity_chars: 1200
+    event_batch_max: 20
+    event_text_chars: 2000
+activity:
+  enabled: true
+  window_hours: 168          # first visit looks back this far; later visits start at the read cursor
+  sources: [cli, telegram, discord, cron, kanban, desktop]
+  # owner_user_id: 123456789 # numeric Telegram id of the operator; only this user hears sessions with no
+  #                          # chat user (CLI, cron, kanban). Omit it and those sessions are never briefed.
+tasks:
+  enabled: false             # voice delegations become native Hermes tasks only when true
+  # user_ids: [123456789]    # required when enabled: Telegram ids allowed to start tasks
+  # toolsets: [file, web, session_search]   # required when enabled: Hermes toolsets a task may use
+  # workdir: .               # the task's working directory, relative to this file
+  # max_concurrent: 1        # 1..2 native processes at once
+  # max_open_per_user: 3
+  # run_budget_seconds: 600  # Hermes' own run budget; Talk stops the run 60 s after it
+  # max_turns: 30
+  # request_chars: 2000
+  # result_chars: 1500
+receipts:                    # with tasks on, each finished task sends a short report to the user's own
+  enabled: true              # private chat with the Talk bot, even after the call ended
+  # max_chars: 700           # longer results go as a cover message plus the full result as a .md document
+  # attempts: 3              # sends that provably did not leave (refused, rate limited) retry at most this often
+  # destinations:            # explicit alternatives the user may name with "REPORT TO: <name>"
+  #   ops:
+  #     target: "telegram:-1001234567890:17"   # telegram:<chat id>[:<topic id>] the Talk bot can post to
+  #     user_ids: [123456789]                  # task users allowed to choose it
+privacy:
+  persist_audio: false       # the only accepted value; raw audio is never stored

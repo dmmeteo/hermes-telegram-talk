@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#101416">
+<title>Hermes Telegram Talk</title>
+<link rel="stylesheet" href="app.css?v=3cd726a238f5b99f">
+<script src="https://telegram.org/js/telegram-web-app.js" defer></script>
+<script src="app.js?v=396ab50974b46086" defer></script>
+</head>
+<body>
+<main>
+  <ol id="transcript" aria-label="Transcript" aria-live="polite" tabindex="0" hidden></ol>
+  <div class="actions">
+    <p id="call-status" role="status">Connecting</p>
+    <p id="thread-note" role="status" hidden></p>
+    <p id="error" role="alert" hidden></p>
+    <button id="start" type="button" hidden>Tap to start</button>
+    <div class="control-row">
+      <button id="menu-toggle" type="button" aria-label="Call menu" aria-expanded="false" aria-controls="call-menu">•••</button>
+      <section class="presence" aria-label="Voice conversation">
+    <div id="orb" data-state="connecting" role="img" aria-label="Connecting. Microphone paused.">
+      <canvas id="ring" width="640" height="640" aria-hidden="true"></canvas>
+      <div class="portrait">
+        <svg id="face" viewBox="0 0 160 160" aria-hidden="true"><rect width="160" height="160" rx="80" fill="#252f32"/><path d="M42 91c0-41 12-59 38-59s38 18 38 59c0 27-18 45-38 45S42 118 42 91" fill="#becbc4"/><path d="M43 72c-4-34 21-49 42-45 26-1 39 20 33 49l-13-25c-20 10-36 13-62 21" fill="#657e76"/><path d="M58 84h8m28 0h8" stroke="#253b35" stroke-width="5" stroke-linecap="round"/><path d="M70 109q10 8 20 0" fill="none" stroke="#253b35" stroke-width="3" stroke-linecap="round"/></svg>
+        <img id="avatar" alt="" hidden referrerpolicy="no-referrer">
+      </div>
+      <span class="state-mark" aria-hidden="true"></span>
+    </div>
+        <h2 id="name">Hermes</h2>
+      </section>
+    <button id="mute" type="button" aria-pressed="false" aria-label="Mute microphone" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M6 10v2a6 6 0 0 0 12 0v-2M12 18v3m-4 0h8"/></svg><span>Mute</span></button>
+    </div>
+    <section id="call-menu" aria-label="Call menu" hidden>
+      <div id="voice-box" hidden><label for="voice">Reply voice</label><select id="voice"></select><button id="reconnect" type="button" hidden>Reconnect</button></div>
+      <p id="voice-note" hidden>The new voice starts after Reconnect.</p>
+      <p class="catalogue-note">Native subscription voice catalogue. Availability can vary by account.</p>
+      <button id="end" type="button">End call</button>
+    </section>
+  </div>
+</main>
+<audio id="remote" autoplay playsinline></audio>
+</body>
+</html>

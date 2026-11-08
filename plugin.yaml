@@ -1,0 +1,4 @@
+name: hermes-telegram-talk
+version: "0.2.0"
+description: "Hermes Telegram Talk: a Telegram Mini App voice surface for one profile (PoC, zero core changes)"
+kind: standalone
