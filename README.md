@@ -274,7 +274,7 @@ minimize the Mini App, send a text, a file or a photo, come back. Decisions and 
 
 ### Reply voice
 
-`voice.choices` adds configured voices and labels to the complete nine-entry native subscription catalogue, with the profile default first. The three-dot menu contains the selector. `api/voice` stores the choice per
+`voice.choices` labels voices from the complete nine-entry native subscription catalogue, with the profile default first. `voice.voice` and every choice must be subscription voices. The signaling URL answers the offer for any voice, then GPT-Live refuses a call whose voice the ChatGPT account lacks, so ICE never connects. API-key voices such as `marin` fail config load. The three-dot menu contains the selector. `api/voice` stores the choice per
 (profile, bot, user) in SessionDB meta. The provider sets the voice when a session is created, so the choice applies
 from the next connection; during a call the page offers an explicit Reconnect that keeps the conversation.
 
@@ -282,10 +282,10 @@ Bot avatars refresh through authenticated same-origin image responses, using a b
 
 ### Shopy
 
-`talk.shopy.example.yaml` is a source example for the Shopy profile: `marin` (a female-presenting voice the public
-Hermes GPT-Live module lists for gpt-live-1), `persona.self_reference: feminine` (Ukrainian feminine self-reference)
-and short, polite greetings. Pewds keeps its own config and phrases. The subscription endpoint's acceptance of
-`marin` and how it sounds are not live-qualified.
+`talk.shopy.example.yaml` is a source example for the Shopy profile: `sol` (a female-presenting subscription voice),
+`persona.self_reference: feminine` (Ukrainian feminine self-reference) and short, polite greetings. Pewds keeps its own
+config and phrases. Shopy previously used the API-key voice `marin`, and every Shopy call stopped before the peer
+connected (see [ADR 0005](docs/adr/0005-compact-talk-media-and-avatar.md)).
 
 ## Voice tasks
 

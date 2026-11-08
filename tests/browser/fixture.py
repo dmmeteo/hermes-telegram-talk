@@ -26,12 +26,12 @@ stats = {'resolves': 0, 'posts': 0}
 home = f.write_home(tempfile.mkdtemp(prefix='synthetic-talk-'))
 history = MemoryHistory()
 # Two reply voices, so the selector is part of every layout this inventory checks (synthetic config).
-data = f.config_data(voice={'voice': 'cove', 'choices': ['cove', 'marin']})
+data = f.config_data(voice={'voice': 'cove', 'choices': ['cove', 'sol']})
 if os.environ.get('TALK_COMPACT_PROFILE') == 'pewds':
     data['profile'].update(id='pewds', display_name='Synthetic Pewds')
 if os.environ.get('TALK_COMPACT_PROFILE') == 'shopy':
     data['profile'].update(id='shopy', display_name='Synthetic Shopy')
-    data['voice']['voice'] = 'marin'
+    data['voice']['voice'] = 'sol'
     data['persona'] = {'self_reference': 'feminine'}
 talk = TalkRuntime(parse_config(data, home), f.BOT_TOKEN, history,
                    soul=f.file_soul(home), skill=f.file_skill(home), home=home)

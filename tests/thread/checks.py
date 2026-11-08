@@ -431,7 +431,7 @@ def run(history_factory, event_factory, dispatch, out, extras=None):
     def _():
         data = fx.config_data()
         data = {**data, "voice": {**data.get("voice", {}), "voice": "cove",
-                                  "choices": [{"id": "cove", "label": "Cove"}, {"id": "marin", "label": "Marin"}]}}
+                                  "choices": [{"id": "cove", "label": "Cove"}, {"id": "sol", "label": "Sol"}]}}
         rig = Rig(history_factory, data=data)
         try:
             assert "voice" not in rig.call("bootstrap")  # the frozen bootstrap shape is unchanged
@@ -439,14 +439,15 @@ def run(history_factory, event_factory, dispatch, out, extras=None):
             assert boot["voice"]["current"] == "cove" and boot["voice"]["default"] == "cove"
             assert boot["voice"]["applies"] == "next_connection"
             assert {v["id"] for v in boot["voice"]["choices"]} == {
-                "arbor", "breeze", "cove", "ember", "juniper", "maple", "sol", "spruce", "vale", "marin"}
-            assert rig.call("voice", voice="marin")["voice"]["current"] == "marin"
+                "arbor", "breeze", "cove", "ember", "juniper", "maple", "sol", "spruce", "vale"}
+            assert rig.call("voice", voice="sol")["voice"]["current"] == "sol"
             expect(400, lambda: rig.call("voice", voice="shimmer"))
-            expect(400, lambda: rig.call("voice", voice="marin", user_id=fx.OTHER_USER_ID))
+            expect(400, lambda: rig.call("voice", voice="marin"))  # an API-key voice is never offered
+            expect(400, lambda: rig.call("voice", voice="sol", user_id=fx.OTHER_USER_ID))
             assert rig.call("voice", fx.OTHER_USER_ID)["voice"]["current"] == "cove"
-            assert rig.call("voice")["voice"]["current"] == "marin"
+            assert rig.call("voice")["voice"]["current"] == "sol"
             rig.start()
-            assert rig.fake.posts[-1][2]["session"]["audio"]["output"]["voice"] == "marin"
+            assert rig.fake.posts[-1][2]["session"]["audio"]["output"]["voice"] == "sol"
             rig.start(fx.OTHER_USER_ID)
             assert rig.fake.posts[-1][2]["session"]["audio"]["output"]["voice"] == "cove"
         finally:
@@ -457,7 +458,7 @@ def run(history_factory, event_factory, dispatch, out, extras=None):
         shopy = load_config(ROOT / "talk.shopy.example.yaml")
         pewds = load_config(ROOT / "talk.example.yaml")
         assert shopy.profile_id == "shopy" and shopy.self_reference == "feminine", shopy
-        assert shopy.voice == "marin" and shopy.voice_choices[0][0] == "marin", shopy.voice_choices
+        assert shopy.voice == "sol" and shopy.voice_choices[0][0] == "sol", shopy.voice_choices
         assert pewds.voice == "cove" and pewds.self_reference == "" and pewds.profile_id == "pewds"
         meme = ("pewds", "ligma", "бро", "братан", "йоу", "кринж", "лол")
         for line in shopy.greeting_phrases + (shopy.greeting,):

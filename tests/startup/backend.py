@@ -259,6 +259,40 @@ def the_configured_ukrainian_greeting_is_short_varied_and_profile_scoped():
         close(other)
 
 
+@check
+def every_call_a_shipped_profile_can_start_names_a_subscription_voice():
+    """The fixed subscription route answers the offer and then refuses a call whose voice the ChatGPT account lacks:
+    ICE never completes, so peer, channel and handshake never arrive. API-key voices (marin, cedar) never load."""
+    from hermes_talk.config import ConfigError, _yaml_load
+    subscription = {"arbor", "breeze", "cove", "ember", "juniper", "maple", "sol", "spruce", "vale"}
+    sent = {}
+    for example in ("talk.example.yaml", "talk.shopy.example.yaml"):
+        voice = _yaml_load((ROOT / example).read_text(encoding="utf-8"))["voice"]
+        h = harness(voice=voice)
+        try:
+            offered = {c["id"] for c in h.ok("voice", {})["voice"]["choices"]}
+            assert offered == subscription, (example, sorted(offered - subscription))
+            for choice in sorted(offered):
+                h.ok("voice", {"voice": choice})
+                h.clock.now += 61
+                data, _, _ = session(h)
+                h.ok("end", {"conversation_id": data["conversation_id"], "voice_session_id": data["voice_session_id"]})
+                posted = h.fake.posts[-1][2]["session"]["audio"]["output"]["voice"]
+                assert posted == choice, (example, choice, posted)
+            sent[example] = voice["voice"]
+            settle(h)
+        finally:
+            close(h)
+    for voice in ({"voice": "marin"}, {"voice": "cove", "choices": ["cove", "marin"]}, {"voice": "cedar"}):
+        try:
+            harness(voice=voice)
+        except ConfigError as exc:
+            assert "subscription" in str(exc), exc
+        else:
+            raise AssertionError(f"an API-key voice loaded for the subscription route: {voice}")
+    return {"defaults": sent}
+
+
 for result in results:
     print(json.dumps(result, ensure_ascii=False))
 print(f"TALK_STARTUP_BACKEND_FAILED {failures}" if failures else "TALK_STARTUP_BACKEND_OK")

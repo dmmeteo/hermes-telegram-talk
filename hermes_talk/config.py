@@ -181,11 +181,14 @@ SUBSCRIPTION_VOICES = tuple((name, name.capitalize()) for name in
 
 
 def _voices(value, default):
-    """The reply voices a user may choose: native subscription catalogue plus configured voices, default first."""
+    """The reply voices a user may choose: the native subscription catalogue with configured labels, default first.
+
+    The signaling URL is subscription-only. It answers the offer for any voice, then GPT-Live refuses a call whose voice
+    the ChatGPT account lacks, so ICE never completes. API-key voices (marin, cedar, ...) therefore never load."""
     if value is None:
         value = [default]
-    if not isinstance(value, list) or not 1 <= len(value) <= 64:
-        raise ConfigError("voice.choices must be a list of 1..64 voices")
+    if not isinstance(value, list) or not 1 <= len(value) <= len(SUBSCRIPTION_VOICES):
+        raise ConfigError(f"voice.choices must be a list of 1..{len(SUBSCRIPTION_VOICES)} voices")
     choices = []
     for entry in value:
         entry = {"id": entry} if isinstance(entry, str) else entry
@@ -196,6 +199,10 @@ def _voices(value, default):
     ids = [c[0] for c in choices]
     if len(set(ids)) != len(ids) or default not in ids:
         raise ConfigError("voice.choices must be distinct and include voice.voice")
+    catalogue = dict(SUBSCRIPTION_VOICES)
+    if set(ids) - set(catalogue):
+        raise ConfigError(f"voice {sorted(set(ids) - set(catalogue))} is not a ChatGPT subscription voice "
+                          f"({', '.join(catalogue)}); the subscription route refuses calls with it")
     choices.extend(choice for choice in SUBSCRIPTION_VOICES if choice[0] not in ids)
     return tuple(sorted(choices, key=lambda c: c[0] != default))
 

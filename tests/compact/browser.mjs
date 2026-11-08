@@ -120,14 +120,14 @@ try {
     assert(await page.locator('#transcript').evaluate(el => el.scrollTop < 10), 'rotation preserves reading position'); checks++;
     await page.click('#menu-toggle');
     assert(await page.locator('#voice').isVisible(), 'voice selector is in menu');
-    assert(await page.locator('#voice option').count() === 10, 'complete native nine and configured Marin');
-    assert(await page.locator('#voice').inputValue() === (profile === 'shopy' ? 'marin' : 'cove'), 'profile default preserved');
+    assert(await page.locator('#voice option').count() === 9, 'complete native subscription nine');
+    assert(await page.locator('#voice').inputValue() === (profile === 'shopy' ? 'sol' : 'cove'), 'profile default preserved');
     await shot('voice-menu');
     await page.keyboard.press('Escape');
     assert(await page.locator('#call-menu').isHidden(), 'Escape closes menu'); checks++;
     await page.click('#mute');
     await page.click('#menu-toggle');
-    await page.selectOption('#voice', profile === 'shopy' ? 'cove' : 'marin');
+    await page.selectOption('#voice', profile === 'shopy' ? 'cove' : 'sol');
     await until(() => page.locator('#reconnect').isVisible(), 'explicit reconnect contract');
     await page.click('#reconnect');
     try { await until(() => page.evaluate(() => call?.phase === 'ready'), 'reconnected'); }

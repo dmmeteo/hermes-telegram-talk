@@ -338,11 +338,11 @@ try {
   }
   await talk.setViewportSize({width:390,height:844});
   const options=await talk.evaluate(()=>[...document.querySelectorAll('#voice option')].map(o=>o.value));
-  assert(JSON.stringify([...options].sort())===JSON.stringify(['arbor','breeze','cove','ember','juniper','maple','marin','sol','spruce','vale'].sort()),'selector lists native subscription voices and configured Marin');
+  assert(JSON.stringify([...options].sort())===JSON.stringify(['arbor','breeze','cove','ember','juniper','maple','sol','spruce','vale'].sort()),'selector lists exactly the native subscription voices');
   await talk.focus('#voice');await screenshot(talk,'voice-selector-focused');
   const conversationId=await talk.evaluate(()=>conversation.id);
-  const stored=talk.waitForResponse(r=>r.url().endsWith('/api/voice')&&r.request().postData().includes('marin'));
-  await talk.selectOption('#voice','marin');assert((await stored).ok(),'choice stored through the authenticated route');
+  const stored=talk.waitForResponse(r=>r.url().endsWith('/api/voice')&&r.request().postData().includes('"voice":"sol"'));
+  await talk.selectOption('#voice','sol');assert((await stored).ok(),'choice stored through the authenticated route');
   await until(()=>talk.evaluate(()=>!document.getElementById('reconnect').hidden&&!document.getElementById('voice-note').hidden),'explicit reconnect offered');
   assert((await state(talk)).peers.filter(p=>p==='connected').length===1,'a choice alone keeps the live call');
   for(const [width,height,name] of [[390,844,'voice-change-pending'],[360,640,'voice-change-pending-360'],[844,390,'voice-change-pending-landscape']]){

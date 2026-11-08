@@ -124,17 +124,17 @@ class Compact(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             home = f.write_home(temp); history = MemoryHistory()
             runtimes = []
-            for profile, voice in [('pewds', 'cove'), ('shopy', 'marin')]:
-                data = f.config_data(voice={'voice': voice, 'choices': ['cove', 'marin']})
+            for profile, voice in [('pewds', 'cove'), ('shopy', 'sol')]:
+                data = f.config_data(voice={'voice': voice, 'choices': ['cove', 'sol']})
                 data['profile']['id'] = profile
                 runtime = TalkRuntime(parse_config(data, home), f.BOT_TOKEN, history,
                                       soul=f.file_soul(home), skill=f.file_skill(home))
                 runtimes.append(runtime)
                 self.assertEqual(runtime.reply_voice(f.USER_ID), voice)
                 self.assertEqual({v['id'] for v in runtime.set_voice(f.USER_ID)['voice']['choices']},
-                                 {'arbor', 'breeze', 'cove', 'ember', 'juniper', 'maple', 'sol', 'spruce', 'vale', 'marin'})
+                                 {'arbor', 'breeze', 'cove', 'ember', 'juniper', 'maple', 'sol', 'spruce', 'vale'})
             runtimes[0].set_voice(f.USER_ID, 'vale')
-            self.assertEqual(runtimes[1].reply_voice(f.USER_ID), 'marin')
+            self.assertEqual(runtimes[1].reply_voice(f.USER_ID), 'sol')
             self.assertEqual(runtimes[0].reply_voice(f.OTHER_USER_ID), 'cove')
             self.assertEqual(runtimes[0].set_voice(f.USER_ID)['voice']['applies'], 'next_connection')
 
