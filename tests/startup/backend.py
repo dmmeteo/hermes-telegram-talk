@@ -293,6 +293,53 @@ def every_call_a_shipped_profile_can_start_names_a_subscription_voice():
     return {"defaults": sent}
 
 
+@check
+def the_served_cli_publishes_the_talk_launch_and_its_bot_avatar():
+    """`hermes talk serve` (server.main --config) must wire the Talk runtime the way the gateway's /talk handler and
+    the Mini App avatar read it. Only the network bind, native history and Pulse start are inert stand-ins."""
+    import os
+    import tempfile
+    from unittest.mock import patch
+    import server
+    from hermes_talk import config, history, pulse_engine
+    from hermes_talk.thread_gateway import offer
+    home = Path(tempfile.mkdtemp(prefix="talk-cli-startup-"))
+    fx.write_home(home)
+    cfg = config.parse_config(fx.config_data(profile={"id": "default", "display_name": "Synthetic Talk"}), ROOT)
+    built = []
+
+    class Captured(server.VoiceApp):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            built.append(self)
+
+    class Unbound:
+        def __init__(self, *a, **kw):
+            pass
+
+        def serve_forever(self):
+            pass
+
+        def server_close(self):
+            pass
+
+    env = {"HERMES_HOME": str(home), "TG_VOICE_BOT_TOKEN": fx.BOT_TOKEN, "TG_VOICE_ALLOWED_USER_IDS": str(fx.USER_ID)}
+    with patch.dict(os.environ, env), patch.object(server, "VoiceApp", Captured), \
+            patch.object(server, "BoundedServer", Unbound), patch.object(config, "load_config", lambda _: cfg), \
+            patch.object(history, "NativeHistory", lambda _: history.MemoryHistory()), \
+            patch.object(pulse_engine.PulseEngine, "start", lambda *a, **kw: None):
+        server.main(["--config", "synthetic.yaml", "--origin", "https://talk.invalid", "--base-path", "/tg-voice-shopy/"])
+    app = built[0]
+    launch = app.talk.inbox.published()
+    assert launch and launch["url"] == "https://talk.invalid/tg-voice-shopy/", launch
+    text, url = offer(home, app.talk.bot_id, fx.USER_ID, fx.USER_ID, "private", None)
+    assert text and url, "/talk in the bot's chat offers no Mini App button"
+    body = json.dumps({"initData": fx.sign_init_data(fx.USER_ID, int(time.time()))}).encode()
+    image = app.handle("avatar", body)
+    assert image, "api/avatar has no bot image to serve"
+    return {"launch": launch["url"], "offer": bool(url)}
+
+
 for result in results:
     print(json.dumps(result, ensure_ascii=False))
 print(f"TALK_STARTUP_BACKEND_FAILED {failures}" if failures else "TALK_STARTUP_BACKEND_OK")

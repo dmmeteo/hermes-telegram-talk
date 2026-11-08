@@ -225,15 +225,21 @@ class VoiceApp:
         self.clock = clock
         self.limiter = MintLimiter(MINT_LIMIT, MINT_WINDOW_S, clock)
         self.active = threading.BoundedSemaphore(MAX_ACTIVE_EXCHANGES)
-        # Without a Talk runtime the server is the original voice test: one route, fixed persona.
-        self.talk = talk
-        self.avatar = None
-        if talk is not None:
-            path = talk.config.avatar_path
-            self.avatar = BotAvatar(bot_token, talk.bot_id, (path.read_bytes(), AVATAR_TYPES[path.suffix.lower()]), avatar_fetch)
-        if talk is not None and talk.inbox is not None:  # where `/talk` in the gateway points its button
-            talk.inbox.publish(self.origin + base_path, talk.config.profile_id, talk.bot_id, self.allowed_ids)
+        self.avatar_fetch = avatar_fetch
         self.talk_limiters = {route: MintLimiter(limit, MINT_WINDOW_S, clock) for route, limit in TALK_LIMITS.items()}
+        # Without a Talk runtime the server is the original voice test: one route, fixed persona.
+        self.talk = self.avatar = None
+        if talk is not None:
+            self.attach(talk)
+
+    def attach(self, talk):
+        """Serve `talk`: its bot avatar and the launch the gateway's /talk handler offers as the Mini App button."""
+        self.talk = talk
+        path = talk.config.avatar_path
+        self.avatar = BotAvatar(self.bot_token, talk.bot_id, (path.read_bytes(), AVATAR_TYPES[path.suffix.lower()]),
+                                self.avatar_fetch)
+        if talk.inbox is not None:
+            talk.inbox.publish(self.origin + self.base_path, talk.config.profile_id, talk.bot_id, self.allowed_ids)
 
     @property
     def routes(self):
@@ -529,7 +535,7 @@ def main(argv=None):
         except OSError:
             parser.error("another Talk server already serves this profile")
         from hermes_talk import pulse_model
-        app.talk = TalkRuntime(config, token, NativeHistory(home), home=home_path)
+        app.attach(TalkRuntime(config, token, NativeHistory(home), home=home_path))
         # Plugin discovery (this plugin's ctx.llm) runs in the Pulse worker after start, never before serving.
         app.talk.engine.start(loader=pulse_model.load_host)
     logger.info("serving %s on %s:%s for %s", args.base_path, args.host, args.port, app.origin)
