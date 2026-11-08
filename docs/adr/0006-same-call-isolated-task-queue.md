@@ -22,10 +22,13 @@ allowed at most 2 running and 5 open tasks.
   It never resumes or rebinds the conversation's session. Bounds: 3 running, 13 open per user.
 
 The same-conversation guard became a claims relation (`jobs.claims`, `jobs.overlap`). A canonical job claims its
-conversation's session, as before. An isolated job claims its writer scope in the task workdir: none for a request
-ending `READ ONLY`, a path for `WRITES: <path>`, the whole workdir otherwise. A job waits while a running one holds an
-overlapping claim; a later job without a conflict may pass it. A `WRITES` path outside the workdir is refused before
-anything is stored. A claim is a promise between sibling tasks, not a sandbox: the toolsets are unchanged, so a task
+conversation's session, as before, and the whole workdir against isolated jobs only (a canonical job left over from
+before a switch never runs beside an isolated writer). An isolated job claims its writer scope in the task workdir:
+none for a request with a `READ ONLY` line, the path for `WRITES: <path>` (resolved through symlinks), the whole
+workdir otherwise. A job waits while a running job or an older waiting job holds an overlapping claim, so conflicting
+jobs start in delegation order; a job that conflicts with nothing ahead of it may pass. A path that resolves outside
+the workdir, or more than one directive, is refused before anything is stored. Launch checks the frozen context
+against its stored SHA-256. A claim is a promise between sibling tasks, not a sandbox: the toolsets are unchanged, so a task
 that says `READ ONLY` and then writes is not stopped. Universal write isolation is not claimed.
 
 Results merge only through the persisted job and its receipts. When a job becomes terminal it takes the next

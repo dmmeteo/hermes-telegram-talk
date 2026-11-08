@@ -494,7 +494,7 @@ class TalkRuntime:
         request, report_to = self._report_to(user_id, request)
         writer = WHOLE_WORKDIR
         if self.config.tasks.execution == ISOLATED:
-            request, writer = writer_scope(request)
+            request, writer = writer_scope(request, self.config.tasks.workdir)
         if not request:
             raise TalkError(400, "A task request must say what to do.")
         job, created = self.board.submit(account.key, conversation_id, voice_session_id, record.get("generation", 0),

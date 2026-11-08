@@ -363,8 +363,8 @@ reruns. A sent report records the Bot API message id.
 Each task gets its own native Hermes session and a bounded context frozen when it is delegated (the voice turns and
 the conversation's earlier task outcomes); none resumes or rebinds the conversation's own session. Up to 3 run and 13
 stay open per user; the next delegation is refused. A delegation ending `READ ONLY` claims nothing, `WRITES: <path>`
-claims that path inside `tasks.workdir`, and no line claims the whole workdir: tasks whose claims overlap run one after
-another. Claims are scheduling promises, not a sandbox. Outcomes reach the call in completion order (`result_seq`),
+claims that path inside `tasks.workdir` (symlinks resolved), and no line claims the whole workdir: tasks whose claims
+overlap run one after another, in the order they were delegated. Claims are scheduling promises, not a sandbox. Outcomes reach the call in completion order (`result_seq`),
 each once. `python3 verify-agent.py --rpc-target <SDK> --concurrency` runs the whole experiment offline.
 
 Limits: `tasks.max_concurrent` (1..2, isolated 1..3) runs, `tasks.max_open_per_user` (1..5, isolated 1..13) open jobs, `tasks.request_chars`,

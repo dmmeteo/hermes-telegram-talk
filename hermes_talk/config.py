@@ -234,7 +234,7 @@ def _tasks(data, base_dir):
     if not workdir.is_dir():
         raise ConfigError("tasks.workdir must be an existing directory")
     execution = data.get("execution", "canonical")
-    if execution not in EXECUTION_BOUNDS:
+    if not isinstance(execution, str) or execution not in EXECUTION_BOUNDS:
         raise ConfigError(f"tasks.execution must be one of {sorted(EXECUTION_BOUNDS)}")
     concurrent, open_jobs = EXECUTION_BOUNDS[execution]
     return Tasks(enabled=True, user_ids=tuple(dict.fromkeys(users)), toolsets=tuple(dict.fromkeys(toolsets)),

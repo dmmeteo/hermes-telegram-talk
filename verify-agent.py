@@ -1817,8 +1817,11 @@ def same_call_three_active_ten_waiting(model):
             others = [m for m in range(1, 14) if m != n and any(f"TASK: {texts[m]}\n" in u + "\n" for u in users)]
             assert len(own) == 1 and not others, (n, len(own), others)
             assert f"voice task {n}." in own[0] and f"context-{tag}" in own[0], "the frozen context reached the session"
+            assert len(users) == 1 and hashlib.sha256(own[0].encode()).hexdigest() == jobs[n].context_sha256, \
+                (n, "the session's only user turn is exactly the context frozen at delegation")
+            assert "Earlier Hermes tasks" not in own[0], (n, "nothing had finished when it was delegated")
             isolation[n] = {"session": sid, "user_turns": len(users), "running": snapshot["running"],
-                            "context_sha256_matches": hashlib.sha256(own[0].encode()).hexdigest() == jobs[n].context_sha256}
+                            "context_sha256": jobs[n].context_sha256}
         for n in range(5, 13):
             assert f"answer-{tag}-{n}" in jobs[n].result and all(
                 f"answer-{tag}-{m}" not in jobs[n].result.replace(f"answer-{tag}-{n}", "") for m in range(1, 14)), n
@@ -1855,11 +1858,14 @@ def writer_scope_conflicts(model):
             2: f"slow 6.{secrets.randbelow(90) + 10}\nWRITES: drafts",
             3: f"answer-{tag}-3\nWRITES: notes/today.md",
             4: f"answer-{tag}-4",
-            5: f"answer-{tag}-5\nREAD ONLY"}
+            5: f"answer-{tag}-5\nREAD ONLY",
+            6: f"answer-{tag}-6\nWRITES: other"}
     try:
         conv, vs = e.call()
-        status, body = e.task(conv, vs, "anything\nWRITES: ../outside", f"del_w0_{tag}")
-        assert status == 400 and not e.talk.board.jobs, ("a scope outside the workdir starts nothing", status, body)
+        os.symlink(e.root, e.work / "escape")
+        refused = {text: e.task(conv, vs, text, f"del_w0_{i}_{tag}")[0] for i, text in enumerate(
+            ("anything\nWRITES: ../outside", "anything\nWRITES: escape/notes", "anything\nWRITES: a\nWRITES: b"))}
+        assert set(refused.values()) == {400} and not e.talk.board.jobs, ("refused claims start nothing", refused)
         ids = {}
         for n, text in plan.items():
             status, body = e.task(conv, vs, text, f"del_w{n}_{tag}")
@@ -1867,9 +1873,9 @@ def writer_scope_conflicts(model):
             ids[n] = body["job"]["id"]
         board = e.talk.board
         early = {n: board.jobs[i].state for n, i in ids.items()}
-        assert early[1] == early[2] == "running" and early[3] == early[4] == "accepted", early
+        assert early[1] == early[2] == "running" and early[3] == early[4] == early[6] == "accepted", early
         writers = {n: board.jobs[i].writer for n, i in ids.items()}
-        assert writers == {1: "notes", 2: "drafts", 3: "notes/today.md", 4: ".", 5: ""}, writers
+        assert writers == {1: "notes", 2: "drafts", 3: "notes/today.md", 4: ".", 5: "", 6: "other"}, writers
         wait_jobs(e, list(ids.values()), timeout=120)
         jobs = {n: board.jobs[i] for n, i in ids.items()}
         assert all(j.state == "succeeded" for j in jobs.values()), {n: j.state for n, j in jobs.items()}
@@ -1878,9 +1884,10 @@ def writer_scope_conflicts(model):
             "an undeclared writer waits for every writer"
         assert jobs[1].started < jobs[2].finished and jobs[2].started < jobs[1].finished, "independent writers overlap"
         assert jobs[5].started < min(jobs[1].finished, jobs[3].started), "a reader passes the waiting writers"
+        assert jobs[6].started >= jobs[4].finished, "a narrow writer never jumps an older waiting writer it overlaps"
         return {"writers": writers, "early": early,
                 "intervals": {n: [round(j.started, 2), round(j.finished, 2)] for n, j in jobs.items()},
-                "outside_workdir": 400}
+                "refused": list(refused.values())}
     finally:
         e.close()
 
@@ -1932,7 +1939,11 @@ def isolated_restart_adoption(model):
         assert all("adopted after restart" in after[n].notes for n in (1, 2, 3)), "admitted runs were adopted"
         assert all(after[n].admission_id == before[n].admission_id for n in (1, 2, 3)), "no second admission"
         assert all(len(requests_with(model, f"TASK: {t}")) == 1 for t in texts.values()), "no run was replayed"
-        assert all(after[n].context_sha256 == before[n].context_sha256 for n in (4, 5)), "the frozen context held"
+        from scripted_model import _last_user
+        for n in (4, 5):
+            sent = [_last_user(m) for m in requests_with(model, f"TASK: {texts[n]}")]
+            assert len(sent) == 1 and before[n].context.strip() in sent[0], (n, "the context frozen before the restart ran")
+            assert "Earlier Hermes tasks" not in sent[0], (n, "it was not rebuilt after tasks 1-3 finished")
         assert len({j.native_session_id for j in after.values()}) == 5, "five isolated native sessions"
         assert sorted(j.result_seq for j in after.values()) == [1, 2, 3, 4, 5]
         return {"jobs": {n: {"admission": after[n].admission_id, "result_seq": after[n].result_seq,

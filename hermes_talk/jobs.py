@@ -27,8 +27,8 @@ import re
 import secrets
 import threading
 import time
-from dataclasses import asdict, dataclass, field, replace
-from pathlib import PurePosixPath
+from dataclasses import asdict, dataclass, field, fields, replace
+from pathlib import Path
 
 from .agent import alive, process_start, read_outcome
 from .store import TalkError, clip
@@ -144,30 +144,36 @@ def new_job(scope, conversation_id, voice_session_id, generation, delegation_id,
                writer=writer)
 
 
-def writer_scope(request):
+def writer_scope(request, workdir):
     """(request without its directive, writer scope) for an isolated task.
 
-    "READ ONLY" claims nothing; "WRITES: <path>" claims that path inside the task workdir; no directive claims the
-    whole workdir. A claim is a scheduling promise between sibling tasks, not a sandbox: the tools are unchanged."""
-    reads, writes = READS_ONLY.search(request), WRITES.search(request)
-    if reads and writes:
-        raise TalkError(400, "A task is either READ ONLY or WRITES one place, not both. Nothing was started.")
-    if reads is None and writes is None:
+    "READ ONLY" claims nothing; "WRITES: <path>" claims that path, resolved through symlinks, inside the task
+    workdir; no directive claims the whole workdir. A claim is a scheduling promise between sibling tasks, not a
+    sandbox: the tools are unchanged."""
+    found = [*READS_ONLY.finditer(request), *WRITES.finditer(request)]
+    if len(found) > 1:
+        raise TalkError(400, "A task names at most one READ ONLY or WRITES line. Nothing was started.")
+    if not found:
         return request, WHOLE_WORKDIR
-    match = reads or writes
+    match = found[0]
     stripped = (request[:match.start()] + request[match.end():]).strip()
-    if reads:
+    if match.re is READS_ONLY:
         return stripped, READ_ONLY
-    path = PurePosixPath(writes.group(1).strip().strip("\"'`"))
-    if path.is_absolute() or ".." in path.parts or not str(path):
+    raw = match.group(1).strip().strip("\"'`")
+    root = Path(workdir).resolve()
+    target = (root / raw).resolve()
+    if not raw or not target.is_relative_to(root):
         raise TalkError(400, "WRITES must name a path inside the task workdir. Nothing was started.")
-    return stripped, str(path)
+    return stripped, target.relative_to(root).as_posix()
 
 
 def claims(job):
-    """What a running job holds exclusively: its conversation's canonical session, or its workdir writer scope."""
+    """What a job holds exclusively while it runs.
+
+    A canonical job holds its conversation's session and, against isolated jobs only, the whole workdir: canonical
+    jobs of different conversations ran side by side before isolated execution existed and still do."""
     if job.execution != ISOLATED:
-        return {("session", job.conversation_id)}
+        return {("session", job.conversation_id), ("canonical", WHOLE_WORKDIR)}
     return set() if job.writer == READ_ONLY else {("workdir", job.writer)}
 
 
@@ -175,9 +181,15 @@ def _covers(a, b):
     return a == WHOLE_WORKDIR or b == WHOLE_WORKDIR or a == b or b.startswith(a + "/") or a.startswith(b + "/")
 
 
+def _conflict(a, b):
+    (ka, va), (kb, vb) = a, b
+    if "session" in (ka, kb):
+        return ka == kb and va == vb
+    return not ka == kb == "canonical" and _covers(va, vb)
+
+
 def overlap(mine, theirs):
-    return any(k1 == k2 and (v1 == v2 if k1 == "session" else _covers(v1, v2))
-               for k1, v1 in mine for k2, v2 in theirs)
+    return any(_conflict(a, b) for a in mine for b in theirs)
 
 
 def dump(job):
@@ -192,8 +204,9 @@ def load(raw):
     if not isinstance(data, dict):
         return None
     data["notes"] = tuple(data.get("notes") or ())
+    known = {f.name for f in fields(Job)}
     try:
-        return Job(**data)
+        return Job(**{k: v for k, v in data.items() if k in known})
     except TypeError:
         return None
 
@@ -316,19 +329,21 @@ class JobBoard:
     def pump(self):
         """Start accepted jobs, oldest first, while slots are free; a job that failed to start takes no slot.
 
-        A job waits while a running one holds an overlapping claim (claims()); later jobs may pass it."""
+        A job waits while a running job or an older waiting one holds an overlapping claim (claims()), so conflicting
+        jobs start in the order they were delegated; a job that conflicts with nothing ahead of it may pass."""
         with self.lock:
-            held = [claims(j) for j in self.jobs.values() if j.state == RUNNING]
-            slots = self.tasks.max_concurrent - len(held)
+            ahead = [claims(j) for j in self.jobs.values() if j.state == RUNNING]
+            slots = self.tasks.max_concurrent - len(ahead)
             for job in sorted((j for j in self.jobs.values() if j.state == ACCEPTED), key=lambda j: (j.created, j.id)):
                 if slots <= 0:
                     break
                 mine = claims(job)
-                if any(overlap(mine, other) for other in held):
+                if any(overlap(mine, other) for other in ahead):
+                    ahead.append(mine)
                     continue
                 if self._launch(job):
                     slots -= 1
-                    held.append(mine)
+                    ahead.append(mine)
 
     def _adopt_gateway(self, job):
         """A gateway job outlives Talk: follow its admission, or admit it once if Talk stopped before the receipt."""
@@ -350,8 +365,8 @@ class JobBoard:
     def _prepare(self, job):
         """(prompt, resume): an isolated job's frozen context in a new session, else the canonical session's turn."""
         if job.execution == ISOLATED:
-            if not job.context:
-                raise ValueError("an isolated job has no frozen context")
+            if not job.context or hashlib.sha256(job.context.encode()).hexdigest() != job.context_sha256:
+                raise ValueError("an isolated job's frozen context is missing or changed")
             return job.context, None
         return self.prompt_for(job)
 
