@@ -11,8 +11,8 @@ started a process and may still be started after a restart; a running job whose 
 interrupted and never rerun, because its side effects are unknown. Receipt is separate from state:
 "delivered" means the result was handed to the voice model (a delegation append acknowledged by the
 client, or call instructions the assistant then spoke in). It never means the result was heard.
-The chat report of a finished job is a third, separate state (receipts.py); report_to holds the
-destination bound when the job was accepted.
+The job's Telegram status message is a third, separate state (receipts.py), updated from every stored
+version of the job; report_to and title hold its destination and short name, bound when it was accepted.
 """
 import json
 import logging
@@ -77,6 +77,7 @@ class Job:
     acks: int = 0
     notes: tuple = field(default_factory=tuple)
     report_to: dict = None
+    title: str = ""
 
     @property
     def terminal(self):
@@ -119,10 +120,10 @@ class Job:
 
 
 def new_job(scope, conversation_id, voice_session_id, generation, delegation_id, number, request, now,
-            report_to=None):
+            report_to=None, title=""):
     return Job(id="jb_" + secrets.token_urlsafe(18), scope=scope, conversation_id=conversation_id,
                voice_session_id=voice_session_id, generation=generation, delegation_id=delegation_id,
-               number=number, request=request, created=now, report_to=report_to)
+               number=number, request=request, created=now, report_to=report_to, title=title)
 
 
 def dump(job):
@@ -155,8 +156,8 @@ class JobBoard:
     """Server-owned jobs for one profile: dedupe, bounded scheduling, delivery receipts and restart reconciliation.
 
     prompt_for(job) returns (prompt, resume session id); bind(job, native_session_id) records the native
-    session a conversation's tasks continue in. desk (receipts.ReportDesk or None) gets every job's
-    first terminal transition, with the full redacted result.
+    session a conversation's tasks continue in. desk (receipts.ReportDesk or None) follows every stored
+    version of every job.
     """
 
     def __init__(self, history, agent, tasks, clock, prompt_for, bind, redact, desk=None):
@@ -179,30 +180,28 @@ class JobBoard:
         self.jobs[job.id] = job
         self.history.set_meta(job_key(job.id), dump(job))
         self.revision += 1
+        self._report(job)
         return job
 
-    def _finish(self, job, full=None):
-        """Persist a terminal job, then its report (before any send), then hand the report to the sender."""
+    def _report(self, job):
+        """The job is stored first; its status message follows. A report failure must not strand the queue."""
+        if self.desk is None:
+            return
+        try:
+            self.desk.follow(job)
+        except Exception as exc:
+            logger.warning("a task's status message could not be updated: %s", type(exc).__name__)
+
+    def _finish(self, job):
         self.handles.pop(job.id, None)
-        job = self._save(job)
-        if self.desk is not None:
-            try:
-                self.desk.prepare(job, job.error if full is None else full)
-                self.desk.dispatch(job.id)
-            except Exception as exc:  # the job's own outcome is stored; a report failure must not strand the queue
-                logger.warning("report for a finished task could not be prepared: %s", type(exc).__name__)
-        return job
+        return self._save(job)
 
     def reconcile(self):
         """After a restart: adopt live runs, settle finished ones from their output, never rerun the rest."""
         if self.desk is not None:
             with self.lock:
                 for job in self.jobs.values():
-                    if job.terminal and self.desk.get(job.id) is None and (job.finished or 0) >= self.desk.since:
-                        try:
-                            self.desk.prepare(job, job.result if job.state == SUCCEEDED else job.error)
-                        except Exception as exc:
-                            logger.warning("report for a finished task could not be prepared: %s", type(exc).__name__)
+                    self._report(job)
             self.desk.reconcile()
         with self.lock:
             for job in list(self.jobs.values()):
@@ -223,7 +222,8 @@ class JobBoard:
             job = self.jobs.get(self.history.get_meta(delegation_key(scope, conversation_id, generation, delegation_id)) or "")
         return job if job is not None and job.scope == scope and job.conversation_id == conversation_id else None
 
-    def submit(self, scope, conversation_id, voice_session_id, generation, delegation_id, request, report_to=None):
+    def submit(self, scope, conversation_id, voice_session_id, generation, delegation_id, request, report_to=None,
+               title=""):
         """(job, created). A repeated delegation of the same call returns its existing job and starts nothing."""
         with self.lock:
             key = delegation_key(scope, conversation_id, generation, delegation_id)
@@ -234,7 +234,7 @@ class JobBoard:
                 raise TalkError(429, "Too many Hermes tasks are already open. Wait for one to finish or cancel one.")
             number = 1 + max((j.number for j in self.jobs.values() if j.conversation_id == conversation_id), default=0)
             job = self._save(new_job(scope, conversation_id, voice_session_id, generation, delegation_id, number,
-                                     request, self.clock(), report_to))
+                                     request, self.clock(), report_to, title))
             self.history.set_meta(key, job.id)
         self.pump()
         return self.jobs[job.id], True
@@ -396,7 +396,6 @@ class JobBoard:
             job = replace(job, native_session_id=outcome.session_id)
             self.bind(job, outcome.session_id)
         limit = self.tasks.result_chars
-        full = None
         if self.gateway and job.admission_id and outcome is None:
             # The gateway no longer knows the admission: neither a stop nor a result is proven.
             job = job.to(INTERRUPTED, finished=now, error="The Hermes gateway lost this task's run; its outcome is unknown.")
@@ -408,15 +407,12 @@ class JobBoard:
             job = job.to(INTERRUPTED, finished=now, error=("Talk restarted while the task ran; it was not rerun."
                                                            if restarted else "The run stopped without a result."))
         elif outcome.exit_code == 0 and outcome.text.strip():
-            full = self.redact(outcome.text.strip())
-            if outcome.text_cut:
-                full += f"\n[{outcome.text_cut} more characters of this result were not kept]"
-            job = job.to(SUCCEEDED, finished=now, result=clip(full, limit))
+            job = job.to(SUCCEEDED, finished=now, result=clip(self.redact(outcome.text.strip()), limit))
         elif outcome.exit_code == 130:
             job = job.to(INTERRUPTED, finished=now, error="The run was interrupted before it finished.")
         else:
             job = job.to(FAILED, finished=now, error=clip(self.redact(outcome.error or "Hermes reported a failure."), 300))
-        self._finish(job, full)
+        self._finish(job)
         if not self.gateway:
             self.agent.discard_output(job.output)
 
