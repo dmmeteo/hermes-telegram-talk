@@ -205,6 +205,7 @@ function stop(message = "") {
     current.stream?.getTracks().forEach(track => track.stop());
     current.remoteStream?.getTracks().forEach(track => track.stop());
     clearTimeout(current.pollTimer);
+    current.dialogue?.close();
     if (current.channel) {
       current.channel.onopen = current.channel.onclose = current.channel.onmessage = null;
       current.channel.close();
@@ -390,7 +391,7 @@ function settle(current, event) {
   current.lastSettled = key;
   if (identity) current.seen.add(key);
   transcriptFinal(turn.role, identity ? `${current.voiceId}:${identity}` : `${current.voiceId}:${turn.role}:${text}:${current.seen.size}:${transcript.lines.length}`,
-    text, turn.role === "assistant" && current.interrupted);
+    text, turn.role === "assistant" && dialogueOf(current).interrupted);
   if (turn.role === "user") current.lastUserText = text;
   const owner = current.conversation;
   if (owner.disabled) return;
@@ -401,7 +402,7 @@ function settle(current, event) {
     stop("Conversation is too long to save. Close and reopen Hermes Telegram Talk."); return;
   }
   // Spoken over by the user before it settled: its text is not evidence that any Pulse update was told.
-  const interrupted = turn.role === "assistant" && current.interrupted;
+  const interrupted = turn.role === "assistant" && dialogueOf(current).interrupted;
   for (const chunk of chunks) owner.pending.push({voiceId: current.voiceId, event: {
     id: crypto.randomUUID(), sequence: owner.sequence++, role: turn.role, text: chunk,
     ...(interrupted ? {interrupted: true} : {}),
@@ -418,14 +419,14 @@ function onMessage(current, message) {
     current.handshake = true; mark(current, "handshake"); advance(current);
   }
   if (["input_transcript.added", "output_transcript.added"].includes(event.type)) current.lastSettled = null;
-  if (event.type === "output_transcript.added") { current.answering = true; transcriptFragment("assistant", event.item?.text); }
+  if (event.type === "output_transcript.added") transcriptFragment("assistant", event.item?.text);
   if (event.type === "input_transcript.added") transcriptFragment("user", event.item?.text);
-  if (event.type === "input_transcript.added" && current.answering) current.interrupted = true;
   if (event.type === "turn.done") {
     settle(current, event);
-    if (event.turn?.role === "assistant") { current.answering = false; current.interrupted = false; }
-    if (event.turn?.role === "assistant" && current.greetingSent) current.greetingDone = true;
+    if (event.turn?.role === "assistant" && current.greetingBegun) current.greetingDone = true;
   }
+  // After settle(), which reads whether the user spoke over the assistant turn this turn.done ends.
+  dialogueOf(current).hear(event);
   if (event.type === "session.closed") stop("Voice connection closed. Tap Retry to reconnect.");
   if (event.type === "error") stop("Voice service reported an error. Tap Retry to reconnect.");
   if (event.type === "delegation.created" && event.item?.target === "client"
@@ -438,37 +439,136 @@ function onMessage(current, message) {
   }
 }
 
-// Message framing and 500-byte chunking follow Conduit GPTLiveProtocol.contextAppendMessages (MIT).
-function chunks(text) {
-  const encoder = new TextEncoder();
-  const out = [];
-  let current = "", bytes = 0;
-  for (const character of text.trim()) {
-    const size = encoder.encode(character).length;
-    if (bytes + size > APPEND_MAX_BYTES && current) { out.push(current); current = ""; bytes = 0; }
-    current += character; bytes += size;
+// Turn-taking timings follow Conduit GPTLiveConversationController (MIT).
+const OPENING_PROMPT = "Begin the configured opening greeting now.";
+const DIALOGUE_TICK_MS = 500;
+const OPENING_ASK_MS = 4000;
+const OPENING_HOLD_MS = 10000;
+const MODEL_QUIET_MS = 1000;
+// A prompted model turn that never starts stops holding the queue after this long.
+const MODEL_EXPECTED_MS = 6000;
+const USER_QUIET_MS = 2000;
+// An open user turn whose turn.done never arrives stops holding the queue after this long.
+const USER_STALE_MS = 6000;
+
+// One call's dialogue with GPT-Live. greeting_enabled means the server instructions already open the call, so the
+// opening prompt is only a fallback for a model that stays silent. A speakable waits until nobody is talking and the
+// model has answered the previous one. close() drops unsent items without settling them: the server keeps every
+// unacknowledged result and offers it to the next call.
+function Dialogue(send, audible) {
+  const speech = {model: "quiet", expectedAt: 0, modelEndedAt: -Infinity, userSpokeAt: -Infinity, userTurnOpen: false,
+    interrupted: false, heard: false};
+  let opening = "idle", openingAt = 0, closed = false, tick = null;
+  const outbox = new Map();
+
+  function utf8Length(character) {
+    const code = character.codePointAt(0);
+    return code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
   }
-  if (current) out.push(current);
-  return out;
+
+  // Message framing and 500-byte chunking follow Conduit GPTLiveProtocol.contextAppendMessages (MIT).
+  function frames(text, channel, delegationId) {
+    const parts = [];
+    let part = "", bytes = 0;
+    for (const character of text.trim()) {
+      const size = utf8Length(character);
+      if (bytes + size > APPEND_MAX_BYTES && part) { parts.push(part); part = ""; bytes = 0; }
+      part += character; bytes += size;
+    }
+    if (part) parts.push(part);
+    return parts.map(chunk => ({type: delegationId ? "delegation.context.append" : "session.context.append", channel,
+      content: [{type: "input_text", text: chunk}], ...(delegationId ? {delegation_item_id: delegationId} : {})}));
+  }
+
+  // "sent": every chunk was queued; "none": nothing was; "partial": some chunks were, so it must not be repeated.
+  function transmit(text, channel, delegationId) {
+    const messages = frames(text, channel, delegationId);
+    let queued = 0;
+    try {
+      while (queued < messages.length && send(messages[queued])) queued += 1;
+    } catch (_) {}
+    return queued === messages.length ? "sent" : queued ? "partial" : "none";
+  }
+
+  function expect(now) { speech.model = "expected"; speech.expectedAt = now; }
+
+  function modelQuiet(now) {
+    return speech.model === "quiet" || (speech.model === "expected" && now - speech.expectedAt >= MODEL_EXPECTED_MS);
+  }
+
+  function idle(now) {
+    return audible() && opening !== "held" && opening !== "asked" && modelQuiet(now)
+      && now - speech.modelEndedAt >= MODEL_QUIET_MS && now - speech.userSpokeAt >= USER_QUIET_MS
+      && !(speech.userTurnOpen && now - speech.userSpokeAt < USER_STALE_MS);
+  }
+
+  // "owed": the hold ended while nobody could hear the opening, so it is asked for once when audio returns.
+  function stepOpening(now) {
+    if ((opening === "held" || opening === "asked") && now - openingAt >= OPENING_HOLD_MS) {
+      opening = opening === "held" ? "owed" : "done";
+    }
+    const due = opening === "owed" || (opening === "held" && now - openingAt >= OPENING_ASK_MS);
+    if (!due || !audible() || !modelQuiet(now)) return;
+    transmit(OPENING_PROMPT, "speakable", null);
+    expect(now);
+    opening = opening === "held" ? "asked" : "done";
+  }
+
+  function pump() {
+    if (closed) return;
+    const now = performance.now();
+    stepOpening(now);
+    const [key, item] = outbox.entries().next().value || [];
+    if (item && idle(now)) {
+      const outcome = transmit(item.text, "speakable", item.delegationId);
+      if (outcome !== "none") { outbox.delete(key); expect(now); item.settled?.(outcome); }
+    }
+    clearTimeout(tick); tick = null;
+    if (outbox.size || ["held", "asked", "owed"].includes(opening)) tick = setTimeout(pump, DIALOGUE_TICK_MS);
+  }
+
+  return {
+    get interrupted() { return speech.interrupted; },
+    hear(event) {
+      if (closed) return;
+      const now = performance.now();
+      const role = event.type === "turn.done" ? event.turn?.role : null;
+      if (event.type === "input_transcript.added") {
+        speech.userSpokeAt = now; speech.userTurnOpen = true;
+        if (speech.model === "speaking") speech.interrupted = true;
+      } else if (event.type === "output_transcript.added") speech.model = "speaking";
+      else if (role === "user") { speech.userSpokeAt = now; speech.userTurnOpen = false; }
+      else if (role === "assistant") { speech.model = "quiet"; speech.modelEndedAt = now; speech.interrupted = false; }
+      else return;
+      speech.heard = true;
+      if (opening !== "idle") opening = "done";
+      pump();
+    },
+    begin(greeting) {
+      if (opening === "idle") { opening = greeting && !speech.heard ? "held" : "done"; openingAt = performance.now(); }
+      pump();
+    },
+    note(text, delegationId = null) { return closed ? "none" : transmit(text, "commentary", delegationId); },
+    say(key, text, delegationId = null, settled = null) {
+      if (closed) return;
+      outbox.set(key, {text, delegationId, settled});
+      pump();
+    },
+    close() { closed = true; outbox.clear(); clearTimeout(tick); tick = null; },
+  };
 }
 
-// "sent": every chunk was queued; "none": nothing was; "partial": some chunks were, so it must not be repeated.
-function append(current, text, channel, delegationId) {
-  if (call !== current || current.channel?.readyState !== "open") return "none";
-  const parts = chunks(text);
-  let queued = 0;
-  try {
-    for (const chunk of parts) {
-      const message = {type: delegationId ? "delegation.context.append" : "session.context.append", channel,
-        content: [{type: "input_text", text: chunk}]};
-      if (delegationId) message.delegation_item_id = delegationId;
+// Lazy, because test fixtures build `current` by hand; a dialogue first asked for after its call ended is born closed.
+function dialogueOf(current) {
+  if (!current.dialogue) {
+    current.dialogue = Dialogue(message => {
+      if (call !== current || current.channel?.readyState !== "open") return false;
       current.channel.send(JSON.stringify(message));
-      queued += 1;
-    }
-  } catch (_) {
-    return queued ? "partial" : "none";
+      return true;
+    }, () => call === current && (current.phase === "ready" || current.phase === "greeting"));
+    if (call !== current) current.dialogue.close();
   }
-  return "sent";
+  return current.dialogue;
 }
 
 function callFields(current) {
@@ -486,11 +586,11 @@ async function feedback(current, item) {
   for (let attempt = 0; attempt < 3 && call === current && current.voiceId; attempt += 1) {
     try {
       const data = await post("pulse/feedback", {...callFields(current), delegation_item_id: item.id, request});
-      if (typeof data.reply === "string" && data.reply) append(current, data.reply, "speakable", item.id);
+      if (typeof data.reply === "string" && data.reply) dialogueOf(current).say(`reply:${item.id}`, data.reply, item.id);
       return;
     } catch (error) {
       if (REFUSED.includes(error.status)) {
-        append(current, "Pulse could not record that reaction. Nothing changed.", "speakable", item.id); return;
+        dialogueOf(current).say(`reply:${item.id}`, "Pulse could not record that reaction. Nothing changed.", item.id); return;
       }
       await new Promise(resolve => setTimeout(resolve, 1000 * 2 ** attempt));
     }
@@ -501,7 +601,7 @@ async function delegate(current, item) {
   const asked = delegationText(item);
   const request = Array.from(asked || current.lastUserText || "").slice(0, 2000).join("");
   if (!request || !current.voiceId) {
-    append(current, "There was nothing to hand to Hermes. Nothing was executed.", "speakable", item.id); return;
+    dialogueOf(current).say(`reply:${item.id}`, "There was nothing to hand to Hermes. Nothing was executed.", item.id); return;
   }
   // The same delegation id is idempotent on the server, so an unconfirmed submission is safe to repeat.
   for (let attempt = 0; ; attempt += 1) {
@@ -514,21 +614,22 @@ async function delegate(current, item) {
     if (call !== current) return;
     // A refusal of a resubmission does not show that the first, unanswered submission did not run.
     if (refused && attempt === 0) {
-      append(current, `Hermes could not take this task. ${refused.serverMessage || refused.message} Nothing was executed.`,
-        "speakable", item.id);
+      dialogueOf(current).say(`reply:${item.id}`,
+        `Hermes could not take this task. ${refused.serverMessage || refused.message} Nothing was executed.`, item.id);
       return;
     }
     if (data && typeof data.reply === "string" && typeof data.job?.id === "string") {
       // "cancel task N" and "result of task N" answer with the job they name, not one for this delegation.
       if (data.job.delegation_item_id === item.id) current.jobs.set(data.job.id, item.id);
-      append(current, data.reply, data.channel === "speakable" ? "speakable" : "commentary", item.id);
+      if (data.channel === "speakable") dialogueOf(current).say(`reply:${item.id}`, data.reply, item.id);
+      else dialogueOf(current).note(data.reply, item.id);
       schedulePoll(current, 500);
       return;
     }
-    if (attempt === 0) append(current, "Checking whether Hermes received this task.", "commentary", item.id);
+    if (attempt === 0) dialogueOf(current).note("Checking whether Hermes received this task.", item.id);
     if (attempt >= 2 || refused) {
-      append(current, "It is not confirmed whether Hermes received this task. If it did, its result will still arrive "
-        + "here or in Telegram. Do not say that it ran or that nothing ran.", "speakable", item.id);
+      dialogueOf(current).say(`reply:${item.id}`, "It is not confirmed whether Hermes received this task. If it did, its "
+        + "result will still arrive here or in Telegram. Do not say that it ran or that nothing ran.", item.id);
       schedulePoll(current, 500);
       return;
     }
@@ -561,10 +662,12 @@ async function poll(current) {
       const delegationId = current.jobs.get(job.id);
       if (!delegationId || job.delegation_item_id !== delegationId || job.voice_session_id !== current.voiceId
         || !FINISHED.includes(job.state) || current.spoken.has(job.id) || current.cut.has(job.id)) continue;
-      const outcome = append(current, job.spoken || `Hermes task ${job.number} ${job.state}.`, "speakable", delegationId);
       // Only a whole append is acknowledged. A cut one stays undelivered for the next call, never repeated here.
-      if (outcome === "sent") { current.spoken.add(job.id); void acknowledge(current, job.id, 0); }
-      else if (outcome === "partial") current.cut.add(job.id);
+      dialogueOf(current).say(`job:${job.id}`, job.spoken || `Hermes task ${job.number} ${job.state}.`, delegationId,
+        outcome => {
+          if (outcome === "sent") { current.spoken.add(job.id); void acknowledge(current, job.id, 0); }
+          else current.cut.add(job.id);
+        });
     }
     const n = current.polls++;
     if (data.context_pending || n % 6 === 0 || n < 3) void refresh(current);
@@ -592,7 +695,15 @@ async function refresh(current) {
   try {
     const data = await post("context", callFields(current));
     if (call !== current || !Number.isInteger(data.revision) || typeof data.text !== "string" || !data.text) return;
-    const outcome = append(current, data.text, data.sources?.jobs ? "speakable" : "commentary");
+    if (data.sources?.jobs) {
+      // One slot: a newer revision replaces an unsent older one, and only the revision appended is acknowledged.
+      dialogueOf(current).say("context", data.text, null, outcome => {
+        if (outcome === "sent") void post("context/ack", {...callFields(current), revision: data.revision}).catch(() => {});
+        else current.contextCut = true;
+      });
+      return;
+    }
+    const outcome = dialogueOf(current).note(data.text);
     if (outcome === "sent") await post("context/ack", {...callFields(current), revision: data.revision});
     else if (outcome === "partial") current.contextCut = true;
   } catch (_) {
@@ -607,12 +718,10 @@ function advance(current) {
   // Transport and audio are usable: the connection deadline is met. A greeting never ends a connected call.
   mark(current, "usable");
   clearTimeout(current.timeout);
-  if (current.conversation.greeting && !current.greetingSent) {
-    current.greetingSent = true;
+  if (current.conversation.greeting && !current.greetingBegun) {
+    current.greetingBegun = true;
     current.phase = "greeting";
     mark(current, "greeting");
-    current.channel.send(JSON.stringify({ type: "session.context.append", channel: "speakable",
-      content: [{ type: "input_text", text: "Begin the configured opening greeting now." }] }));
     current.greetingTimer = setTimeout(() => {
       if (call !== current) return;
       current.greetingOver = true;
@@ -624,6 +733,7 @@ function advance(current) {
   } else if (!current.conversation.greeting) { current.phase = "ready"; mark(current, "ready"); }
   else if (current.greetingOver) current.phase = "ready";
   else if (current.greetingDone || current.phase === "blocked" || current.phase === "connecting") current.phase = "greeting";
+  dialogueOf(current).begin(current.conversation.greeting === true);
   updateMic(current);
 }
 
@@ -643,7 +753,7 @@ async function enableAudio(current) {
       current.playing = true;
     }
     if (call !== current) return;
-    if (current.phase === "blocked") current.phase = current.greetingSent ? "greeting" : "connecting";
+    if (current.phase === "blocked") current.phase = current.greetingBegun ? "greeting" : "connecting";
     showError(); advance(current); render();
   } catch (_) {
     if (call !== current) return;

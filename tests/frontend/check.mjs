@@ -13,8 +13,20 @@ test('Talk assets have content-qualified URLs distinct from the legacy cache', (
     assert(!html.includes(`"${name}"`), `${name} must not reuse the legacy cache key`);
   }
 });
-function fixture() {
+function fixture(options = {}) {
   const nodes = new Map();
+  let now = 0, nextTimer = 1;
+  const timers = new Map();
+  const clock = options.clock ? {setTimeout:(fn,ms=0)=>{timers.set(nextTimer,{fn,at:now+ms});return nextTimer++;},
+    clearTimeout:id=>timers.delete(id), performance:{now:()=>now}} : {setTimeout, clearTimeout, performance};
+  const wait = ms => {
+    const until = now + ms;
+    for (;;) {
+      const due = [...timers].filter(([,t])=>t.at<=until).sort((a,b)=>a[1].at-b[1].at||a[0]-b[0])[0];
+      if (!due) { now = until; return; }
+      timers.delete(due[0]); now = due[1].at; due[1].fn();
+    }
+  };
   function element(id) {
     if (!nodes.has(id)) nodes.set(id,{hidden:false,textContent:'',disabled:false,dataset:{},style:{setProperty(){}},
       setAttribute(name,value){this[name]=value;},querySelector(){return this;},addEventListener(){},removeEventListener(){},
@@ -25,7 +37,7 @@ function fixture() {
     window:{addEventListener(){},removeEventListener(){}}, location:{hash:'',href:'http://localhost/tg-voice/',origin:'http://localhost'},
     URL, URLSearchParams, AbortController, DOMException, crypto:globalThis.crypto,
     matchMedia:()=>({matches:false}), getComputedStyle:()=>({color:'#ffffff'}),
-    setTimeout, clearTimeout, cancelAnimationFrame(){}, requestAnimationFrame:()=>1, performance,
+    ...clock, cancelAnimationFrame(){}, requestAnimationFrame:()=>1,
     fetch:async()=>{throw new Error('Unexpected network');}});
   vm.runInContext(source,context);
   vm.runInContext(`
@@ -45,7 +57,7 @@ function fixture() {
     flush = async()=>{flushCalls++;};
     function emit(event) { onMessage(current,{data:JSON.stringify(event)}); }
   `,context);
-  return {context,nodes,run:code=>vm.runInContext(code,context)};
+  return {context,nodes,wait,run:code=>vm.runInContext(code,context)};
 }
 
 test('fragments and public Realtime events never persist',()=>{
@@ -81,11 +93,15 @@ test('invalid roles, empty text and tool output are ignored' ,()=>{
  assert.equal(f.run('owner.pending.length'),0);
 });
 test('handshake and playing output required before greeting',()=>{
- const f=fixture();f.run(`owner.greeting=true; advance(current);`);assert.equal(f.run('sent.length'),0);
+ const f=fixture({clock:true});f.run(`owner.greeting=true; advance(current);`);assert.equal(f.run('sent.length'),0);
  f.run(`current.handshake=true;current.playing=false;advance(current);`);assert.equal(f.run('sent.length'),0);
  f.run(`current.playing=true;advance(current);advance(current);`);
- assert.equal(f.run('sent.length'),1);assert.equal(f.run('sent[0].type'),'session.context.append');
+ assert.equal(f.run('sent.length'),0,'greeting_enabled: the server instructions open the call, so nothing is sent at usable');
  assert.equal(f.run('track.enabled'),false); assert.equal(f.run('current.phase'),'greeting');
+ f.wait(4000);
+ assert.equal(f.run('sent.length'),1,'a silent model is asked for the opening once at +4 s');assert.equal(f.run('sent[0].type'),'session.context.append');
+ assert.equal(f.run('sent[0].channel'),'speakable');
+ f.wait(11000);assert.equal(f.run('sent.length'),1,'never asked twice');
 });
 test('greeting disabled becomes ready only after actual handshake',()=>{
  const f=fixture(); f.run(`owner.greeting=false;advance(current);`);assert.equal(f.run('track.enabled'),false);

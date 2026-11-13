@@ -73,6 +73,9 @@ function harness(sc) {
         this.channel.readyState = 'open'; this.channel.onopen?.();
       }, sc.connectMs ?? 500, 'fixture');
       if (!sc.noHandshake) setT(() => { if (!this.closed) this.emit({type: 'session.started'}); }, (sc.connectMs ?? 500) + (sc.handshakeMs ?? 300), 'fixture');
+      // A provider that follows speak-first instructions greets on its own, without any request.
+      if (sc.selfGreets && !sc.noHandshake) setT(() => { if (this.closed) return; note('self greeting'); this.greet();
+        this.emit({type: 'output_transcript.added', item: {text: 'Synthetic greeting.'}}); }, (sc.connectMs ?? 500) + (sc.handshakeMs ?? 300) + 100, 'fixture');
     }
     emit(ev) { if (this.channel.readyState === 'open') this.channel.onmessage?.({data: JSON.stringify(ev)}); }
     greet() {
@@ -174,6 +177,7 @@ const SCENARIOS = {
     [20000, 'call.audio.state = "running"; void enableAudio(call)']], expect: {usable: true}},
   'late-context-no-tasks': {tasks: false, lateContextAt: 9000, greet: [1000, 4000], greetingTurnDoneMs: 4200,
     expect: {usable: true, lateContext: true}},
+  'self-greeting': {selfGreets: true, greet: [1000, 4000], greetingTurnDoneMs: 4200, expect: {usable: true, greetingRequests: 0}},
 };
 
 const failures = [];
@@ -208,7 +212,8 @@ async function runScenario(name) {
     check(phase === 'ready', `${name}: phase at 45 s is ${phase}, not ready`);
     check(!result.errorShown && result.endRequestAt === null, `${name}: a usable call was ended (${result.errorShown})`);
     check(readiness?.stages?.usable !== undefined && readiness.stages.usable < 30000, `${name}: no usable stage before the deadline`);
-    check(result.sessionRequests === 1 && greetings === (def.greeting === false ? 0 : 1), `${name}: reconnected or re-greeted`);
+    check(result.sessionRequests === 1 && greetings === (e.greetingRequests ?? (def.greeting === false ? 0 : 1)),
+      `${name}: reconnected or re-greeted`);
     check(released(result.afterPagehide || {}), `${name}: pagehide left resources ${JSON.stringify(result.afterPagehide)}`);
   } else {
     check(phase === 'idle' && /did not become ready/.test(result.errorShown), `${name}: a genuine failure was not reported`);

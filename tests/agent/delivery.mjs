@@ -7,8 +7,9 @@ const source = readFileSync(process.argv[2] || 'static/talk/app.js', 'utf8');
 const tests = [];
 const test = (group, name, run) => tests.push({group, name, run});
 
-function fixture() {
+function fixture(options = {}) {
   const nodes = new Map();
+  const clock = {now: 0};
   const element = id => {
     if (!nodes.has(id)) nodes.set(id, {hidden: false, textContent: '', disabled: false, dataset: {}, style: {setProperty() {}},
       setAttribute(name, value) { this[name] = value; }, querySelector() { return this; }, addEventListener() {},
@@ -22,7 +23,7 @@ function fixture() {
     URL, URLSearchParams, AbortController, DOMException, TextEncoder, crypto: globalThis.crypto,
     matchMedia: () => ({matches: false}), getComputedStyle: () => ({color: '#ffffff'}),
     setTimeout: (fn, ms) => { timers.push({fn, ms}); return timers.length; }, clearTimeout() {},
-    cancelAnimationFrame() {}, requestAnimationFrame: () => 1, performance,
+    cancelAnimationFrame() {}, requestAnimationFrame: () => 1, performance: options.clock ? {now: () => clock.now} : performance,
     fetch: async () => { throw new Error('Unexpected network'); }});
   vm.runInContext(source, context);
   vm.runInContext(`
@@ -53,7 +54,7 @@ function fixture() {
     await settle();
     return due.length;
   };
-  return {run, settle, fire, timers};
+  return {run, settle, fire, timers, advance: ms => { clock.now += ms; }};
 }
 
 const job = (over = {}) => ({id: 'jb_' + 'a'.repeat(24), number: 1, delegation_item_id: 'del_1', voice_session_id: 'vs_synthetic',
@@ -155,6 +156,37 @@ test('partial_append_recovery', 'a failing tasks request or a throwing channel n
   assert.equal(f.run('posts.filter(p => p.route === "context/ack").length'), 0, 'an unsent update is not acked');
   assert.equal(f.run('current.contextCut === true'), false, 'nothing was queued, so a later refresh may send it');
   assert.equal(f.timers.length, 1, 'polling continues after the channel threw');
+});
+test('partial_append_recovery', 'a result finished while the user speaks waits for the user, then goes once to its own delegation', async () => {
+  const f = fixture({clock: true});
+  f.run(`current.jobs.set('${job().id}', 'del_1'); current.delegations.add('del_1');
+    replies.tasks = [{jobs: [${JSON.stringify(job())}]}]; replies['task/ack'] = [{job: {}}];
+    emit({type: 'input_transcript.added', item: {text: 'synthetic user words'}}); poll(current);`);
+  await f.settle();
+  assert.equal(f.run('sent.length'), 0, 'not spoken over the user');
+  f.advance(1000); f.run(`emit({type: 'turn.done', turn: {id: 'u1', role: 'user', transcript: 'synthetic user words'}});`);
+  f.advance(1999); await f.fire(500);
+  assert.equal(f.run('sent.length'), 0, 'held for 2 s after the user turn ends');
+  assert.equal(f.run('posts.filter(p => p.route === "task/ack").length'), 0, 'nothing acked before the append');
+  f.advance(1); await f.fire(500);
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(sent.map(m => [m.type, m.delegation_item_id, m.channel]))')),
+    [['delegation.context.append', 'del_1', 'speakable']]);
+  assert.equal(f.run('posts.filter(p => p.route === "task/ack").length'), 1);
+  await f.fire(500);
+  assert.equal(f.run('sent.length'), 1, 'delivered once');
+});
+test('ambiguous_task_submission', 'a duplicate delegation.created and a retry after call replacement post one task and say nothing in the new call', async () => {
+  const f = fixture();
+  f.run(`replies.task = [new Error('Network error.')];
+    for (let i = 0; i < 2; i++) emit({type: 'delegation.created', item: {type: 'delegation', id: 'del_dup', target: 'client', content: [{type: 'input_text', text: 'synthetic job'}]}});`);
+  await f.settle();
+  assert.equal(f.run('posts.filter(p => p.route === "task").length'), 1);
+  f.run(`globalThis.replacementSent = [];
+    call = {...current, dialogue: undefined, channel: {readyState: 'open', send: m => replacementSent.push(JSON.parse(m)), close() {}}};`);
+  await f.fire(1000);
+  assert.equal(f.run('posts.filter(p => p.route === "task").length'), 1, 'the retry of a replaced call posts nothing');
+  assert.equal(f.run('replacementSent.length'), 0, 'nothing from the old call reaches the new one');
+  assert.deepEqual(JSON.parse(f.run('JSON.stringify(texts())')), ['Checking whether Hermes received this task.']);
 });
 let failed = 0;
 const results = {};
