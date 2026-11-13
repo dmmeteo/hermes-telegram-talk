@@ -4,6 +4,7 @@
 The fake upstream relays the SDP offer to a provider page (provider.html) running in the same
 Chromium, which answers with a local oscillator track. Nothing leaves the container.
 """
+import importlib.util
 import io
 import json
 import logging
@@ -18,7 +19,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 import server  # noqa: E402
-from verify import sign_init_data  # noqa: E402
+
+_spec = importlib.util.spec_from_file_location("run_legacy", ROOT / "tests/e2e/run-legacy.py")
+_legacy = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_legacy)
+sign_init_data = _legacy.sign_init_data
 
 BOT_TOKEN = "123456:synthetic-browser-bot-token"
 USER_ID = 1001
