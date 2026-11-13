@@ -378,7 +378,23 @@ def install_synthetic_hermes(record, edit_error=None):
                         "gateway": gateway, "gateway.config": config})
 
 
+SYNTHETIC_MODULES = ("tools", "tools.send_message_tool", "tools.send_message_senders", "gateway", "gateway.config")
+
+
 def telegram_sender_contract():
+    saved = {name: sys.modules.get(name) for name in SYNTHETIC_MODULES}
+    try:
+        return sender_contract_offline()
+    finally:
+        for name, module in saved.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+
+
+def sender_contract_offline():
+    """The real TelegramSender over synthetic Hermes modules; a Hermes runtime's own modules are never reached."""
     record = []
     install_synthetic_hermes(record)
     sender = receipts.TelegramSender(TOKEN, timeout=1.0)
@@ -402,8 +418,7 @@ def telegram_sender_contract():
     started = time.monotonic()
     hung = sender.edit(dest, "8001", "x")
     assert receipts.classify_edit(hung) == receipts.EDIT_RETRY and time.monotonic() - started < 3, hung
-    for name in ("tools", "tools.send_message_tool", "tools.send_message_senders", "gateway", "gateway.config"):
-        sys.modules.pop(name, None)
+    sys.modules["tools.send_message_senders"] = None  # import fails as if Hermes were absent
     missing = sender.edit(dest, "8001", "x")
     assert "not installed" in missing["error"] and receipts.classify_edit(missing) == receipts.EDIT_FINAL
     return {"send": "Hermes _send_to_platform, no media", "edit": "Hermes _telegram_bot().edit_message_text",
