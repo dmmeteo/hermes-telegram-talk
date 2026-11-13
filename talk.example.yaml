@@ -11,24 +11,27 @@ appearance:
 voice:
   model: gpt-live-1-codex
   voice: cove
-  language_hint: "Speak Ukrainian unless the user switches language."
+  language: uk               # en or uk: the call speaks and opens in this language (instruction text only;
+                             # the GPT-Live session has no language field)
+  # language_hint: "..."     # optional extra language guidance, added after the language rule
   session_ttl_minutes: 120   # an unended call is marked expired after this; the conversation itself never resets
-# persona:
+# persona:                   # the voice persona; Talk does not read the profile's SOUL.md
+#   text: "Calm, warm and to the point. Dry humour is welcome; never chatty."  # up to 1200 characters;
+#                            # default: a calm and friendly voice assistant
 #   self_reference: feminine # Ukrainian feminine forms for herself: «я готова», «я зрозуміла»
 greeting:
-  enabled: true
-  text: "Greet the user in one short sentence."
-  # phrases:                 # optional ready greetings for this profile only; one short line per call, chosen locally
-  #   - "Привіт! Я на зв’язку. Що робимо?"
+  enabled: true              # false: the voice waits for the user to speak first
+  text: "Greet the user in one short sentence."  # used only without phrases and without voice.language
+  # phrases:                 # optional ready opening lines; one per call, chosen locally. Without them the call
+  #   - "Привіт! Я на зв’язку. Що робимо?"   # opens with the language's own line («Привіт! Я на зв’язку. Слухаю.»)
 context:
   skills: []                 # allowlist of skill names read through the host skill loader; empty = none
   budgets:                   # application character limits, not provider tokens
     instructions_chars: 12000
-    soul_chars: 4000
     skill_chars: 1500
     skills_chars: 3000
-    summary_chars: 1200
-    recent_turns: 8
+    summary_chars: 2000      # the earlier conversation's summary; its latest turns go word for word as initial_items
+    recent_turns: 8          # voice turns carried into a delegated task's prompt
     turn_chars: 300
     activity_items: 5
     activity_chars: 1200

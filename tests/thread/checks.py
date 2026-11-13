@@ -61,7 +61,7 @@ class Rig:
         data = {**data, "profile": {**data["profile"], "id": profile}}
         self.config = parse_config(data, self.home)
         self.history = history_factory(self.home)
-        self.talk = TalkRuntime(self.config, token, self.history, soul=fx.file_soul(self.home),
+        self.talk = TalkRuntime(self.config, token, self.history,
                                 skill=fx.file_skill(self.home), clock=self.clock, home=self.home)
         self.app = server.VoiceApp(token, {fx.USER_ID, fx.OTHER_USER_ID}, fx.ORIGIN, "/tg-voice/",
                                    resolve=self.fake.resolve, post=self.fake.post, clock=self.clock, talk=self.talk)
@@ -356,15 +356,17 @@ def run(history_factory, event_factory, dispatch, out, extras=None):
             assert dispatch(rig.home, event_factory(text="Synthetic sent after ending", message_id=901)) is None  # unbound
             reopened = rig.start()
             assert reopened["conversation_id"] == conv
-            _, instructions, _, _ = rig.talk.prepare(fx.USER_ID, conv)
-            recent = instructions.split("## Most recent turns", 1)[1].split("\n## ", 1)[0]
+            _, instructions, _, report = rig.talk.prepare(fx.USER_ID, conv)
+            said = [(i["role"], i["content"][0]["text"]) for i in report["initial_items"]]
+            recent = "\n".join(f"{role}: {text}" for role, text in said)
             order = [recent.find(s) for s in ("user: Synthetic first question", "user: [Telegram chat input during "
                                               "the call] text", "assistant: Synthetic answer")]
             assert -1 not in order and order == sorted(order), (order, recent)
             assert recent.count("Synthetic typed follow-up") == 1, recent
+            assert "Synthetic typed follow-up" not in instructions, "dialogue never goes into the instructions"
             stored = [t for _, t in rig.turns(conv)]
             assert sum("Synthetic typed follow-up" in t for t in stored) == 1, stored
-            assert "Synthetic sent after ending" not in instructions
+            assert "Synthetic sent after ending" not in instructions + recent
         finally:
             rig.close()
 
@@ -473,9 +475,9 @@ def run(history_factory, event_factory, dispatch, out, extras=None):
             assert len(line) <= 90 and not any(m in line.lower() for m in meme), line
         assert any(w in " ".join(shopy.greeting_phrases) for w in ("готова", "рада", "корисною")), \
             shopy.greeting_phrases
-        text, _ = compose(shopy, "", [], "", [], [], 0, "", greeting_line=shopy.greeting_phrases[0])
+        text, _ = compose(shopy, [], "", [], 0, "", greeting_line=shopy.greeting_phrases[0])
         assert "feminine grammatical gender" in text and "я готова" in text, text[:600]
-        ptext, _ = compose(pewds, "", [], "", [], [], 0, "")
+        ptext, _ = compose(pewds, [], "", [], 0, "")
         assert "feminine" not in ptext and "masculine" not in ptext
 
     @check("stale_end_overlapping_new_bind_never_deletes_the_new_binding")

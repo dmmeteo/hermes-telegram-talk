@@ -105,7 +105,7 @@ def main():
     home = write_home(tempfile.mkdtemp(prefix="talk-fixture-"))
     fake = FakeUpstream()
     talk = TalkRuntime(parse_config(config_data(), home), BOT_TOKEN, MemoryHistory(),
-                       soul=file_soul(home), skill=file_skill(home))
+                       skill=file_skill(home))
     app = server.VoiceApp(BOT_TOKEN, {USER_ID, OTHER_USER_ID}, f"http://127.0.0.1:{args.port}", "/tg-voice/",
                           resolve=fake.resolve, post=fake.post, talk=talk)
     httpd = server.BoundedServer(("127.0.0.1", args.port), server.make_handler(app))

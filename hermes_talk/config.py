@@ -7,6 +7,7 @@ GPT-Live subscription endpoint, so nothing here claims to match it.
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 DEFAULT_AVATAR = PACKAGE_DIR / "assets" / "avatar.svg"
@@ -22,10 +23,9 @@ class ConfigError(ValueError):
 @dataclass(frozen=True)
 class Budgets:
     instructions_chars: int = 12000
-    soul_chars: int = 4000
     skill_chars: int = 1500
     skills_chars: int = 3000
-    summary_chars: int = 1200
+    summary_chars: int = 2000
     recent_turns: int = 8
     turn_chars: int = 300
     activity_items: int = 5
@@ -33,6 +33,9 @@ class Budgets:
     tasks_chars: int = 2000
     event_batch_max: int = 20
     event_text_chars: int = 2000
+
+
+RETIRED_BUDGETS = ("soul_chars",)
 
 
 @dataclass(frozen=True)
@@ -127,7 +130,9 @@ class TalkConfig:
     model: str = "gpt-live-1-codex"
     voice: str = "cove"
     voice_choices: tuple = ()  # ((id, label), ...) the user may pick for replies; the default voice is first
+    language: "Language" = None
     language_hint: str = ""
+    persona_text: str = ""
     self_reference: str = ""   # "feminine" or "masculine": grammatical gender the voice uses for itself
     greeting_enabled: bool = True
     greeting: str = "Say a short hello."
@@ -167,6 +172,22 @@ def _phrases(value):
     if not isinstance(value, list) or len(value) > 12:
         raise ConfigError("greeting.phrases must be a list of at most 12 lines")
     return tuple(dict.fromkeys(_text(v, "greeting.phrases[]", 160) for v in value))
+
+
+class Language(NamedTuple):
+    name: str
+    greeting: str
+
+
+LANGUAGES = {
+    "en": Language("English", "Hi, I'm listening."),
+    "uk": Language("Ukrainian", "Привіт! Я на зв’язку. Слухаю."),
+}
+PERSONA_CHARS = 1200
+DEFAULT_PERSONA = (
+    "You are a calm and friendly voice assistant. Speak naturally at an unhurried pace. Be clear and direct, not "
+    "overly cheerful. If the user is frustrated, acknowledge it briefly and focus on the next helpful step. Use "
+    "moderate backchannels; acknowledge naturally without competing with the main response.")
 
 
 VOICE_ID = re.compile(r"[a-z][a-z0-9_-]{0,31}")
@@ -273,12 +294,20 @@ def _receipts(data, tasks):
 
 
 def _self_reference(persona):
-    if not isinstance(persona, dict) or set(persona) - {"self_reference"}:
-        raise ConfigError("persona only supports self_reference")
+    if not isinstance(persona, dict) or set(persona) - {"self_reference", "text"}:
+        raise ConfigError("persona only supports self_reference and text")
     value = persona.get("self_reference", "")
     if value not in ("", *SELF_REFERENCE):
         raise ConfigError("persona.self_reference must be feminine or masculine")
     return value
+
+
+def _language(value):
+    if value is None:
+        return None
+    if value not in LANGUAGES:
+        raise ConfigError(f"voice.language must be one of {sorted(LANGUAGES)}")
+    return LANGUAGES[value]
 
 
 def parse_config(data, base_dir):
@@ -316,7 +345,7 @@ def parse_config(data, base_dir):
         raise ConfigError("context.skills must be a list of skill names")
     budgets = Budgets(**{name: _int(context["budgets"][name], f"context.budgets.{name}", 0, 100000)
                          for name in Budgets.__dataclass_fields__ if name in (context.get("budgets") or {})})
-    unknown = set(context.get("budgets") or {}) - set(Budgets.__dataclass_fields__)
+    unknown = set(context.get("budgets") or {}) - set(Budgets.__dataclass_fields__) - set(RETIRED_BUDGETS)
     if unknown:
         raise ConfigError(f"unknown context.budgets keys: {sorted(unknown)}")
     if not 1 <= budgets.event_batch_max <= 50 or not 1 <= budgets.event_text_chars <= 4000:
@@ -329,6 +358,7 @@ def parse_config(data, base_dir):
     if owner is not None and (type(owner) is not int or owner <= 0):
         raise ConfigError("activity.owner_user_id must be a numeric Telegram user id")
     tasks = _tasks(data.get("tasks") or {}, base_dir)
+    persona = data.get("persona") or {}
     if privacy and privacy != {"persist_audio": False}:
         raise ConfigError("privacy only supports persist_audio: false; raw audio is never stored")
     return TalkConfig(
@@ -338,8 +368,10 @@ def parse_config(data, base_dir):
         model=_text(voice.get("model", TalkConfig.model), "voice.model", 64),
         voice=_text(voice.get("voice", TalkConfig.voice), "voice.voice", 32),
         voice_choices=_voices(voice.get("choices"), _text(voice.get("voice", TalkConfig.voice), "voice.voice", 32)),
+        language=_language(voice.get("language")),
         language_hint=voice.get("language_hint", "") if isinstance(voice.get("language_hint", ""), str) else "",
-        self_reference=_self_reference(data.get("persona") or {}),
+        self_reference=_self_reference(persona),
+        persona_text=_text(persona["text"], "persona.text", PERSONA_CHARS) if "text" in persona else DEFAULT_PERSONA,
         greeting_enabled=bool(greeting.get("enabled", True)),
         greeting=_text(greeting.get("text", TalkConfig.greeting), "greeting.text", 400),
         greeting_phrases=_phrases(greeting.get("phrases", [])),

@@ -482,7 +482,7 @@ def prepare_call(home, data):
     from hermes_talk.store import TalkStore, VoiceScope
     history = NativeHistory(home)
     try:
-        store = TalkStore(history, time.time, 7200, 1200)
+        store = TalkStore(history, time.time, 7200)
         scope = VoiceScope(data["profile"]["id"], fx.BOT_TOKEN.split(":")[0], fx.USER_ID)
         conv, _ = store.current(scope)
         return conv, store.start_voice_session(scope, conv, None)

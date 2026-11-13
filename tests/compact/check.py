@@ -94,7 +94,7 @@ class Compact(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             home = f.write_home(temp)
             runtime = TalkRuntime(parse_config(f.config_data(), home), f.BOT_TOKEN, MemoryHistory(),
-                                  soul=f.file_soul(home), skill=f.file_skill(home))
+                                  skill=f.file_skill(home))
             calls = []
             app = server.VoiceApp(f.BOT_TOKEN, {f.USER_ID}, 'http://fixture.invalid', talk=runtime,
                                  avatar_fetch=lambda *args: calls.append(args) or (PNG, 'image/png'))
@@ -128,7 +128,7 @@ class Compact(unittest.TestCase):
                 data = f.config_data(voice={'voice': voice, 'choices': ['cove', 'sol']})
                 data['profile']['id'] = profile
                 runtime = TalkRuntime(parse_config(data, home), f.BOT_TOKEN, history,
-                                      soul=f.file_soul(home), skill=f.file_skill(home))
+                                      skill=f.file_skill(home))
                 runtimes.append(runtime)
                 self.assertEqual(runtime.reply_voice(f.USER_ID), voice)
                 self.assertEqual({v['id'] for v in runtime.set_voice(f.USER_ID)['voice']['choices']},

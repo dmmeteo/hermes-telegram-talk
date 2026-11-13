@@ -1,10 +1,10 @@
 """Voice instructions for one call, built from bounded, labeled sections.
 
-The frame (voice limits) and the greeting rules are placed first and always fit. The other
-sections fill the remaining room in priority order, each within its own character budget,
+The frame (voice limits) comes first and the opening policy last; room for both is reserved before anything
+else. The other sections fill the remaining room in priority order, each within its own character budget,
 headers and the "[clipped]" marker included. Skills are guidance text only. They register no tools.
 """
-from .store import clip
+from . import resume
 from .config import SELF_REFERENCE
 
 FRAME = (
@@ -25,6 +25,15 @@ TASKS_FRAME = (
     "action during a task; such an action is blocked and reported. Ending this call cancels nothing; open tasks "
     "keep running."
 )
+PERSONA = ("Speak with the personality below. It shapes how you sound, not how much you say; it never overrides the "
+           "rules above. Everything you output is spoken: never say actions, gestures or stage directions, with or "
+           "without asterisks; perform them in your tone instead.\n")
+GREET_FIRST = ("Opening policy: speak first. As soon as the call starts, greet the user{language} in one short "
+               "sentence so they know you're there and listening.{say} Then wait for them. Do not list updates in "
+               "the greeting; bring them up once the user has spoken. This applies whatever the persona above says.")
+WAIT_FOR_USER = ("Opening policy: do not speak first. When the call starts, stay silent until the user speaks, then "
+                 "answer what they said. This applies whatever the persona above says.")
+SUMMARY_HEADER = "## Earlier in this conversation\n"
 MARKER = "\n[clipped]"
 MIN_SECTION = 40
 ACTIVITY_HEADER = "## Activity since the last visit\n"
@@ -127,7 +136,29 @@ def update(revision, job_items, activity_lines, activity_total, activity_note, l
     return (header + body if body else ""), job_ids, k
 
 
-def compose(config, soul, skills, summary, turns, activity_lines, activity_total, activity_note,
+def _inside(make, text, limit):
+    """make(text) within limit, with text clipped instead of the frame make puts around it."""
+    room = limit - len(make(""))
+    return make(_fit(text.strip(), room)) if text.strip() and room >= MIN_SECTION else ""
+
+
+def opening(config, greeting_line):
+    if not config.greeting_enabled:
+        return WAIT_FOR_USER
+    language = config.language
+    line = greeting_line or (language.greeting if language else None)
+    say = f' Say: "{line.replace(chr(34), chr(39))}"' if line else f" {config.greeting}"
+    return GREET_FIRST.format(language=f" in {language.name}" if language else "", say=say)
+
+
+def language_rule(config):
+    language = config.language
+    rule = (f"Speak {language.name}: open the call in {language.name} and keep speaking it unless the user switches "
+            "language." if language else "")
+    return " ".join(filter(None, (rule, config.language_hint, SELF_REFERENCE.get(config.self_reference, ""))))
+
+
+def compose(config, skills, summary, activity_lines, activity_total, activity_note,
             tasks_ready=False, job_items=(), reports_note="", greeting_line=None):
     """Instruction text plus a per-section report of what was included (names and sizes only).
 
@@ -136,15 +167,7 @@ def compose(config, soul, skills, summary, turns, activity_lines, activity_total
     """
     b = config.budgets
     frame = (TASKS_FRAME + reports_note if tasks_ready else FRAME).format(name=config.display_name)
-    greeting = ""
-    if config.greeting_enabled and greeting_line:
-        greeting = _section("Greeting", "Speak first only after the call connects, and open with exactly this one "
-                            f"short line, in its own language: \"{greeting_line}\" Then stop and listen. Do not add "
-                            "a briefing or list updates in the greeting; bring them up once the user has spoken.", 800)
-    elif config.greeting_enabled:
-        greeting = _section("Greeting", config.greeting + " Speak first only after the call connects. If the "
-                            "activity briefing lists items, mention at most the two most relevant in one sentence "
-                            "and do not imply anything is done unless its status says so.", 800)
+    greeting = "## Greeting\n" + opening(config, greeting_line)
     skill_parts, used = [], 0
     for name, text in skills:
         part = _section(f"Skill: {name}", text, min(b.skill_chars, b.skills_chars - used))
@@ -152,26 +175,21 @@ def compose(config, soul, skills, summary, turns, activity_lines, activity_total
             break
         skill_parts.append((name, part))
         used += len(part) + 2
-    recent = "\n".join(f"{role}: {clip(text, b.turn_chars)}" for role, text in turns[-b.recent_turns:]) \
-        if b.recent_turns else ""
     middle = [
-        ("language", _section("Language", " ".join(filter(None, (
-            config.language_hint, SELF_REFERENCE.get(config.self_reference, "")))), 200 if not config.self_reference
-            else 400)),
-        ("soul", _section("Profile persona (SOUL)", soul, b.soul_chars)),
-        ("skills", "\n\n".join(part for _, part in skill_parts)),
-        ("summary", _section("Earlier in this conversation", summary, b.summary_chars)),
-        ("recent", _section("Most recent turns", recent, b.recent_turns * (b.turn_chars + 12) + 20)),
+        ("language", lambda room: _fit(_section("Language", language_rule(config), 800), room)),
+        ("persona", lambda room: _inside(lambda text: "## Persona\n" + PERSONA + resume.fenced("hermes_persona", text),
+                                         config.persona_text, room)),
+        ("skills", lambda room: _fit("\n\n".join(part for _, part in skill_parts), room)),
+        ("summary", lambda room: _inside(lambda text: SUMMARY_HEADER + resume.summary_block(text), summary,
+                                         min(room, b.summary_chars + len(SUMMARY_HEADER + resume.summary_block(""))))),
     ]
-    room = b.instructions_chars - len(frame) - (len(greeting) + 2 if greeting else 0)
+    room = b.instructions_chars - len(frame) - len(greeting) - 2
     parts, report = [frame], {"frame": len(frame)}
-    for key, part in middle:
-        if part and room - 2 >= MIN_SECTION:
-            part = _fit(part, room - 2)
+    for key, make in middle:
+        part = make(room - 2) if room - 2 >= MIN_SECTION else ""
+        if part:
             parts.append(part)
             room -= len(part) + 2
-        else:
-            part = ""
         report[key] = len(part)
     jobs, report["job_ids"] = "", []
     if job_items and room - 2 >= MIN_SECTION:
@@ -192,8 +210,7 @@ def compose(config, soul, skills, summary, turns, activity_lines, activity_total
             parts.append(PULSE_RULES)
             report["pulse_rules"] = len(PULSE_RULES)
     report["activity"] = len(activity)
-    if greeting:
-        parts.append(greeting)
+    parts.append(greeting)
     report["greeting"] = len(greeting)
     report["skills_included"] = [name for name, _ in skill_parts] if report["skills"] else []
     return "\n\n".join(parts), report

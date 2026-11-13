@@ -8,10 +8,11 @@ import json
 import logging
 import random
 import re
+import threading
 import time
 from dataclasses import asdict
 
-from . import activity, pulse, pulse_policy
+from . import activity, pulse, pulse_policy, resume
 from .agent import Readiness
 from .gateway_rpc import task_agent
 from .config import PRIVATE_NAMES
@@ -19,7 +20,7 @@ from .context import UPDATE_HEADER, chat_section, compose, update
 from .jobs import DELEGATION_ID, OPEN, SUCCEEDED, UNDELIVERED, JobBoard
 from .pulse_engine import SELECT_ON_CALL_S, PulseEngine
 from .pulse_ledger import PulseLedger
-from .pulse_model import PulseModel
+from .pulse_model import ModelUnavailable, PulseModel
 from .receipts import DIRECTIVE, SINCE_KEY, Destination, ReportDesk, TelegramSender
 from .store import SOURCE, TalkError, TalkStore, VoiceScope, clip
 from .thread_inbox import ThreadInbox, history_text, item_line, receipt
@@ -36,6 +37,11 @@ CANCEL = re.compile(r"(?i)^\s*(?:please\s+)?(?:cancel|stop)\s+(?:hermes\s+)?task
 RESULT = re.compile(r"(?i)^\s*(?:the\s+)?(?:full\s+)?result\s+of\s+(?:hermes\s+)?task\s*#?\s*(\d{1,4})\s*[.!?]?\s*$")
 
 SYNOPSIS_CHARS = 160
+RESUME_ROWS = 10000
+SUMMARY_MAX_TOKENS = 1200  # Conduit's 600 for the text plus room for the JSON wrapping
+SUMMARY_TIMEOUT_S = 60.0
+SUMMARY_STORE_CHARS = 8000
+SUMMARY_JSON = resume.SUMMARY_INSTRUCTIONS + ' Reply as a JSON object {"summary": "<the summary>"}.'
 CHAT_CHARS = 8000  # chat input carried by one context update; the rest follows in the next one
 TASK_PROMPT = (
     "[Hermes Telegram Talk voice task {number}. It was delegated from a Telegram voice call and nobody watches this run "
@@ -61,9 +67,14 @@ def redact(text):
     return text
 
 
-def native_soul():
-    from agent.prompt_builder import load_soul_md
-    return load_soul_md() or ""
+def background(fn):
+    """Run fn on a daemon thread; a failure is logged by type only, never with its private text."""
+    def run():
+        try:
+            fn()
+        except Exception as exc:
+            logger.warning("background %s failed: %s", getattr(fn, "__name__", "task"), type(exc).__name__)
+    threading.Thread(target=run, name="talk-resume", daemon=True).start()
 
 
 def native_skill(name):
@@ -76,15 +87,18 @@ class TalkRuntime:
     # Sessions read per visit for the briefing; past this the briefing says it is not exhaustive.
     activity_scan_max = 1000
 
-    def __init__(self, config, bot_token, history, soul=native_soul, skill=native_skill, clock=time.time,
-                 agent=None, home=None, sender=None, model=None):
+    def __init__(self, config, bot_token, history, soul=None, skill=native_skill, clock=time.time,
+                 agent=None, home=None, sender=None, model=None, spawn=None):
         self.config = config
         self.bot_id = bot_token.split(":", 1)[0]
         self.history = history
-        self.store = TalkStore(history, clock, config.voice_session_ttl_s, config.budgets.summary_chars)
+        self.store = TalkStore(history, clock, config.voice_session_ttl_s)
         self.pulse = PulseLedger(history, clock)
-        self.engine = PulseEngine(self, model if model is not None else PulseModel())
-        self.soul = soul
+        self.model = model if model is not None else PulseModel()
+        self.engine = PulseEngine(self, self.model)
+        self.spawn = spawn or background
+        self._summary_lock = threading.Lock()
+        self._summarizing = set()
         self.skill = skill
         self.clock = clock
         self._last_greeting = {}
@@ -246,13 +260,12 @@ class TalkRuntime:
         """Instructions for the next call on the account's current conversation."""
         account = self.account(user_id)
         if conversation_id is None:
-            conversation_id, state = self.store.current(account)
+            conversation_id, _ = self.store.current(account)
         else:
-            state = self.store.owned(account, conversation_id, bound=True)
+            self.store.owned(account, conversation_id, bound=True)
         c = self.config
-        soul = redact(self.soul() or "")
         skills = [(name, redact(self.skill(name) or "")) for name in c.skills]
-        turns = [(role, redact(text)) for role, text in self.history.recent(conversation_id, c.budgets.recent_turns)]
+        summary, items = self._resume(account, conversation_id)
         self.pulse.remember_talk(account, conversation_id)
         limit = c.budgets.activity_items if c.activity_enabled else 0
         # Call setup reads only the account's prepared Pulse state; scanning and model selection catch up in the
@@ -261,17 +274,65 @@ class TalkRuntime:
         note = self._prepared_note(account) if limit else ""
         self.engine.prepare_soon(user_id)
         job_items = self._job_items(account, conversation_id)
-        instructions, report = compose(c, soul, [s for s in skills if s[1]], redact(state.get("summary") or ""),
-                                       turns, lines, total, note, self.readiness(user_id).ready,
-                                       job_items, self._reports_note(user_id), self._greeting_line(account))
+        instructions, report = compose(c, [s for s in skills if s[1]], summary or "", lines, total, note,
+                                       self.readiness(user_id).ready, job_items, self._reports_note(user_id),
+                                       self._greeting_line(account))
+        report["initial_items"] = items
         # Only cards the final text carries whole are exposed; none counts as heard until the call shows it.
         carried = [card["fp"] for card in cards[: report["activity_items"]]]
         report["job_ids"] = [i for i in report["job_ids"] if not i.startswith("open:")]
         report["job_numbers"] = self._job_numbers(account, conversation_id, report["job_ids"])
         logger.info("context frame=instructions sources=%s", json.dumps(
-            {key: report[key] for key in ("frame", "soul", "skills", "summary", "recent", "jobs", "activity",
-                                          "greeting", "activity_items")}, sort_keys=True))
+            {**{key: report[key] for key in ("frame", "language", "persona", "skills", "summary", "jobs", "activity",
+                                             "greeting", "activity_items")}, "initial_items": len(items)},
+            sort_keys=True))
         return conversation_id, instructions, carried, report
+
+    def _resume(self, account, conversation_id):
+        resumed = self._resumed(conversation_id)
+        if resumed.to_summarize:
+            self._summary_soon(account, conversation_id)
+        logger.info("resume items=%d summary=%s pending=%s", len(resumed.recent),
+                    "yes" if resumed.summary else "none", bool(resumed.to_summarize))
+        return (redact(resumed.summary) if resumed.summary else None), resume.history_items(resumed.recent)
+
+    def _resumed(self, conversation_id):
+        rows = self.history.rows(conversation_id, RESUME_ROWS)
+        turns = [resume.Turn(t.role, redact(t.text)) for t in resume.turns(rows)]
+        return resume.resolve(turns, len(rows) < RESUME_ROWS, self.store.resume_summary(conversation_id))
+
+    def _summary_soon(self, account, conversation_id):
+        with self._summary_lock:
+            if conversation_id in self._summarizing:
+                return
+            self._summarizing.add(conversation_id)
+        try:
+            self.spawn(lambda: self._write_summary(account, conversation_id))
+        except Exception as exc:
+            with self._summary_lock:
+                self._summarizing.discard(conversation_id)
+            logger.warning("resume summary could not start: %s", type(exc).__name__)
+
+    def _write_summary(self, account, conversation_id):
+        try:
+            older = self._resumed(conversation_id).to_summarize
+            if older:
+                text = self._summarize(resume.summary_input(older))
+                self.store.save_resume_summary(account, conversation_id, resume.Summary(text, len(older)))
+                logger.info("resume summary written covers=%d", len(older))
+        except (ModelUnavailable, TalkError) as exc:
+            logger.info("resume summary not written (%s); calls resume from their latest turns", type(exc).__name__)
+        finally:
+            with self._summary_lock:
+                self._summarizing.discard(conversation_id)
+
+    def _summarize(self, transcript):
+        reply = self.model.ask(SUMMARY_JSON, transcript, "talk_resume_summary", max_tokens=SUMMARY_MAX_TOKENS,
+                               timeout=SUMMARY_TIMEOUT_S)
+        text = reply.get("summary")
+        if not isinstance(text, str) or not text.strip():
+            raise ModelUnavailable("the reply carried no summary")
+        return text.strip()[:SUMMARY_STORE_CHARS]
 
     def _greeting_line(self, account):
         """One of the profile's configured ready greetings, never the one this account heard last."""
@@ -307,9 +368,12 @@ class TalkRuntime:
         self.history.set_meta(self._voice_key(user_id), voice)
         return {"voice": self._voice_public(user_id)}
 
-    def session_config(self, instructions, user_id=None):
-        return {"model": self.config.model, "instructions": instructions,
-                "audio": {"output": {"voice": self.reply_voice(user_id)}}, "delegation": {"type": "client"}}
+    def session_config(self, instructions, user_id=None, initial_items=()):
+        config = {"model": self.config.model, "instructions": instructions,
+                  "audio": {"output": {"voice": self.reply_voice(user_id)}}, "delegation": {"type": "client"}}
+        if initial_items:
+            config["initial_items"] = list(initial_items)
+        return config
 
     def _job_numbers(self, account, conversation_id, job_ids):
         if self.board is None or not job_ids:
@@ -407,6 +471,7 @@ class TalkRuntime:
             self.inbox.unbind(thread, voice_session_id, flush)
             self._threads.pop(voice_session_id, None)
         self.engine.poke(user_id)  # the call went quiet: read it for memory and run due follow-ups
+        self._summary_soon(self.account(user_id), conversation_id)
         return ended
 
     def _task_prompt(self, job):

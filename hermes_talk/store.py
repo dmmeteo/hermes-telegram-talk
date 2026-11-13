@@ -2,7 +2,7 @@
 
 A conversation is one native Hermes session titled "Telegram Voice". The
 binding (verified Telegram user + configured profile + bot -> session id),
-voice-session ledger, summary and legacy activity cursor live in the store's meta
+voice-session ledger, resume summary and legacy activity cursor live in the store's meta
 table through SessionDB.get_meta/set_meta. Settled turns are appended as
 ordinary user/assistant rows with a receipt, so a retried batch is
 recognized instead of written twice. Raw audio, SDP and reasoning never
@@ -13,6 +13,8 @@ import re
 import secrets
 import threading
 from dataclasses import dataclass
+
+from .resume import Summary
 
 TITLE = "Telegram Voice"
 SOURCE = "telegram-voice"
@@ -58,11 +60,10 @@ def clip(text, limit):
 
 
 class TalkStore:
-    def __init__(self, history, clock, voice_session_ttl_s, summary_chars):
+    def __init__(self, history, clock, voice_session_ttl_s):
         self.history = history
         self.clock = clock
         self.ttl = voice_session_ttl_s
-        self.summary_chars = summary_chars
         self.lock = threading.Lock()
 
     def _binding_key(self, account):
@@ -85,7 +86,7 @@ class TalkStore:
     def _create(self, account):
         conversation_id = self.history.create_session(TITLE, SOURCE)
         state = {"account": account.key, "created": self.clock(), "voice_sessions": {},
-                 "summary": "", "activity_cursor": None, "last_visit": None}
+                 "activity_cursor": None, "last_visit": None}
         self._save(conversation_id, state)
         self.history.set_meta(self._binding_key(account), conversation_id)
         return conversation_id, state
@@ -131,7 +132,6 @@ class TalkStore:
                 record["ended"], record["end_reason"] = now, "expired"
                 changed = True
         if changed:
-            state["summary"] = self._summary(conversation_id)
             self._save(conversation_id, state)
 
     def start_voice_session(self, account, conversation_id, briefing_watermark, job_ids=(), job_numbers=None):
@@ -251,24 +251,21 @@ class TalkStore:
         self.history.set_meta(f"hermes_talk:agent_session:{conversation_id}", session_id)
 
     def end(self, account, conversation_id, voice_session_id):
-        """Idempotent checkpoint: the first end closes the call; every end refreshes the summary."""
         with self.lock:
             state = self._owned(account, conversation_id)
             record = self._voice_session(state, voice_session_id)
             if record["ended"] is None:
                 record["ended"], record["end_reason"] = self.clock(), "ended"
-            state["summary"] = self._summary(conversation_id)
-            self._save(conversation_id, state)
+                self._save(conversation_id, state)
             return {"ok": True}
 
-    def _summary(self, conversation_id):
-        limit = self.summary_chars
-        """A bounded extractive checkpoint: the latest user requests, no model call involved."""
-        asks = [clip(text, 160) for role, text in self.history.recent(conversation_id, 40) if role == "user"]
-        out = []
-        for ask in reversed(asks):
-            line = f"- {ask}"
-            if sum(len(x) + 1 for x in out) + len(line) > limit:
-                break
-            out.insert(0, line)
-        return "\n".join(out)
+    def resume_summary(self, conversation_id):
+        with self.lock:
+            stored = (self._load(conversation_id) or {}).get("resume_summary")
+            return Summary(stored["text"], stored["covers"]) if stored else None
+
+    def save_resume_summary(self, account, conversation_id, summary):
+        with self.lock:
+            state = self._owned(account, conversation_id)
+            state["resume_summary"] = summary._asdict()
+            self._save(conversation_id, state)
