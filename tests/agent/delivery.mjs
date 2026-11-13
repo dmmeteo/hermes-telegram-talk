@@ -26,7 +26,7 @@ function fixture() {
     fetch: async () => { throw new Error('Unexpected network'); }});
   vm.runInContext(source, context);
   vm.runInContext(`
-    const owner = {id: 'conversation', auth: 'synthetic', pending: [], sequence: 0, batchMax: 4, retries: 0, tasks: true};
+    const owner = {id: 'conversation', auth: 'synthetic', pending: [], sequence: 0, batchMax: 4, retries: 0};
     const sent = [];
     const posts = [];
     const channel = {readyState: 'open', failAt: null, send(m) {

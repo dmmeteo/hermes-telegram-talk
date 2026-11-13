@@ -105,6 +105,7 @@ function harness(sc) {
     if (route === 'session') return {status: 200, body: {conversation_id: 'c1', voice_session_id: `v${++voiceN}`, sdp: 'v=0\r\nanswer', type: 'answer'}};
     if (route === 'events') return {status: 200, body: {conversation_id: 'c1', accepted_ids: body.events.map(e => e.id)}};
     if (route === 'tasks') return {status: 200, body: {jobs: [], context_pending: false}};
+    if (route === 'task') return {status: 503, body: {error: 'Tasks are not available for this account.'}};
     if (route === 'context') {
       if (sc.lateContextAt != null && now >= sc.lateContextAt && !sc.contextAcked) return {status: 200, body: {revision: 1,
         text: '## Context update 1\n- P1 [failed] Synthetic late job (cli session s1, 2026-01-01 00:00 UTC)', sources: {jobs: 0, activity: 1}}};
@@ -173,7 +174,9 @@ const SCENARIOS = {
   'greeting-suspended-then-unlocked-silent': {greet: null, actions: [[5000, 'call.audio.state = "suspended"; call.audio.onstatechange()'],
     [20000, 'call.audio.state = "running"; void enableAudio(call)']], expect: {usable: true}},
   'late-context-no-tasks': {tasks: false, lateContextAt: 9000, greet: [1000, 4000], greetingTurnDoneMs: 4200,
-    expect: {usable: true, lateContext: true}},
+    actions: [[10000, `call.channel.onmessage({data: JSON.stringify({type: 'delegation.created',
+      item: {type: 'delegation', id: 'd1', target: 'client', content: [{type: 'input_text', text: 'Synthetic task'}]}})})`]],
+    expect: {usable: true, lateContext: true, delegated: true}},
 };
 
 const failures = [];
@@ -217,6 +220,14 @@ async function runScenario(name) {
     check(e.end ? end?.t === 30000 && end.body.readiness?.failure === e.failure : end === undefined,
       `${name}: /api/end ${JSON.stringify(end ?? null)}`);
     check(released(result.resourcesAt45s), `${name}: failure left resources ${JSON.stringify(result.resourcesAt45s)}`);
+  }
+  if (e.delegated) {
+    const submitted = h.requests.filter(r => r.route === 'task').map(r => [r.body.delegation_item_id, r.body.request]);
+    const relayed = h.sent.filter(([, m]) => m.type === 'delegation.context.append').map(([, m]) => [m.delegation_item_id, m.content[0].text]);
+    check(JSON.stringify(submitted) === JSON.stringify([['d1', 'Synthetic task']]), `${name}: task submissions ${JSON.stringify(submitted)}`);
+    check(JSON.stringify(relayed) === JSON.stringify([['d1',
+      'Hermes could not take this task. Tasks are not available for this account. Nothing was executed.']]),
+      `${name}: delegation relays ${JSON.stringify(relayed)}`);
   }
   if (e.lateContext) {
     check(appended.length === 1 && appended[0] >= 9000, `${name}: late context appended at ${appended}`);
