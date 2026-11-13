@@ -251,7 +251,6 @@ class TalkStore:
         self.history.set_meta(f"hermes_talk:agent_session:{conversation_id}", session_id)
 
     def end(self, account, conversation_id, voice_session_id):
-        """Idempotent: the first end closes the call."""
         with self.lock:
             state = self._owned(account, conversation_id)
             record = self._voice_session(state, voice_session_id)
@@ -261,7 +260,6 @@ class TalkStore:
             return {"ok": True}
 
     def resume_summary(self, conversation_id):
-        """The stored summary of the conversation's first turns (resume.py), or None."""
         with self.lock:
             stored = (self._load(conversation_id) or {}).get("resume_summary")
             return Summary(stored["text"], stored["covers"]) if stored else None

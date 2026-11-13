@@ -26,7 +26,7 @@ class Budgets:
     skill_chars: int = 1500
     skills_chars: int = 3000
     summary_chars: int = 2000
-    recent_turns: int = 8      # voice turns carried into a delegated task's prompt
+    recent_turns: int = 8
     turn_chars: int = 300
     activity_items: int = 5
     activity_chars: int = 1200
@@ -35,7 +35,6 @@ class Budgets:
     event_text_chars: int = 2000
 
 
-# Budget keys older configs carry that no longer apply: the voice persona replaced the SOUL excerpt.
 RETIRED_BUDGETS = ("soul_chars",)
 
 
@@ -131,9 +130,9 @@ class TalkConfig:
     model: str = "gpt-live-1-codex"
     voice: str = "cove"
     voice_choices: tuple = ()  # ((id, label), ...) the user may pick for replies; the default voice is first
-    language: str = ""         # a LANGUAGES code; the call speaks and opens in it
+    language: "Language" = None
     language_hint: str = ""
-    persona_text: str = ""     # the compact voice persona; empty uses DEFAULT_PERSONA
+    persona_text: str = ""
     self_reference: str = ""   # "feminine" or "masculine": grammatical gender the voice uses for itself
     greeting_enabled: bool = True
     greeting: str = "Say a short hello."
@@ -177,11 +176,9 @@ def _phrases(value):
 
 class Language(NamedTuple):
     name: str
-    opening: str   # the ready opening line when the profile configures no greeting.phrases
+    greeting: str
 
 
-# The languages a call can be configured to speak. GPT-Live's subscription session has no language field
-# (see docs/adr/0007-conduit-call-initialization.md), so this is instruction text only.
 LANGUAGES = {
     "en": Language("English", "Hi, I'm listening."),
     "uk": Language("Ukrainian", "Привіт! Я на зв’язку. Слухаю."),
@@ -296,23 +293,21 @@ def _receipts(data, tasks):
                     attempts=_int(data.get("attempts", 3), "receipts.attempts", 1, 5))
 
 
-def _persona(persona):
-    """(self_reference, text) of the persona block."""
+def _self_reference(persona):
     if not isinstance(persona, dict) or set(persona) - {"self_reference", "text"}:
         raise ConfigError("persona only supports self_reference and text")
     value = persona.get("self_reference", "")
     if value not in ("", *SELF_REFERENCE):
         raise ConfigError("persona.self_reference must be feminine or masculine")
-    text = _text(persona["text"], "persona.text", PERSONA_CHARS) if "text" in persona else ""
-    return value, text
+    return value
 
 
 def _language(value):
     if value is None:
-        return ""
+        return None
     if value not in LANGUAGES:
         raise ConfigError(f"voice.language must be one of {sorted(LANGUAGES)}")
-    return value
+    return LANGUAGES[value]
 
 
 def parse_config(data, base_dir):
@@ -363,7 +358,7 @@ def parse_config(data, base_dir):
     if owner is not None and (type(owner) is not int or owner <= 0):
         raise ConfigError("activity.owner_user_id must be a numeric Telegram user id")
     tasks = _tasks(data.get("tasks") or {}, base_dir)
-    self_reference, persona_text = _persona(data.get("persona") or {})
+    persona = data.get("persona") or {}
     if privacy and privacy != {"persist_audio": False}:
         raise ConfigError("privacy only supports persist_audio: false; raw audio is never stored")
     return TalkConfig(
@@ -375,8 +370,8 @@ def parse_config(data, base_dir):
         voice_choices=_voices(voice.get("choices"), _text(voice.get("voice", TalkConfig.voice), "voice.voice", 32)),
         language=_language(voice.get("language")),
         language_hint=voice.get("language_hint", "") if isinstance(voice.get("language_hint", ""), str) else "",
-        persona_text=persona_text,
-        self_reference=self_reference,
+        self_reference=_self_reference(persona),
+        persona_text=_text(persona["text"], "persona.text", PERSONA_CHARS) if "text" in persona else DEFAULT_PERSONA,
         greeting_enabled=bool(greeting.get("enabled", True)),
         greeting=_text(greeting.get("text", TalkConfig.greeting), "greeting.text", 400),
         greeting_phrases=_phrases(greeting.get("phrases", [])),

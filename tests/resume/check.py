@@ -27,7 +27,7 @@ def talk(n, size=20):
 def a_short_conversation_goes_word_for_word_as_role_bearing_items():
     turns = talk(6)
     p = resume.plan(turns, None)
-    assert p.recent == tuple(turns) and p.summary is None and p.older == (), p
+    assert p.recent == tuple(turns) and p.summary is None and p.to_summarize == (), p
     items = resume.history_items(p.recent)
     assert items[0] == {"type": "message", "role": "user", "content": [{"type": "input_text", "text": turns[0].text}]}
     assert items[1] == {"type": "message", "role": "assistant",
@@ -39,7 +39,7 @@ def a_short_conversation_goes_word_for_word_as_role_bearing_items():
 def a_long_conversation_keeps_the_newest_ten_turns_and_asks_for_the_rest_summarized():
     turns = talk(30)
     p = resume.plan(turns, None)
-    assert p.recent == tuple(turns[20:]) and p.older == tuple(turns[:20]) and p.summary is None, p
+    assert p.recent == tuple(turns[20:]) and p.to_summarize == tuple(turns[:20]) and p.summary is None, p
 
 
 @check
@@ -47,20 +47,20 @@ def the_word_for_word_part_stays_within_its_character_budget():
     turns = talk(12, size=900)
     p = resume.plan(turns, None)
     assert sum(len(t.text) for t in p.recent) <= resume.VERBATIM_CHARS and len(p.recent) == 6, len(p.recent)
-    assert p.older == tuple(turns[:6])
+    assert p.to_summarize == tuple(turns[:6])
 
 
 @check
 def a_stored_summary_serves_while_at_most_ten_turns_behind():
     turns = talk(30)
     exact = resume.plan(turns, Summary("Synthetic summary.", 20))
-    assert exact.summary == "Synthetic summary." and exact.recent == tuple(turns[20:]) and exact.older == ()
+    assert exact.summary == "Synthetic summary." and exact.recent == tuple(turns[20:]) and exact.to_summarize == ()
     behind = resume.plan(turns, Summary("Synthetic summary.", 12))
-    assert behind.summary == "Synthetic summary." and behind.recent == tuple(turns[12:]) and behind.older == ()
+    assert behind.summary == "Synthetic summary." and behind.recent == tuple(turns[12:]) and behind.to_summarize == ()
     stale = resume.plan(turns, Summary("Synthetic summary.", 9))
-    assert stale.summary is None and stale.older == tuple(turns[:20]), "11 turns behind needs a new summary"
+    assert stale.summary is None and stale.to_summarize == tuple(turns[:20]), "11 turns behind needs a new summary"
     ahead = resume.plan(turns, Summary("Synthetic summary.", 25))
-    assert ahead.summary is None and ahead.older == tuple(turns[:20]), "a summary past the split is not trusted"
+    assert ahead.summary is None and ahead.to_summarize == tuple(turns[:20]), "a summary past the split is not trusted"
 
 
 @check
@@ -100,29 +100,30 @@ def the_summary_input_carries_both_speakers_and_its_newest_part():
 def resolve_names_the_older_turns_to_summarize_and_a_stored_summary_then_serves():
     turns = talk(30)
     first = resume.resolve(turns, True, None)
-    assert first.summary is None and first.recent == tuple(turns[20:]) and first.older == tuple(turns[:20]), first
-    stored = Summary("Synthetic summary of turns 0-19.", len(first.older))
+    assert first.summary is None and first.recent == tuple(turns[20:]), first
+    assert first.to_summarize == tuple(turns[:20])
+    stored = Summary("Synthetic summary of turns 0-19.", len(first.to_summarize))
     again = resume.resolve(turns + talk(2), True, stored)
-    assert again.summary == "Synthetic summary of turns 0-19." and again.older == () and len(again.recent) == 12
+    assert again.summary == "Synthetic summary of turns 0-19." and again.to_summarize == () and len(again.recent) == 12
 
 
 @check
 def resolve_keeps_a_stale_summary_for_the_start_while_a_new_one_is_written():
     turns = talk(60)
     stale = resume.resolve(turns, True, Summary("Synthetic early summary.", 20))
-    assert stale.summary == "Synthetic early summary." and stale.older == tuple(turns[:50]), stale.summary
+    assert stale.summary == "Synthetic early summary." and stale.to_summarize == tuple(turns[:50]), stale.summary
     assert stale.recent == tuple(turns[50:])
     ahead = resume.resolve(turns, True, Summary("Synthetic summary of a longer row.", 55))
-    assert ahead.summary is None and ahead.older == tuple(turns[:50]), "a summary past the split is not trusted"
+    assert ahead.summary is None and ahead.to_summarize == tuple(turns[:50]), "a summary past the split is not trusted"
 
 
 @check
 def resolve_never_asks_to_summarize_a_partial_read():
     stored = Summary("Synthetic stored summary.", 400)
     partial = resume.resolve(talk(30), False, stored)
-    assert partial.summary == "Synthetic stored summary." and partial.older == () and len(partial.recent) == 10
+    assert partial.summary == "Synthetic stored summary." and partial.to_summarize == () and len(partial.recent) == 10
     bare = resume.resolve(talk(30), False, None)
-    assert bare.summary is None and bare.older == () and len(bare.recent) == 10
+    assert bare.summary is None and bare.to_summarize == () and len(bare.recent) == 10
     short = resume.resolve(talk(4), False, stored)
     assert short.summary == "Synthetic stored summary." and len(short.recent) == 4, "it covers the unread start"
 
@@ -133,7 +134,7 @@ def main():
         try:
             fn()
             print(f"PASS {fn.__name__}")
-        except Exception as exc:  # report every check, then fail
+        except Exception as exc:
             failed += 1
             print(f"FAIL {fn.__name__}: {type(exc).__name__}: {exc}")
     print(f"{len(CHECKS) - failed}/{len(CHECKS)} resume checks passed")

@@ -4,7 +4,8 @@
   python3 tests/e2e/run-backend.py --offline
 
 runs, in order:
-  1. tests/e2e/run-legacy.py --offline, the legacy signaling/security suite (26 checks);
+  1. tests/e2e/run-legacy.py --offline, the legacy signaling/security suite (26 checks), and
+     tests/resume/check.py, the Conduit resume plan;
   2. the Talk checks on synthetic in-memory history;
   3. the same Talk checks plus plugin discovery/registration in a disposable HERMES_HOME under a
      real Hermes runtime, which supplies SessionDB, load_soul_md and skill_view. The runtime is
@@ -34,6 +35,7 @@ import server  # noqa: E402
 from hermes_talk import fixtures as fx  # noqa: E402
 from hermes_talk.config import ConfigError, parse_config  # noqa: E402
 from hermes_talk.history import MemoryHistory  # noqa: E402
+from hermes_talk.pulse_model import PulseModel  # noqa: E402
 from hermes_talk.talk import TalkRuntime  # noqa: E402
 
 PLUGIN_FILES = ("plugin.yaml", "__init__.py", "server.py", "hermes_talk", "static", "LICENSE")
@@ -61,8 +63,8 @@ class Harness:
             self.talk = TalkRuntime(self.config, fx.BOT_TOKEN, self.history, clock=self.clock)
         else:
             self.history = MemoryHistory()
-            self.talk = TalkRuntime(self.config, fx.BOT_TOKEN, self.history, soul=fx.file_soul(self.home),
-                                    skill=fx.file_skill(self.home), clock=self.clock)
+            self.talk = TalkRuntime(self.config, fx.BOT_TOKEN, self.history, skill=fx.file_skill(self.home),
+                                    clock=self.clock)
         self.app = server.VoiceApp(fx.BOT_TOKEN, {fx.USER_ID, fx.OTHER_USER_ID}, fx.ORIGIN, "/tg-voice/",
                                    resolve=self.fake.resolve, post=self.fake.post, clock=self.clock,
                                    talk=self.talk)
@@ -183,8 +185,7 @@ def renamed_plugin_reopens_existing_native_metadata_without_reset(h):
     h.history.append(cid, [{"role": "user", "content": "Synthetic saved question.",
                             "platform_message_id": f"talk:{voice_id}:old-settled", "timestamp": h.clock() - 40}])
     before = h.stored(cid)
-    h.talk = TalkRuntime(h.config, fx.BOT_TOKEN, h.history, soul=fx.file_soul(h.home),
-                         skill=fx.file_skill(h.home), clock=h.clock)
+    h.talk = TalkRuntime(h.config, fx.BOT_TOKEN, h.history, skill=fx.file_skill(h.home), clock=h.clock)
     h.app.talk = h.talk
     assert h.talk.account(fx.USER_ID).key == account
     assert h.ok("bootstrap", {})["conversation_id"] == cid
@@ -199,8 +200,7 @@ def renamed_plugin_reopens_existing_native_metadata_without_reset(h):
     assert h.ok("bootstrap", {}, user=fx.OTHER_USER_ID)["conversation_id"] != cid
     other_profile = parse_config(fx.config_data(profile={"id": "other-profile", "display_name": "Synthetic other"}), h.home)
     for config, token in ((other_profile, fx.BOT_TOKEN), (h.config, "654321:synthetic-offline-bot-token")):
-        other = TalkRuntime(config, token, h.history, soul=fx.file_soul(h.home),
-                            skill=fx.file_skill(h.home), clock=h.clock)
+        other = TalkRuntime(config, token, h.history, skill=fx.file_skill(h.home), clock=h.clock)
         assert other.bootstrap(fx.USER_ID, "/tg-voice/avatar")["conversation_id"] != cid
     assert h.history.get_meta(binding_key) == cid
     assert json.loads(h.history.get_meta(conversation_key)) == state
@@ -357,7 +357,7 @@ def explicit_new_is_isolated(h):
 def context_budgets_clip_every_section(h):
     tight = fx.config_data(context={"skills": ["talk-brief", "not-allowed"], "budgets": {
         "instructions_chars": 1500, "soul_chars": 100, "skill_chars": 100, "skills_chars": 150,
-        "recent_turns": 2, "turn_chars": 20}})  # soul_chars: retired, still accepted in existing YAML
+        "recent_turns": 2, "turn_chars": 20}})
     h2 = Harness(h.native, tight)
     try:
         data, _ = h2.call()
@@ -586,7 +586,7 @@ def stale_voice_sessions_expire_without_resetting_the_conversation(h):
         == "expired", "a later end does not rewrite an expiry"
 
 
-class SummaryModel:
+class SyntheticHostLlm:
     """The plugin's host ctx.llm as Talk sees it: a synthetic, deterministic stand-in (no provider)."""
 
     def __init__(self, fail=False):
@@ -607,7 +607,8 @@ def long_talk(h, n):
     cid, vs = data["conversation_id"], data["voice_session_id"]
     for start in range(0, n, 10):
         h.ok("events", {"conversation_id": cid, "voice_session_id": vs, "events": [
-            ev(f"t{i}", i, "user" if i % 2 == 0 else "assistant", f"turn {i} synthetic words")
+            ev(f"t{i}", i, "user" if i % 2 == 0 else "assistant",
+               f"turn {i} synthetic words" + (" key " + fx.SECRET_IN_SOUL if i == 3 else ""))
             for i in range(start, min(n, start + 10))]})
     h.ok("end", {"conversation_id": cid, "voice_session_id": vs})
     return cid
@@ -615,8 +616,7 @@ def long_talk(h, n):
 
 @check
 def a_long_conversation_resumes_from_a_model_summary_and_its_latest_turns(h):
-    from hermes_talk.pulse_model import PulseModel
-    model = SummaryModel()
+    model = SyntheticHostLlm()
     h.talk.model, h.talk.spawn = PulseModel(llm=model), (lambda fn: fn())
     cid = long_talk(h, 30)
     assert len(model.asked) == 1, "ending the call writes the summary the next call needs"
@@ -631,6 +631,7 @@ def a_long_conversation_resumes_from_a_model_summary_and_its_latest_turns(h):
     assert "User: turn 0 synthetic words\nAssistant: turn 1 synthetic words" in asked
     assert "turn 19 synthetic" in asked and "turn 20 synthetic" not in asked, "only the older turns are summarized"
     assert "decisions" in model.asked[0]["instructions"] and model.asked[0]["json_mode"] is True
+    assert fx.SECRET_IN_SOUL not in asked and "turn 3 synthetic words key [redacted]" in asked, "redacted input"
     h.call(cid)
     assert len(model.asked) == 1, "a stored summary serves the next call"
     assert len(h.stored(cid)) == 30, "every raw turn stays stored"
@@ -638,19 +639,21 @@ def a_long_conversation_resumes_from_a_model_summary_and_its_latest_turns(h):
 
 @check
 def a_summary_the_model_cannot_give_leaves_the_latest_turns_and_no_invented_summary(h):
-    from hermes_talk.pulse_model import PulseModel
-    h.talk.model, h.talk.spawn = PulseModel(llm=SummaryModel(fail=True)), (lambda fn: fn())
+    h.talk.model, h.talk.spawn = PulseModel(llm=SyntheticHostLlm(fail=True)), (lambda fn: fn())
     cid = long_talk(h, 30)
     data, instructions = h.call(cid)
     assert data["voice_session_id"].startswith("vs_"), "the call still starts"
     assert "<previous_conversation>" not in instructions and "turn " not in instructions
     assert len(h.fake.posts[-1][2]["session"]["initial_items"]) == 10
+    h.talk.model = PulseModel(llm=SyntheticHostLlm())
+    _, retried = h.call(cid)
+    _, after = h.call(cid)
+    assert "they agreed on plan A" in after, "a failed summary is retried, not stuck"
 
 
 @check
 def call_setup_never_waits_for_the_summary_model(h):
-    from hermes_talk.pulse_model import PulseModel
-    model, later = SummaryModel(), []
+    model, later = SyntheticHostLlm(), []
     h.talk.model, h.talk.spawn = PulseModel(llm=model), later.append
     data, _ = h.call()
     cid, vs = data["conversation_id"], data["voice_session_id"]
@@ -666,6 +669,26 @@ def call_setup_never_waits_for_the_summary_model(h):
     assert len(model.asked) == 1
     _, third = h.call(cid)
     assert "they agreed on plan A" in third and not later, "the background summary serves the next call"
+
+
+@check
+def a_conversation_longer_than_one_read_keeps_its_stored_summary_and_is_never_resummarized_from_a_window(h):
+    import hermes_talk.talk as talk_module
+    model = SyntheticHostLlm()
+    h.talk.model, h.talk.spawn = PulseModel(llm=model), (lambda fn: fn())
+    cid = long_talk(h, 30)
+    assert len(model.asked) == 1
+    saved, talk_module.RESUME_ROWS = talk_module.RESUME_ROWS, 25
+    try:
+        long_more = h.call(cid)[0]
+        h.ok("events", {"conversation_id": cid, "voice_session_id": long_more["voice_session_id"], "events": [
+            ev(f"m{i}", i, "user", f"later turn {i}") for i in range(12)]})
+        h.ok("end", {"conversation_id": cid, "voice_session_id": long_more["voice_session_id"]})
+        _, instructions = h.call(cid)
+        assert len(model.asked) == 1, "a partial read never asks for a summary of its window"
+        assert "they agreed on plan A" in instructions, "the stored summary still speaks for the unread start"
+    finally:
+        talk_module.RESUME_ROWS = saved
 
 
 @check
@@ -696,6 +719,7 @@ def a_configured_voice_persona_replaces_the_default(h):
         assert persona == "Synthetic voice persona: warm, dry humour.", persona
     finally:
         custom.close()
+    assert parse_config(fx.config_data(context={"budgets": {"soul_chars": 4000}}), h.home), "retired key still loads"
     for bad in ({"voice": {"language": "xx"}}, {"persona": {"text": "p" * 1201}}, {"persona": {"soul": True}}):
         try:
             parse_config(fx.config_data(**bad), h.home)
@@ -1019,6 +1043,11 @@ def run_offline():
                             capture_output=True, text=True, timeout=300)
     print(legacy.stdout.strip().splitlines()[-1] if legacy.stdout.strip() else legacy.stderr[-400:])
     legacy_ok = legacy.returncode == 0 and "26/26 offline checks passed" in legacy.stdout
+    resume = subprocess.run([sys.executable, str(ROOT / "tests/resume/check.py")], cwd=ROOT, env=env,
+                            capture_output=True, text=True, timeout=120)
+    print(resume.stdout.strip().splitlines()[-2] if resume.returncode == 0
+          else resume.stdout[-800:] + resume.stderr[-400:])
+    resume_ok = resume.returncode == 0 and "TALK_RESUME_OK" in resume.stdout
     memory_failures = run_talk(native=False)
     runtime = hermes_python()
     if not runtime:
@@ -1033,7 +1062,7 @@ def run_offline():
             shutil.rmtree(scratch, ignore_errors=True)
         print(host.stdout.strip() or f"host run produced no output: {host.stderr[-800:]}")
         host_ok = host.returncode == 0
-    ok = legacy_ok and memory_failures == 0 and host_ok
+    ok = legacy_ok and resume_ok and memory_failures == 0 and host_ok
     print(("BACKEND OK" + ("" if runtime else " (host integration SKIPPED)")) if ok else "BACKEND FAILED")
     return 0 if ok else 1
 

@@ -38,7 +38,10 @@ Conduit (iOS app `kaishi00/hermes-conduit` at 4b6889097d53ad731089f255b03afe534e
 - The summary is written by the plugin's own host model (`ctx.llm` through `pulse_model.PulseModel`, purpose
   `talk_resume_summary`, no override, ADR 0002) and stored as `resume_summary: {text, covers}` in the conversation's
   meta state. Because `complete_structured` answers JSON, the prompt adds one sentence asking for
-  `{"summary": ...}`.
+  `{"summary": ...}`, and the token cap is 1200 instead of Conduit's 600 so the wrapping cannot cut the text.
+- A resume reads at most 10000 stored rows. A longer conversation is a partial read, as past Conduit's page cap:
+  the stored summary keeps speaking for the start and is never replaced by a summary of the window. Turns between
+  that summary and the newest ones then reach no call. This needs a row count from the history surface to lift.
 - Deviation from Conduit, for Talk's startup invariant ("opening a call never waits for a scan or a model",
   `tests/startup/backend.py`): the summary is written in the background, when a call ends and when a call opens and
   finds one needed, deduplicated per conversation. Until it exists the call gets its latest turns and, if a stored

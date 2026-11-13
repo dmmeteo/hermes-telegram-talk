@@ -37,7 +37,8 @@ CANCEL = re.compile(r"(?i)^\s*(?:please\s+)?(?:cancel|stop)\s+(?:hermes\s+)?task
 RESULT = re.compile(r"(?i)^\s*(?:the\s+)?(?:full\s+)?result\s+of\s+(?:hermes\s+)?task\s*#?\s*(\d{1,4})\s*[.!?]?\s*$")
 
 SYNOPSIS_CHARS = 160
-RESUME_ROWS = 2000  # stored rows read to resume a conversation; a longer one is a partial read (resume.resolve)
+RESUME_ROWS = 10000
+SUMMARY_MAX_TOKENS = 1200  # Conduit's 600 for the text plus room for the JSON wrapping
 SUMMARY_TIMEOUT_S = 60.0
 SUMMARY_STORE_CHARS = 8000
 SUMMARY_JSON = resume.SUMMARY_INSTRUCTIONS + ' Reply as a JSON object {"summary": "<the summary>"}.'
@@ -66,6 +67,16 @@ def redact(text):
     return text
 
 
+def background(fn):
+    """Run fn on a daemon thread; a failure is logged by type only, never with its private text."""
+    def run():
+        try:
+            fn()
+        except Exception as exc:
+            logger.warning("background %s failed: %s", getattr(fn, "__name__", "task"), type(exc).__name__)
+    threading.Thread(target=run, name="talk-resume", daemon=True).start()
+
+
 def native_skill(name):
     from tools.skills_tool import skill_view
     result = json.loads(skill_view(name, preprocess=False))
@@ -78,7 +89,6 @@ class TalkRuntime:
 
     def __init__(self, config, bot_token, history, soul=None, skill=native_skill, clock=time.time,
                  agent=None, home=None, sender=None, model=None, spawn=None):
-        """soul is accepted from older harnesses and ignored: the call's persona is the configured voice persona."""
         self.config = config
         self.bot_id = bot_token.split(":", 1)[0]
         self.history = history
@@ -86,7 +96,7 @@ class TalkRuntime:
         self.pulse = PulseLedger(history, clock)
         self.model = model if model is not None else PulseModel()
         self.engine = PulseEngine(self, self.model)
-        self.spawn = spawn or (lambda fn: threading.Thread(target=fn, name="talk-resume", daemon=True).start())
+        self.spawn = spawn or background
         self._summary_lock = threading.Lock()
         self._summarizing = set()
         self.skill = skill
@@ -279,13 +289,11 @@ class TalkRuntime:
         return conversation_id, instructions, carried, report
 
     def _resume(self, account, conversation_id):
-        """(summary text or None, initial_items) for a call; never waits for a model. A summary still needed is
-        written in the background and serves the next call."""
         resumed = self._resumed(conversation_id)
-        if resumed.older:
+        if resumed.to_summarize:
             self._summary_soon(account, conversation_id)
         logger.info("resume items=%d summary=%s pending=%s", len(resumed.recent),
-                    "yes" if resumed.summary else "none", bool(resumed.older))
+                    "yes" if resumed.summary else "none", bool(resumed.to_summarize))
         return (redact(resumed.summary) if resumed.summary else None), resume.history_items(resumed.recent)
 
     def _resumed(self, conversation_id):
@@ -294,31 +302,32 @@ class TalkRuntime:
         return resume.resolve(turns, len(rows) < RESUME_ROWS, self.store.resume_summary(conversation_id))
 
     def _summary_soon(self, account, conversation_id):
-        """Write the conversation's needed summary once, off the request path; a run already going covers it."""
         with self._summary_lock:
             if conversation_id in self._summarizing:
                 return
             self._summarizing.add(conversation_id)
-        self.spawn(lambda: self._write_summary(account, conversation_id))
+        try:
+            self.spawn(lambda: self._write_summary(account, conversation_id))
+        except Exception as exc:
+            with self._summary_lock:
+                self._summarizing.discard(conversation_id)
+            logger.warning("resume summary could not start: %s", type(exc).__name__)
 
     def _write_summary(self, account, conversation_id):
         try:
-            older = self._resumed(conversation_id).older
+            older = self._resumed(conversation_id).to_summarize
             if older:
                 text = self._summarize(resume.summary_input(older))
                 self.store.save_resume_summary(account, conversation_id, resume.Summary(text, len(older)))
                 logger.info("resume summary written covers=%d", len(older))
         except (ModelUnavailable, TalkError) as exc:
             logger.info("resume summary not written (%s); calls resume from their latest turns", type(exc).__name__)
-        except Exception as exc:  # a summary is never worth the server
-            logger.warning("resume summary failed: %s", type(exc).__name__)
         finally:
             with self._summary_lock:
                 self._summarizing.discard(conversation_id)
 
     def _summarize(self, transcript):
-        """One summary through the plugin's own host model route (pulse_model.py); no override, no other route."""
-        reply = self.model.ask(SUMMARY_JSON, transcript, "talk_resume_summary", max_tokens=resume.SUMMARY_MAX_TOKENS,
+        reply = self.model.ask(SUMMARY_JSON, transcript, "talk_resume_summary", max_tokens=SUMMARY_MAX_TOKENS,
                                timeout=SUMMARY_TIMEOUT_S)
         text = reply.get("summary")
         if not isinstance(text, str) or not text.strip():
@@ -360,7 +369,6 @@ class TalkRuntime:
         return {"voice": self._voice_public(user_id)}
 
     def session_config(self, instructions, user_id=None, initial_items=()):
-        """The GPT-Live session, shaped as Conduit's host sends it (gpt_live.py gpt_live_session_config)."""
         config = {"model": self.config.model, "instructions": instructions,
                   "audio": {"output": {"voice": self.reply_voice(user_id)}}, "delegation": {"type": "client"}}
         if initial_items:
@@ -463,8 +471,7 @@ class TalkRuntime:
             self.inbox.unbind(thread, voice_session_id, flush)
             self._threads.pop(voice_session_id, None)
         self.engine.poke(user_id)  # the call went quiet: read it for memory and run due follow-ups
-        if self._resumed(conversation_id).older:
-            self._summary_soon(self.account(user_id), conversation_id)
+        self._summary_soon(self.account(user_id), conversation_id)
         return ended
 
     def _task_prompt(self, job):

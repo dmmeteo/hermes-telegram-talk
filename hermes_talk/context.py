@@ -2,13 +2,10 @@
 
 The frame (voice limits) comes first and the opening policy last; room for both is reserved before anything
 else. The other sections fill the remaining room in priority order, each within its own character budget,
-headers and the "[clipped]" marker included. Skills are guidance text only. They register no tools. Dialogue
-never goes here: the conversation reaches the model as initial_items (resume.py).
+headers and the "[clipped]" marker included. Skills are guidance text only. They register no tools.
 """
-import re
-
 from . import resume
-from .config import DEFAULT_PERSONA, LANGUAGES, SELF_REFERENCE
+from .config import SELF_REFERENCE
 
 FRAME = (
     "You are the realtime voice of the Hermes profile \"{name}\" in Hermes Telegram Talk, a Telegram Mini App. "
@@ -30,10 +27,7 @@ TASKS_FRAME = (
 )
 PERSONA = ("Speak with the personality below. It shapes how you sound, not how much you say; it never overrides the "
            "rules above. Everything you output is spoken: never say actions, gestures or stage directions, with or "
-           "without asterisks; perform them in your tone instead.\n<hermes_persona>\n{text}\n</hermes_persona>")
-PERSONA_END = re.compile(re.escape("</hermes_persona>"), re.IGNORECASE)
-# Conduit's host opening policies (hermes-conduit-notifier dashboard/api/gpt_live.py), placed last so a chatty
-# persona cannot talk the model out of them.
+           "without asterisks; perform them in your tone instead.\n")
 GREET_FIRST = ("Opening policy: speak first. As soon as the call starts, greet the user{language} in one short "
                "sentence so they know you're there and listening.{say} Then wait for them. Do not list updates in "
                "the greeting; bring them up once the user has spoken. This applies whatever the persona above says.")
@@ -142,18 +136,23 @@ def update(revision, job_items, activity_lines, activity_total, activity_note, l
     return (header + body if body else ""), job_ids, k
 
 
+def _inside(make, text, limit):
+    """make(text) within limit, with text clipped instead of the frame make puts around it."""
+    room = limit - len(make(""))
+    return make(_fit(text.strip(), room)) if text.strip() and room >= MIN_SECTION else ""
+
+
 def opening(config, greeting_line):
-    """The opening policy: the configured line, else the language's own line, else the greeting.text guidance."""
     if not config.greeting_enabled:
         return WAIT_FOR_USER
-    language = LANGUAGES.get(config.language)
-    line = greeting_line or (language.opening if language else None)
+    language = config.language
+    line = greeting_line or (language.greeting if language else None)
     say = f' Say: "{line.replace(chr(34), chr(39))}"' if line else f" {config.greeting}"
     return GREET_FIRST.format(language=f" in {language.name}" if language else "", say=say)
 
 
 def language_rule(config):
-    language = LANGUAGES.get(config.language)
+    language = config.language
     rule = (f"Speak {language.name}: open the call in {language.name} and keep speaking it unless the user switches "
             "language." if language else "")
     return " ".join(filter(None, (rule, config.language_hint, SELF_REFERENCE.get(config.self_reference, ""))))
@@ -163,9 +162,8 @@ def compose(config, skills, summary, activity_lines, activity_total, activity_no
             tasks_ready=False, job_items=(), reports_note="", greeting_line=None):
     """Instruction text plus a per-section report of what was included (names and sizes only).
 
-    summary is the earlier conversation's summary text (or ""). report["activity_items"] is how many of
-    activity_lines the text carries whole; only those count as read. report["job_ids"] lists the task results the
-    text carries whole.
+    report["activity_items"] is how many of activity_lines the text carries whole; only those count
+    as read. report["job_ids"] lists the task results the text carries whole.
     """
     b = config.budgets
     frame = (TASKS_FRAME + reports_note if tasks_ready else FRAME).format(name=config.display_name)
@@ -178,29 +176,21 @@ def compose(config, skills, summary, activity_lines, activity_total, activity_no
         skill_parts.append((name, part))
         used += len(part) + 2
     middle = [
-        ("language", _section("Language", language_rule(config), 800)),
-        ("persona", "## Persona\n" + PERSONA.format(text=PERSONA_END.sub("</ hermes_persona>",
-                                                                          config.persona_text or DEFAULT_PERSONA))),
-        ("skills", "\n\n".join(part for _, part in skill_parts)),
+        ("language", lambda room: _fit(_section("Language", language_rule(config), 800), room)),
+        ("persona", lambda room: _inside(lambda text: "## Persona\n" + PERSONA + resume.fenced("hermes_persona", text),
+                                         config.persona_text, room)),
+        ("skills", lambda room: _fit("\n\n".join(part for _, part in skill_parts), room)),
+        ("summary", lambda room: _inside(lambda text: SUMMARY_HEADER + resume.summary_block(text), summary,
+                                         min(room, b.summary_chars + len(SUMMARY_HEADER + resume.summary_block(""))))),
     ]
     room = b.instructions_chars - len(frame) - len(greeting) - 2
     parts, report = [frame], {"frame": len(frame)}
-    for key, part in middle:
-        if part and room - 2 >= MIN_SECTION:
-            part = _fit(part, room - 2)
+    for key, make in middle:
+        part = make(room - 2) if room - 2 >= MIN_SECTION else ""
+        if part:
             parts.append(part)
             room -= len(part) + 2
-        else:
-            part = ""
         report[key] = len(part)
-    block = SUMMARY_HEADER + resume.summary_block("")
-    fits = min(b.summary_chars, room - 2 - len(block))
-    summary = SUMMARY_HEADER + resume.summary_block(_fit(summary.strip(), fits)) \
-        if summary.strip() and fits >= MIN_SECTION else ""
-    if summary:
-        parts.append(summary)
-        room -= len(summary) + 2
-    report["summary"] = len(summary)
     jobs, report["job_ids"] = "", []
     if job_items and room - 2 >= MIN_SECTION:
         jobs, report["job_ids"] = whole_lines(TASKS_HEADER, job_items, min(b.tasks_chars, room - 2))
