@@ -433,9 +433,7 @@ function onMessage(current, message) {
     && typeof event.item.id === "string" && !current.delegations.has(event.item.id)) {
     current.delegations.add(event.item.id);
     if (PULSE_FEEDBACK.test(delegationText(event.item))) void feedback(current, event.item);
-    else if (current.conversation?.tasks) void delegate(current, event.item);
-    else current.channel.send(JSON.stringify({type: "delegation.context.append", delegation_item_id: event.item.id,
-      channel: "speakable", content: [{type: "input_text", text: "Tasks are unavailable in Hermes Telegram Talk. Nothing was executed."}]}));
+    else void delegate(current, event.item);
   }
 }
 
@@ -646,12 +644,6 @@ function schedulePoll(current, delay) {
 
 async function poll(current) {
   if (call !== current || !current.voiceId) return;
-  if (!current.conversation?.tasks) {
-    const n = current.polls++;
-    await refresh(current);
-    schedulePoll(current, n < 3 ? 10000 : 60000);
-    return;
-  }
   let delay = 5000;
   try {
     const data = await post("tasks", callFields(current));
@@ -861,7 +853,6 @@ async function start() {
     mark(current, "bootstrap");
     conversation.batchMax = data.limits.event_batch_max;
     conversation.greeting = data.greeting_enabled;
-    conversation.tasks = data.tasks?.available === true;
     conversation.disabled = false;
     conversation.retries = 0;
     void flush(conversation);

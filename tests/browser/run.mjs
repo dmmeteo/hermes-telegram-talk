@@ -140,11 +140,19 @@ try {
   const rows=(await messages()).slice(-2);assert(rows[0].role==='user'&&rows[1].role==='assistant','arrival order');
   assert(!JSON.stringify(await messages()).includes('partial must not save'),'no fragments persisted');
  });
- await step('delegation-refused-no-task-route-or-replay',async()=>{
+ await step('delegation-forwarded-once-server-refusal-relayed',async()=>{
+  const tasks=[];const record=request=>{if(request.url().endsWith('/api/task'))tasks.push(request.postDataJSON());};
+  page.on('request',record);
   await send(index,{type:'delegation.created',item:{id:'delegation1',type:'delegation',target:'client'}});
   await send(index,{type:'delegation.created',item:{id:'delegation1',type:'delegation',target:'client'}});
-  const got=await until(()=>provider.evaluate(i=>window.peers[i].got.filter(e=>e.type==='delegation.context.append'),index).then(a=>a.length&&a),'refusal');
-  assert(got.length===1&&got[0].delegation_item_id==='delegation1'&&/Nothing was executed/.test(got[0].content[0].text),'one protocol refusal');
+  const relays=()=>provider.evaluate(i=>window.peers[i].got.filter(e=>e.type==='delegation.context.append'),index);
+  await until(()=>relays().then(a=>a.length),'refusal');
+  await new Promise(r=>setTimeout(r,500));page.off('request',record);
+  const got=await relays();
+  assert(tasks.length===1&&tasks[0].delegation_item_id==='delegation1','one authenticated task submission');
+  assert(got.length===1&&got[0].delegation_item_id==='delegation1'&&got[0].channel==='speakable'
+   &&got[0].content[0].text==='Hermes could not take this task. Tasks are off in the Talk config. Nothing was executed.','server refusal relayed once');
+  return {submitted:tasks.length,relayed:got[0].content[0].text};
  });
  await step('retry-events-with-identical-ids-after-lost-ack',async()=>{
   let first=true;const batches=[];

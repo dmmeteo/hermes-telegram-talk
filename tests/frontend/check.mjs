@@ -35,7 +35,7 @@ function fixture(options = {}) {
   }
   const context = vm.createContext({document:{getElementById:element,documentElement:element('html')},
     window:{addEventListener(){},removeEventListener(){}}, location:{hash:'',href:'http://localhost/tg-voice/',origin:'http://localhost'},
-    URL, URLSearchParams, AbortController, DOMException, crypto:globalThis.crypto,
+    URL, URLSearchParams, AbortController, DOMException, TextEncoder, crypto:globalThis.crypto,
     matchMedia:()=>({matches:false}), getComputedStyle:()=>({color:'#ffffff'}),
     ...clock, cancelAnimationFrame(){}, requestAnimationFrame:()=>1,
     fetch:async()=>{throw new Error('Unexpected network');}});
@@ -112,10 +112,49 @@ test('mute cannot reopen mic before ready',()=>{
  f.run(`current.phase='ready';toggleMute();`);assert.equal(f.run('track.enabled'),false);
  f.run('toggleMute()');assert.equal(f.run('track.enabled'),true);
 });
-test('delegation is refused once through subscription protocol',()=>{
- const f=fixture();f.run(`for(let i=0;i<2;i++)emit({type:'delegation.created',item:{type:'delegation',id:'job1',target:'client'}});`);
- assert.equal(f.run('sent.length'),1);assert.equal(f.run('sent[0].type'),'delegation.context.append');
- assert.match(f.run('sent[0].content[0].text'),/Nothing was executed/);
+function serverFixture(answer) {
+ const f=fixture();
+ f.run(`Object.assign(current,{phase:'ready',jobs:new Map(),spoken:new Set(),cut:new Set(),polls:0,lastUserText:'Synthetic spoken request'});
+  const posted=[];
+  fetch=async(url,options)=>{const body=JSON.parse(options.body);posted.push({route:url.slice(4),body});
+   const [status,data]=(${answer})(url.slice(4),body);return {ok:status<300,status,json:async()=>data};};`);
+ return f;
+}
+const drain=async()=>{for(let n=0;n<20;n++)await new Promise(r=>setImmediate(r));};
+test('delegation goes to the server once and its real refusal is relayed',async()=>{
+ const f=serverFixture(`()=>[503,{error:'Tasks are not available for this account.'}]`);
+ f.run(`for(let i=0;i<2;i++)emit({type:'delegation.created',item:{type:'delegation',id:'job1',target:'client'}});`);
+ await drain();
+ assert.equal(f.run('JSON.stringify(posted.map(p=>[p.route,p.body.delegation_item_id,p.body.request]))'),
+  JSON.stringify([['task','job1','Synthetic spoken request']]));
+ assert.equal(f.run('posted[0].body.initData'),'synthetic');
+ assert.equal(f.run('sent.length'),1);
+ assert.equal(f.run('JSON.stringify([sent[0].type,sent[0].delegation_item_id,sent[0].channel])'),
+  JSON.stringify(['delegation.context.append','job1','speakable']));
+ assert.equal(f.run('sent[0].content[0].text'),
+  'Hermes could not take this task. Tasks are not available for this account. Nothing was executed.');
+});
+test('an admitted delegation relays the server reply on its channel and tracks the job',async()=>{
+ const reply='Hermes is working on this as background task 1. Its result will follow on this delegation; do not guess it.';
+ const f=serverFixture(`()=>[200,{job:{id:'j1',delegation_item_id:'job1'},created:true,channel:'commentary',reply:${JSON.stringify(reply)}}]`);
+ f.run(`emit({type:'delegation.created',item:{type:'delegation',id:'job1',target:'client',content:[{type:'input_text',text:'Synthetic task'}]}});`);
+ await drain();
+ f.run('clearTimeout(current.pollTimer)');
+ assert.equal(f.run('JSON.stringify(posted.map(p=>[p.route,p.body.request]))'),JSON.stringify([['task','Synthetic task']]));
+ assert.equal(f.run('JSON.stringify(sent.map(m=>[m.delegation_item_id,m.channel,m.content[0].text]))'),
+  JSON.stringify([['job1','commentary',reply]]));
+ assert.equal(f.run('current.jobs.get("j1")'),'job1');
+});
+test('job results are polled from the server and delivered on their delegation',async()=>{
+ const f=serverFixture(`route=>route==='tasks'?[200,{jobs:[{id:'j1',number:1,state:'succeeded',delegation_item_id:'job1',
+  voice_session_id:'voice',spoken:'Synthetic result.'}],context_pending:false}]:[200,{ok:true}]`);
+ f.run(`current.delegations.add('job1');current.jobs.set('j1','job1');void poll(current);`);
+ await drain();
+ f.run('clearTimeout(current.pollTimer)');
+ assert.equal(f.run('posted[0].route'),'tasks');
+ assert.equal(f.run('JSON.stringify(sent.map(m=>[m.delegation_item_id,m.channel,m.content[0].text]))'),
+  JSON.stringify([['job1','speakable','Synthetic result.']]));
+ assert(f.run('posted.some(p=>p.route==="task/ack"&&p.body.job_id==="j1")'),'a delivered result is acknowledged');
 });
 test('stale async data cannot write into replacement call',()=>{
  const f=fixture();f.run(`call=null;emit({type:'turn.done',turn:{role:'user',transcript:'stale'}});`);
