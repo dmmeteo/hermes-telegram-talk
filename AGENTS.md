@@ -22,6 +22,8 @@ at `26/26`), `tests/e2e/run-frontend.py --offline`, `tests/e2e/run-pulse.py --of
 `tests/e2e/run-pulse-engine.py --offline` (`TALK_PULSE_ENGINE_PARITY_OK`; TMPDIR must not be under `~/.hermes/profiles/`).
 For chat-input, transcript or reply-voice changes, `python3 tests/e2e/run-thread.py --offline --require-host` must print
 `TALK_THREAD_OK` (real gateway hook, adapter events and SessionDB; see `docs/adr/0004-exact-thread-chat-input.md`).
+For opening, turn-taking or result-delivery changes in `static/talk/app.js` (its `Dialogue`), `python3 tests/e2e/run-dialogue.py`
+must print `TALK_DIALOGUE_OK` (node on PATH; the real app.js against the real server, no provider).
 Pulse model steps (selection, memory extraction, follow-up checks) call only the plugin's own host `ctx.llm` with no
 override (see `docs/adr/0002-pulse-engine-model-route.md`); tests reach `tests/pulse/model_fixture.py` through it,
 never a provider. Never add a model-role slot, credential or billing path for Pulse.
