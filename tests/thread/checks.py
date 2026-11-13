@@ -455,7 +455,15 @@ def run(history_factory, event_factory, dispatch, out, extras=None):
 
     @check("shopy_is_female_and_restrained_pewds_stays_separate")
     def _():
-        shopy = load_config(ROOT / "talk.shopy.example.yaml")
+        shopy = parse_config({
+            "profile": {"id": "shopy", "display_name": "Shopy"},
+            "voice": {"voice": "sol", "choices": [{"id": "sol", "label": "Sol"}],
+                      "language_hint": "Speak Ukrainian unless the user switches language. Be polite, calm and businesslike."},
+            "persona": {"self_reference": "feminine"},
+            "greeting": {"enabled": True, "text": "Greet the user politely in one short sentence and offer help.",
+                         "phrases": ["Добрий день, це Шопі. Я на зв'язку.", "Вітаю, Шопі слухає. Чим можу допомогти?",
+                                     "Добрий день. Я готова, слухаю вас.", "Вітаю. Рада допомогти — що потрібно?"]},
+        }, ROOT)
         pewds = load_config(ROOT / "talk.example.yaml")
         assert shopy.profile_id == "shopy" and shopy.self_reference == "feminine", shopy
         assert shopy.voice == "sol" and shopy.voice_choices[0][0] == "sol", shopy.voice_choices

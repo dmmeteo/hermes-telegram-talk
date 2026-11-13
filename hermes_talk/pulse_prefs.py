@@ -1,6 +1,6 @@
 """Pulse learned preferences: a pure port of Conduit notifier pulse_prefs.py at d25391f6.
 
-MIT, LICENSES/CONDUIT-NOTIFIER-LICENSE. The model, its constants and its scoring are unchanged; Talk feeds it
+MIT, LICENSE. The model, its constants and its scoring are unchanged; Talk feeds it
 signals from voice feedback (pulse_policy.signal): "useful" and "not useful"/"dismiss" are thumbs, "more" is a
 Do it at the sent stage, "later" leaves none. The upstream docstring follows.
 

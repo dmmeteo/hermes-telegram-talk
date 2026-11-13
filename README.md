@@ -27,8 +27,7 @@ Non-goals for this PoC:
 - Any paid API fallback, `/v1/realtime/sessions`, or raw audio storage.
 - Posting voice turns as Telegram messages.
 - Health or location data.
-- Multi-profile activation, a global orchestrator or Discord thread automation. Shopy has a source example
-  (`talk.shopy.example.yaml`); installing it on the live profile is the manager's.
+- Multi-profile activation, a global orchestrator or Discord thread automation. Installing it on a live profile is the manager's.
 - A Mini App uploader or text composer: photos, files and text go to the bot in the Telegram chat itself.
 
 ## Shape
@@ -56,7 +55,7 @@ Non-goals for this PoC:
   - `agent.py` runs a task as one native `hermes chat` process and decides task readiness.
   - `talk.py` holds the runtime the routes call.
   - `fixtures.py` provides synthetic test data and a fixture server.
-- The upstream exchange is adapted from Hermes Conduit (MIT, `LICENSES/CONDUIT-LICENSE`).
+- The upstream exchange is adapted from Hermes Conduit (MIT, `LICENSE`).
 
 ### Where data lives
 
@@ -148,7 +147,7 @@ the next bootstrap, and its old id answers 404.
 ## Pulse
 
 Pulse is Talk's briefing engine, ported for voice from Hermes Conduit notifier's Pulse at d25391f6 (MIT,
-`LICENSES/CONDUIT-NOTIFIER-LICENSE`; prompts and mechanisms ported and adapted; module map in
+`LICENSE`; prompts and mechanisms ported and adapted; module map in
 [docs/adr/0002-pulse-engine-model-route.md](docs/adr/0002-pulse-engine-model-route.md), evidence model in
 [docs/adr/0001-pulse-per-item-evidence.md](docs/adr/0001-pulse-per-item-evidence.md)). One record per account
 (profile, bot, Telegram user) survives reopen, restart and `api/new`, and no other account can read or move it.
@@ -215,9 +214,9 @@ Pulse is Talk's briefing engine, ported for voice from Hermes Conduit notifier's
 
 To change a typical behavior: a prompt rule or skip reason in `pulse_select.py`/`pulse_memory.py`/
 `pulse_followup.py` (teach `tests/pulse/model_fixture.py` the new answer and add a step to
-`verify-pulse-engine.py`); a feedback kind or the evidence rules in `pulse.py` (a case in `verify-pulse.py`);
+`tests/e2e/run-pulse-engine.py`); a feedback kind or the evidence rules in `pulse.py` (a case in `tests/e2e/run-pulse.py`);
 storage shape in `pulse_ledger.py`; when the engine runs in `pulse_engine.py`; levels, reasons and quiet/night
-rules in `pulse_policy.py`; claim judging in `pulse_claims.py` (a step in `verify-pulse-engine.py` for each). What
+rules in `pulse_policy.py`; claim judging in `pulse_claims.py` (a step in `tests/e2e/run-pulse-engine.py` for each). What
 was ported, adapted or left out, and why, is in
 [docs/adr/0003-pulse-whole-engine.md](docs/adr/0003-pulse-whole-engine.md).
 
@@ -280,12 +279,12 @@ from the next connection; during a call the page offers an explicit Reconnect th
 
 Bot avatars refresh through authenticated same-origin image responses, using a bounded per-bot cache and local fallback. See [the compact UI and catalogue decision](docs/adr/0005-compact-talk-media-and-avatar.md) for provenance and qualification limits.
 
-### Shopy
+### Per-profile voice and persona
 
-`talk.shopy.example.yaml` is a source example for the Shopy profile: `sol` (a female-presenting subscription voice),
-`persona.self_reference: feminine` (Ukrainian feminine self-reference) and short, polite greetings. Pewds keeps its own
-config and phrases. Shopy previously used the API-key voice `marin`, and every Shopy call stopped before the peer
-connected (see [ADR 0005](docs/adr/0005-compact-talk-media-and-avatar.md)).
+Each profile has its own `talk.yaml`; Pewds' phrases are never shared with another profile. A female-presenting profile sets
+`voice: sol` and `persona.self_reference: feminine` (Ukrainian feminine self-reference), see the commented `persona` block in
+`talk.example.yaml`. API-key voices such as `marin` stop every call before the peer connects (see
+[ADR 0005](docs/adr/0005-compact-talk-media-and-avatar.md)), so only subscription voices load.
 
 ## Voice tasks
 
@@ -402,7 +401,7 @@ The client attaches to the profile's own gateway, starting it when none runs:
 A finite turn is the core's native single-query context: flagged actions resolve through `approvals.single_query_mode`.
 Talk never sets `unattended`. On these cores that flag is the `hermes -z` contract, which auto-approves flagged
 actions; a real-gateway check caught it deleting a directory under `approvals.mode: manual`. `python3
-verify-agent.py --rpc-target <pinned core source>` runs these checks against real gateway daemons with the scripted
+tests/e2e/run-agent.py --rpc-target <pinned core source>` runs these checks against real gateway daemons with the scripted
 local model.
 
 The scripted model in `tests/agent/scripted_model.py` stands in for the provider only. Hermes' AIAgent, tools,
@@ -428,7 +427,7 @@ Typical changes:
 ## Run (manager, on the VPS)
 
 ```sh
-# Install: copy plugin.yaml, __init__.py, server.py, hermes_talk/, static/ and LICENSES/ to
+# Install: copy plugin.yaml, __init__.py, server.py, hermes_talk/, static/ and LICENSE to
 # $HERMES_HOME/plugins/hermes-telegram-talk and add hermes-telegram-talk to plugins.enabled (see "Native install" below).
 export HERMES_HOME=/home/me/.hermes/profiles/pewds
 export TG_VOICE_BOT_TOKEN=...            # from the existing Pewds credential source; never on argv
@@ -453,25 +452,25 @@ confirms it with `hermes plugins list`. Real-profile installation and activation
 ## Verify
 
 ```sh
-python3 verify-integrated.py --offline --require-host   # canonical gate: backend, frontend and Pulse offline, host mandatory
-python3 verify-agent.py --require-hermes                 # voice tasks through the real Hermes agent (scripted model),
+python3 tests/e2e/run-integrated.py --offline --require-host   # canonical gate: backend, frontend and Pulse offline, host mandatory
+python3 tests/e2e/run-agent.py --require-hermes                 # voice tasks through the real Hermes agent (scripted model),
                                                          # Telegram reports (synthetic transport) and delivery faults
-python3 verify-agent.py --browser <out-dir>              # Chromium delegation job: real app.js, server and tasks
-python3 verify-integrated.py --browser <out-dir>        # legacy and Talk Chromium inventories, capped containers
-python3 verify-frontend.py --mobile <out-dir>            # Chromium and actual WebKit: cold/warm assets, rotation, retry and native audio unlock
-python3 verify-backend.py --offline     # full backend gate (below)
-python3 verify-thread.py --offline --require-host  # chat input of the exact thread, reply voice, Shopy (real hook)
-python3 verify-pulse.py --offline       # Pulse per-item acceptance through the real routes, memory and SessionDB
-python3 verify-pulse-engine.py --offline  # Pulse engine parity: model selection, memory, follow-ups via ctx.llm (host runtime required)
-python3 verify-frontend.py --offline    # legacy 26 + frontend unit checks + HTTP contract on this backend
-python3 verify.py --offline             # legacy 26 signaling/security checks only
-python3 verify.py --browser <out-dir>   # legacy UI/lifecycle run in a capped --network none container
+python3 tests/e2e/run-agent.py --browser <out-dir>              # Chromium delegation job: real app.js, server and tasks
+python3 tests/e2e/run-integrated.py --browser <out-dir>        # legacy and Talk Chromium inventories, capped containers
+python3 tests/e2e/run-frontend.py --mobile <out-dir>            # Chromium and actual WebKit: cold/warm assets, rotation, retry and native audio unlock
+python3 tests/e2e/run-backend.py --offline     # full backend gate (below)
+python3 tests/e2e/run-thread.py --offline --require-host  # chat input of the exact thread, reply voice, Shopy (real hook)
+python3 tests/e2e/run-pulse.py --offline       # Pulse per-item acceptance through the real routes, memory and SessionDB
+python3 tests/e2e/run-pulse-engine.py --offline  # Pulse engine parity: model selection, memory, follow-ups via ctx.llm (host runtime required)
+python3 tests/e2e/run-frontend.py --offline    # legacy 26 + frontend unit checks + HTTP contract on this backend
+python3 tests/e2e/run-legacy.py --offline             # legacy 26 signaling/security checks only
+python3 tests/e2e/run-legacy.py --browser <out-dir>   # legacy UI/lifecycle run in a capped --network none container
 python3 -m hermes_talk.fixtures         # synthetic Talk server for frontend work
 ```
 
-`verify-backend.py --offline` runs three stages:
+`tests/e2e/run-backend.py --offline` runs three stages:
 
-1. `verify.py --offline`. It must print `26/26`.
+1. `tests/e2e/run-legacy.py --offline`. It must print `26/26`.
 2. The Talk checks on synthetic history:
    - the frozen bootstrap shape with no private fields;
    - HMAC, bot, user, origin and field rejection on every route, with no state or upstream access;
@@ -499,7 +498,7 @@ python3 -m hermes_talk.fixtures         # synthetic Talk server for frontend wor
    the original page and its single route.
 
    The runtime comes from `HERMES_TALK_HERMES_PYTHON`, else `~/.hermes/installs/*/environments/*/venv`.
-   If none exists, stage 3 prints `SKIPPED`. It never prints `PASS`. `verify-integrated.py
+   If none exists, stage 3 prints `SKIPPED`. It never prints `PASS`. `tests/e2e/run-integrated.py
    --require-host` (and `HERMES_TALK_REQUIRE_HOST=1`) turn that skip into a failure.
 
 Prerequisite runtimes: Python 3 for the gate, a Hermes install for stage 3, Docker for the browser
@@ -536,9 +535,9 @@ the package's SVG avatar. All identities and text remain synthetic.
 - [x] Settled text and bounded summaries in native Hermes history; no audio, SDP or tool output
 - [x] Scoped SOUL, allowlisted skills and truthful activity briefing within explicit budgets
 - [x] Pulse: per-item exposure, mention and acknowledgement; selection, memory, feedback, follow-ups and
-  deduplication per account (`verify-pulse.py`, memory and real SessionDB, plus the Chromium browser job)
+  deduplication per account (`tests/e2e/run-pulse.py`, memory and real SessionDB, plus the Chromium browser job)
 - [x] Pulse engine: model selection, memory extraction and follow-up checks through the plugin's `ctx.llm`,
-  degrading visibly without it (`verify-pulse-engine.py`, real runtime, deterministic local model)
+  degrading visibly without it (`tests/e2e/run-pulse-engine.py`, real runtime, deterministic local model)
 - [ ] Pulse attribution and feedback with a real GPT-Live model, and the engine prompts on the profile's real
   model (manager)
 - [x] Frozen frontend contract (`INTERFACE.md`) and synthetic fixtures
@@ -554,11 +553,11 @@ this client.
 ## Licenses
 
 The project code is this repository's own. The signaling exchange is adapted from Hermes Conduit
-(MIT); see `LICENSES/CONDUIT-LICENSE`. The delegation append framing and 500-byte chunking in `static/talk/app.js`
+(MIT); see `LICENSE`. The delegation append framing and 500-byte chunking in `static/talk/app.js`
 follow Conduit `GPTLiveProtocol.swift` at 4b6889097d53ad731089f255b03afe534ef3da45; the task flow (commentary
 progress, speakable result on the same delegation id, call and task lifetimes kept apart) follows its
 `GPTLiveDelegationBridge.swift` and `VoiceBackgroundJobs.swift`. No other Conduit code is copied. Pulse adapts the
 mechanisms of Conduit notifier's Pulse at d25391f6382211dc22e90672c02ea2709112e3dc and the iOS `PulseFeed` at
-b7fd1cc81bf72c6ef8c35a87cd6b15a135fabd5c (both MIT; `LICENSES/CONDUIT-NOTIFIER-LICENSE`,
-`LICENSES/CONDUIT-LICENSE`). `pulse_memory.py`, `pulse_select.py` and `pulse_followup.py` port the notifier's
+b7fd1cc81bf72c6ef8c35a87cd6b15a135fabd5c (both MIT; `LICENSE`,
+`LICENSE`). `pulse_memory.py`, `pulse_select.py` and `pulse_followup.py` port the notifier's
 prompts and decision rules (adapted, under that notice); the rest is written for Talk.

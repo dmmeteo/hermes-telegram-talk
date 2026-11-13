@@ -15,7 +15,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 import server  # noqa: E402
 from verify import sign_init_data  # noqa: E402
@@ -94,7 +94,7 @@ def main():
     server.logger.setLevel(logging.INFO)
     app = server.VoiceApp(BOT_TOKEN, {USER_ID}, f"http://127.0.0.1:{APP_PORT}", "/tg-voice/",
                           resolve=resolve, post=relay_post)
-    # The browser run starts ~10 calls in one minute; the per-user mint limit itself is covered by verify.py --offline.
+    # The browser run starts ~10 calls in one minute; the per-user mint limit itself is covered by tests/e2e/run-legacy.py --offline.
     app.limiter.limit = 50
     app_server = server.BoundedServer(("127.0.0.1", APP_PORT), server.make_handler(app))
     fixture_server = ThreadingHTTPServer(("127.0.0.1", FIXTURE_PORT), Fixture)

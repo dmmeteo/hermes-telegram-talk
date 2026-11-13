@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Hermes Telegram Talk backend checks. Synthetic identities, text and credentials only; no network.
 
-  python3 verify-backend.py --offline
+  python3 tests/e2e/run-backend.py --offline
 
 runs, in order:
-  1. verify.py --offline, the legacy signaling/security suite (26 checks);
+  1. tests/e2e/run-legacy.py --offline, the legacy signaling/security suite (26 checks);
   2. the Talk checks on synthetic in-memory history;
   3. the same Talk checks plus plugin discovery/registration in a disposable HERMES_HOME under a
      real Hermes runtime, which supplies SessionDB, load_soul_md and skill_view. The runtime is
@@ -28,7 +28,7 @@ import threading
 import http.client
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 import server  # noqa: E402
 from hermes_talk import fixtures as fx  # noqa: E402
@@ -36,7 +36,7 @@ from hermes_talk.config import ConfigError, parse_config  # noqa: E402
 from hermes_talk.history import MemoryHistory  # noqa: E402
 from hermes_talk.talk import TalkRuntime  # noqa: E402
 
-PLUGIN_FILES = ("plugin.yaml", "__init__.py", "server.py", "hermes_talk", "static", "LICENSES")
+PLUGIN_FILES = ("plugin.yaml", "__init__.py", "server.py", "hermes_talk", "static", "LICENSE")
 
 
 class Clock:
@@ -884,7 +884,7 @@ def hermes_python():
 
 def run_offline():
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
-    legacy = subprocess.run([sys.executable, str(ROOT / "verify.py"), "--offline"], cwd=ROOT, env=env,
+    legacy = subprocess.run([sys.executable, str(ROOT / "tests/e2e/run-legacy.py"), "--offline"], cwd=ROOT, env=env,
                             capture_output=True, text=True, timeout=300)
     print(legacy.stdout.strip().splitlines()[-1] if legacy.stdout.strip() else legacy.stderr[-400:])
     legacy_ok = legacy.returncode == 0 and "26/26 offline checks passed" in legacy.stdout
@@ -896,7 +896,7 @@ def run_offline():
     else:
         scratch = tempfile.mkdtemp(prefix="talk-host-")
         try:
-            host = subprocess.run([runtime, str(ROOT / "verify-backend.py"), "--host"], cwd=scratch,
+            host = subprocess.run([runtime, str(ROOT / "tests/e2e/run-backend.py"), "--host"], cwd=scratch,
                                   env={**env, "HERMES_HOME": scratch}, capture_output=True, text=True, timeout=600)
         finally:
             shutil.rmtree(scratch, ignore_errors=True)

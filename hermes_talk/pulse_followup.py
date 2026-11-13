@@ -1,6 +1,6 @@
 """Pulse follow-up checks: model decisions on open promises, commitments and watches, with backoff.
 
-Ported from Conduit notifier pulse_followup.py (MIT, LICENSES/CONDUIT-NOTIFIER-LICENSE) at
+Ported from Conduit notifier pulse_followup.py (MIT, LICENSE) at
 d25391f6: the three check prompts (promise, commitment, watch), the decisions tell/done/drop/wait,
 the first-check timing, the backoff schedule with the model's "check again" hint, retries after a
 failed check that do not count as checks, and giving up after MAX_CHECKS or GIVE_UP_S. Talk

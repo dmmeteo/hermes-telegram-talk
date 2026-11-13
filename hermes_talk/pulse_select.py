@@ -1,7 +1,7 @@
 """Pulse selection: the model picks which cards a voice call brings up, with value, reason and skips.
 
 Ported from Conduit notifier pulse_candidates.py and pulse_report.py BARS (MIT,
-LICENSES/CONDUIT-NOTIFIER-LICENSE) at d25391f6: the selection prompt (bring_up, value 1-5,
+LICENSE) at d25391f6: the selection prompt (bring_up, value 1-5,
 one-word skip reasons done/covered/raised/rated/minor, a line to the user and a "why now"), the
 nudge bars, the "what Pulse brought up lately" section, lessons learned from the user's feedback
 added to the instructions, parsing that keeps only refs it was shown, and routing (picked by value,

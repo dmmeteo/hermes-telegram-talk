@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Talk Pulse acceptance: per-item briefing evidence through the real /tg-voice/ routes.
 
-  python3 verify-pulse.py --offline
+  python3 tests/e2e/run-pulse.py --offline
 
 drives the real server with signed synthetic initData, a scripted upstream and synthetic sessions,
 first on in-memory history and then on Hermes' own SessionDB under a real runtime
@@ -20,9 +20,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
-_spec = importlib.util.spec_from_file_location("verify_backend", ROOT / "verify-backend.py")
+_spec = importlib.util.spec_from_file_location("verify_backend", ROOT / "tests/e2e/run-backend.py")
 vb = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(vb)
 fx = vb.fx
@@ -324,7 +324,7 @@ def run_offline():
     else:
         scratch = tempfile.mkdtemp(prefix="talk-pulse-host-")
         try:
-            host = subprocess.run([runtime, "-B", str(ROOT / "verify-pulse.py"), "--host"], cwd=scratch,
+            host = subprocess.run([runtime, "-B", str(ROOT / "tests/e2e/run-pulse.py"), "--host"], cwd=scratch,
                                   env={**env, "HERMES_HOME": scratch}, capture_output=True, text=True, timeout=600)
         finally:
             shutil.rmtree(scratch, ignore_errors=True)

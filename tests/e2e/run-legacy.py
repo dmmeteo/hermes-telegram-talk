@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Offline behavioral checks for the Pewds voice test server, plus the browser fixture run.
 
-  python3 verify.py --offline            security, signaling and static checks (no network, no credentials)
-  python3 verify.py --browser OUT_DIR    real Chromium against browser/fixture.py in a capped --network none container
+  python3 tests/e2e/run-legacy.py --offline            security, signaling and static checks (no network, no credentials)
+  python3 tests/e2e/run-legacy.py --browser OUT_DIR    real Chromium against tests/legacy/fixture.py in a capped --network none container
 """
 import argparse
 import hashlib
@@ -22,7 +22,7 @@ import time
 import urllib.parse
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 import server  # noqa: E402
 
@@ -456,7 +456,7 @@ def run_browser(out_dir):
            "--tmpfs", "/tmp:rw,size=256m", "--env", "HOME=/tmp/home", "--env", "TMPDIR=/tmp",
            "--env", "PYTHONDONTWRITEBYTECODE=1",
            "--mount", f"type=bind,src={ROOT},dst=/src,readonly",
-           "--mount", f"type=bind,src={ROOT / 'browser/run.mjs'},dst=/app/job.mjs,readonly",
+           "--mount", f"type=bind,src={ROOT / 'tests/legacy/run.mjs'},dst=/app/job.mjs,readonly",
            "--mount", f"type=bind,src={out},dst=/output",
            "--entrypoint", "node", "django-admin-repl-verify-browser:pw1.63.0", "/app/job.mjs"]
     return subprocess.run(cmd, timeout=300).returncode

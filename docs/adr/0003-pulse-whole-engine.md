@@ -6,7 +6,7 @@ that phase was time-boxed.
 
 ## Decision
 
-Port every upstream Pulse mechanism (Conduit notifier d25391f6, MIT, `LICENSES/CONDUIT-NOTIFIER-LICENSE`) whose
+Port every upstream Pulse mechanism (Conduit notifier d25391f6, MIT, `LICENSE`) whose
 inputs exist on this surface, and leave out only those whose inputs or outputs are external to Talk. Each one
 left out has a concrete reason below.
 

@@ -25,7 +25,7 @@ async function until(fn, message, ms = 15000) {
   }
 }
 
-const fixture = spawn("python3", ["/src/browser/fixture.py"], { stdio: ["ignore", "pipe", "pipe"] });
+const fixture = spawn("python3", ["/src/tests/legacy/fixture.py"], { stdio: ["ignore", "pipe", "pipe"] });
 fixture.stderr.on("data", (d) => log("fixture-stderr", { text: String(d).slice(0, 400) }));
 await new Promise((resolve, reject) => {
   fixture.stdout.on("data", (d) => String(d).includes("FIXTURE READY") && resolve());

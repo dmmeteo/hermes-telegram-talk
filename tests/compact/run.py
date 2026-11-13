@@ -9,7 +9,7 @@ if __name__ == '__main__':
     out = Path(sys.argv[1]).resolve()
     out.mkdir(parents=True, exist_ok=True)
     subprocess.run([sys.executable, str(ROOT / 'tests/compact/check.py')], check=True, cwd=ROOT)
-    spec = importlib.util.spec_from_file_location('frontend_gate', ROOT / 'verify-frontend.py')
+    spec = importlib.util.spec_from_file_location('frontend_gate', ROOT / 'tests/e2e/run-frontend.py')
     gate = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(gate)
     revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()

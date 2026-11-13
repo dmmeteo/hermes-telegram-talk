@@ -2,7 +2,7 @@
 """Pewds Telegram voice test: static page plus authenticated GPT-Live signaling.
 
 The upstream exchange (URL, headers, no-redirect opener, answer checks) is adapted
-from Hermes Conduit's plugin_api.py, MIT licensed; see LICENSES/CONDUIT-LICENSE.
+from Hermes Conduit's plugin_api.py, MIT licensed; see LICENSE.
 """
 import argparse
 import base64

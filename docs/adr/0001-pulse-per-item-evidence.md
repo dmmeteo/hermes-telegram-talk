@@ -61,6 +61,6 @@ dashboard).
 - An item is repeated until a call shows it was told and answered, or the user dismisses or snoozes it. A model
   that paraphrases a title beyond recognition leaves the item unread; that errs toward repeating, not losing.
 - Attribution is lexical (whole title, or most title words including one that tells the card apart).
-- Evidence: `verify-pulse.py --offline` (memory and real SessionDB), the updated backend and agent inventories,
+- Evidence: `tests/e2e/run-pulse.py --offline` (memory and real SessionDB), the updated backend and agent inventories,
   and the Chromium agent job step `pulse-interruption-and-feedback-cross-the-real-client`.
 - Unresolved: behavior with a real GPT-Live model (paraphrase rate, interruption timing) is not exercised.

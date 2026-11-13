@@ -3,7 +3,7 @@
 Ported from Conduit notifier pulse_claims.py (ACTIONS, MAX_CLAIMS, KEEP_S, TURN_CALLS, SHOWN_CALLS,
 CHANGES, CRON_TOOLS, CRON_CHANGES, RUNS_OTHERS, NAMED, READS, REMOVES, does, turn, judge) and
 pulse_memory.py _claim (the "claims" part of the memory reading) at d25391f6 (MIT,
-LICENSES/CONDUIT-NOTIFIER-LICENSE).
+LICENSE).
 
 Memory also notes what Hermes said in a session it had just done with a tool: set a reminder,
 added or changed a calendar event, created or changed a scheduled job, or sent a message. Code then

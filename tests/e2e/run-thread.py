@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Exact-thread Mini App inventory: chat input of the initiating Telegram thread, reply voice, Shopy persona.
 
-  python3 verify-thread.py --offline [--require-host]
+  python3 tests/e2e/run-thread.py --offline [--require-host]
 
 Stage 1 runs tests/thread/checks.py on the in-memory history with stand-in events through the hook body.
 Stage 2 runs the same checks under a real Hermes runtime (HERMES_TALK_HERMES_PYTHON, else the first installed
@@ -15,7 +15,7 @@ import sys
 import types
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests" / "thread"))
 

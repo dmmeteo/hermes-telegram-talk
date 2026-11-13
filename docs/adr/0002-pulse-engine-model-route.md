@@ -65,7 +65,7 @@ user opens a call; the nudge bar is kept as the selection's "balanced" bar), and
   process.
 - Model calls cost the profile's normal model usage: one selection when the eligible cards change, one memory
   read per quiet session with new lines, one check per due follow-up (at most 6 per run).
-- Evidence: `verify-pulse-engine.py --offline` (gate `pulse-engine-parity`, `TALK_PULSE_ENGINE_PARITY_OK`) runs
+- Evidence: `tests/e2e/run-pulse-engine.py --offline` (gate `pulse-engine-parity`, `TALK_PULSE_ENGINE_PARITY_OK`) runs
   the product routes on SessionDB under a real Hermes runtime with the plugin installed and enabled; the model is
   `tests/pulse/model_fixture.py`, a deterministic local OpenAI-compatible server reached only through
   `ctx.llm` → `call_llm`. Real-model behavior (prompt quality, paraphrase, cost) is for Prime's live

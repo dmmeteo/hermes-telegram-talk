@@ -13,6 +13,8 @@ voice:
   voice: cove
   language_hint: "Speak Ukrainian unless the user switches language."
   session_ttl_minutes: 120   # an unended call is marked expired after this; the conversation itself never resets
+# persona:
+#   self_reference: feminine # Ukrainian feminine forms for herself: «я готова», «я зрозуміла»
 greeting:
   enabled: true
   text: "Greet the user in one short sentence."

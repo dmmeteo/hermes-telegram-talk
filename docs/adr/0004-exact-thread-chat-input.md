@@ -36,7 +36,7 @@ Interfaces inspected on the target core (`prime-tgt-cli-1103/target-sdk`, read-o
 | What can the voice use? | Text and whole UTF-8 text files up to 64 KB (6000 characters each). Everything else (photos, PDFs, voice notes, oversized or undecodable files) is noted truthfully in the call and passed on to the profile's normal chat agent in the same thread | The voice model has no verified image input; the chat agent's vision path is real. A note never claims the model saw bytes |
 | Minimize, restore, retry | Pending input belongs to the conversation and exact thread, not one voice session; it is offered until acked and flushed into history at `api/end` | No loss, no double injection, no mixing of threads |
 | Reply voice | Operator-listed `voice.choices`, persisted per (profile, bot, user) through `api/voice`; applied when a session is created. A live change asks for an explicit Reconnect that keeps the conversation | The provider sets the voice at session creation; hot switching is not claimed |
-| Shopy | `talk.shopy.example.yaml`: `marin`, `persona.self_reference: feminine`, short polite greetings; Pewds' config unchanged | Per-profile isolation already exists; only source examples, no live profile access |
+| Shopy | a synthetic Shopy config in `tests/thread/checks.py` (the example file was removed): `marin`, `persona.self_reference: feminine`, short polite greetings; Pewds' config unchanged | Per-profile isolation already exists; only source examples, no live profile access |
 
 ## Consequences
 

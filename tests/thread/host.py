@@ -1,4 +1,4 @@
-"""Host stage of verify-thread.py: the same checks with the real Hermes pieces (synthetic data only).
+"""Host stage of tests/e2e/run-thread.py: the same checks with the real Hermes pieces (synthetic data only).
 
 - History: real SessionDB (hermes_talk.history.NativeHistory) in each disposable profile home.
 - Producer: Hermes' Telegram adapter builds each MessageEvent from a PTB 22 `Message` (Message.de_json with a PTB
@@ -19,7 +19,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT), str(ROOT / "tests" / "thread")]
-PLUGIN_FILES = ("plugin.yaml", "__init__.py", "server.py", "hermes_talk", "static", "LICENSES")
+PLUGIN_FILES = ("plugin.yaml", "__init__.py", "server.py", "hermes_talk", "static", "LICENSE")
 
 
 def install_plugin(home):

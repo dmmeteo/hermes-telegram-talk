@@ -1,6 +1,6 @@
 """Pulse delivery policy: how loudly, and whether now, a selected card comes up in a voice call.
 
-Ported from Conduit notifier at d25391f6 (MIT, LICENSES/CONDUIT-NOTIFIER-LICENSE):
+Ported from Conduit notifier at d25391f6 (MIT, LICENSE):
 - pulse_learning.py: the loudness ladder (push, screen, brief, off) as per-kind ceilings, DEFAULT_LEVELS,
   the rating reasons (REASONS) and the lessons they leave: "too often" steps the kind's ceiling one level
   quieter, "too late" makes the kind count as due sooner (SOONER, MAX_SOONER), "already knew" (SEEN) is

@@ -14,7 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 PLUGIN_ID = "hermes-telegram-talk"
 SENTINEL = "discord-voice-sentinel"
-RUNTIME_FILES = ("plugin.yaml", "__init__.py", "server.py", "hermes_talk", "static", "LICENSES")
+RUNTIME_FILES = ("plugin.yaml", "__init__.py", "server.py", "hermes_talk", "static", "LICENSE")
 
 SENTINEL_FILES = {
     "plugin.yaml": f'name: {SENTINEL}\nversion: "0.0.1"\ndescription: "synthetic Discord voice sentinel"\nkind: standalone\n',

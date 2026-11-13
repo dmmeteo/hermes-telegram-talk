@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Talk frontend checks against the backend in this checkout. Synthetic identities and media only.
 
-  python3 verify-frontend.py --offline            legacy offline suite, frontend unit checks, real-backend HTTP contract
-  python3 verify-frontend.py --browser OUT_DIR    the same, then the Talk Chromium inventory in a capped offline container
-  python3 verify-frontend.py --mobile OUT_DIR     the same, then cold/warm upgrade and audio unlock in Chromium and WebKit
+  python3 tests/e2e/run-frontend.py --offline            legacy offline suite, frontend unit checks, real-backend HTTP contract
+  python3 tests/e2e/run-frontend.py --browser OUT_DIR    the same, then the Talk Chromium inventory in a capped offline container
+  python3 tests/e2e/run-frontend.py --mobile OUT_DIR     the same, then cold/warm upgrade and audio unlock in Chromium and WebKit
 
 Node runs from PATH, else from TALK_NODE_IMAGE in a network-less container. The browser job runs in
 TALK_BROWSER_IMAGE (Playwright with Chromium) with no network. TALK_BACKEND_SOURCE may name another
@@ -18,7 +18,7 @@ import shutil
 import subprocess
 import sys
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 NODE_IMAGE = os.environ.get('TALK_NODE_IMAGE', 'node:22.22.3-bookworm-slim')
 BROWSER_IMAGE = os.environ.get('TALK_BROWSER_IMAGE', 'django-admin-repl-verify-browser:pw1.63.0')
 
@@ -50,7 +50,7 @@ def main():
             return 1
     env = {**os.environ, 'TALK_BACKEND_SOURCE': str(backend), 'PYTHONDONTWRITEBYTECODE': '1'}
     check = ['node', 'tests/frontend/check.mjs']
-    commands = [[sys.executable, 'verify.py', '--offline'],
+    commands = [[sys.executable, 'tests/e2e/run-legacy.py', '--offline'],
                 check if shutil.which('node') else capped(NODE_IMAGE, check),
                 [sys.executable, 'tests/frontend/test_contract.py']]
     if args.browser:

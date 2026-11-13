@@ -1,6 +1,6 @@
 """Talk Pulse: cards, importance, selection, attribution and feedback, as pure decisions.
 
-Adapted for voice from Hermes Conduit notifier Pulse (MIT, LICENSES/CONDUIT-LICENSE): candidates
+Adapted for voice from Hermes Conduit notifier Pulse (MIT, LICENSE): candidates
 become fingerprinted cards, a selection picks the most important unread ones for a call, and every
 card keeps separate evidence for each step a briefing goes through. The persistent per-account
 record of those steps is pulse_ledger.py.

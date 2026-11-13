@@ -13,7 +13,7 @@ from pathlib import Path
 
 ROOT = Path(sys.argv[1] if len(sys.argv) > 1 else Path(__file__).resolve().parents[2]).resolve()
 sys.path.insert(0, str(ROOT))
-spec = importlib.util.spec_from_file_location("verify_backend", ROOT / "verify-backend.py")
+spec = importlib.util.spec_from_file_location("verify_backend", ROOT / "tests/e2e/run-backend.py")
 vb = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(vb)
 fx = vb.fx
@@ -266,7 +266,7 @@ def every_call_a_shipped_profile_can_start_names_a_subscription_voice():
     from hermes_talk.config import ConfigError, _yaml_load
     subscription = {"arbor", "breeze", "cove", "ember", "juniper", "maple", "sol", "spruce", "vale"}
     sent = {}
-    for example in ("talk.example.yaml", "talk.shopy.example.yaml"):
+    for example in ("talk.example.yaml",):
         voice = _yaml_load((ROOT / example).read_text(encoding="utf-8"))["voice"]
         h = harness(voice=voice)
         try:

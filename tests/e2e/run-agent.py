@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Hermes Telegram Talk agent gate: voice tasks through the real Hermes agent, with synthetic data only.
 
-  python3 verify-agent.py --require-hermes [--receipts DIR]
-  python3 verify-agent.py --browser OUT_DIR    Chromium delegation job (real app.js, server and tasks)
-  python3 verify-agent.py --rpc-target SDK [--receipts DIR]   gateway-RPC transport against a pinned core source
+  python3 tests/e2e/run-agent.py --require-hermes [--receipts DIR]
+  python3 tests/e2e/run-agent.py --browser OUT_DIR    Chromium delegation job (real app.js, server and tasks)
+  python3 tests/e2e/run-agent.py --rpc-target SDK [--receipts DIR]   gateway-RPC transport against a pinned core source
 
 Each check runs the real Talk server over HTTP against a disposable HERMES_HOME. Tasks run as real
 `hermes chat` processes from the Hermes runtime (HERMES_TALK_HERMES_PYTHON, else the first
@@ -36,7 +36,7 @@ import time
 import traceback
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests" / "agent"))
 import server  # noqa: E402
@@ -46,7 +46,7 @@ from hermes_talk.config import parse_config  # noqa: E402
 NO_TASK_USER = 1003
 BLACKHOLE = "http://127.0.0.1:9"
 TELEGRAM = None
-PLUGIN_FILES = ("plugin.yaml", "__init__.py", "server.py", "hermes_talk", "static", "LICENSES")
+PLUGIN_FILES = ("plugin.yaml", "__init__.py", "server.py", "hermes_talk", "static", "LICENSE")
 TERMINAL = ("succeeded", "failed", "cancelled", "interrupted")
 
 
@@ -1761,7 +1761,7 @@ def main():
         return run_browser(args.browser, runtime)
     scratch = tempfile.mkdtemp(prefix="talk-agent-gate-")
     try:
-        cmd = [runtime, "-B", str(ROOT / "verify-agent.py"), "--inner"]
+        cmd = [runtime, "-B", str(ROOT / "tests/e2e/run-agent.py"), "--inner"]
         cmd += ["--receipts", str(Path(args.receipts).resolve())] if args.receipts else []
         for name in args.only:
             cmd += ["--only", name]

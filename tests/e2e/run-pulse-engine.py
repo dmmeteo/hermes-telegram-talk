@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pulse engine parity: model selection, memory extraction and follow-up checks through the product.
 
-  python3 verify-pulse-engine.py --offline
+  python3 tests/e2e/run-pulse-engine.py --offline
 
 re-runs itself under a real Hermes runtime (HERMES_TALK_HERMES_PYTHON, else the first
 ~/.hermes/installs/*/environments/*/venv/bin/python) with a disposable HERMES_HOME under TMPDIR
@@ -28,10 +28,10 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests" / "pulse"))
-_spec = importlib.util.spec_from_file_location("verify_backend", ROOT / "verify-backend.py")
+_spec = importlib.util.spec_from_file_location("verify_backend", ROOT / "tests/e2e/run-backend.py")
 vb = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(vb)
 fx = vb.fx
@@ -40,7 +40,7 @@ from hermes_talk import pulse, pulse_followup, pulse_model, pulse_select  # noqa
 from hermes_talk.config import parse_config  # noqa: E402
 from hermes_talk.talk import TalkRuntime  # noqa: E402
 
-PLUGIN_FILES = ("plugin.yaml", "__init__.py", "server.py", "hermes_talk", "LICENSES")
+PLUGIN_FILES = ("plugin.yaml", "__init__.py", "server.py", "hermes_talk", "LICENSE")
 A, B = fx.USER_ID, fx.OTHER_USER_ID
 STEPS = []
 
@@ -680,7 +680,7 @@ def run_offline():
     scratch = tempfile.mkdtemp(prefix="talk-pulse-engine-run-", dir=tmp)
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "HOME": scratch, "TMPDIR": scratch}
     try:
-        host = subprocess.run([runtime, "-B", str(ROOT / "verify-pulse-engine.py"), "--host"], cwd=scratch, env=env,
+        host = subprocess.run([runtime, "-B", str(ROOT / "tests/e2e/run-pulse-engine.py"), "--host"], cwd=scratch, env=env,
                               capture_output=True, text=True, timeout=900)
     finally:
         shutil.rmtree(scratch, ignore_errors=True)

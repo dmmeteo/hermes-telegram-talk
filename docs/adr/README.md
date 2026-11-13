@@ -5,3 +5,4 @@
 - [0003 Pulse: the whole applicable engine (learning, delivery policy, claims) and what stays out](0003-pulse-whole-engine.md)
 - [0004 Talk continues the exact initiating Telegram thread: chat input, transcript and reply voice](0004-exact-thread-chat-input.md)
 - [0005 Compact controls, truthful media states, native voice catalogue and bot avatar](0005-compact-talk-media-and-avatar.md)
+- [0006 tg-talk + full-duplex = <3: a hermes-fullduplex core and a Telegram add-on](0006-talk-full-duplex-merge.md) (proposed)

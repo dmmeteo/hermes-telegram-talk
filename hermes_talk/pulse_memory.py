@@ -1,6 +1,6 @@
 """Pulse memory: model-extracted commitments, promises, intentions, interests, facts and watches.
 
-Ported from Conduit notifier pulse_memory.py (MIT, LICENSES/CONDUIT-NOTIFIER-LICENSE) at
+Ported from Conduit notifier pulse_memory.py (MIT, LICENSE) at
 d25391f6: the extraction prompt, the six kinds and who may say each, the rule that every item
 quotes the exact words it came from (an item whose evidence is not on a line of the chat is
 dropped as not said), same_as/replaces against what is already remembered, "closed" outcomes,
