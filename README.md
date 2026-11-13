@@ -16,8 +16,9 @@ In scope:
 - One persistent native Hermes session per verified Telegram user, configured profile and bot. The
   session is titled "Telegram Voice".
 - Settled voice text stored in that session, with an explicit "new conversation".
-- Voice instructions built from the profile SOUL, allowlisted skills, the conversation summary,
-  recent turns and a small activity briefing.
+- Conduit-style call setup: a compact voice persona, the configured language and opening, allowlisted skills,
+  a summary of the earlier conversation and a small activity briefing in the instructions; the latest turns as
+  role-bearing `initial_items`.
 
 - Optional voice tasks: a GPT-Live delegation becomes a real Hermes task in the profile's own agent, and its
   result comes back on that delegation (see "Voice tasks"). Off unless `tasks.enabled` is set.
@@ -85,20 +86,32 @@ written with SQL.
 
 ## How the voice context is built
 
-The server builds the context for every call. Each part has its own character budget
-(`context.budgets`), and the total has one too. A clipped section ends with `[clipped]`.
+The server builds the context for every call the way Conduit's host does (see
+[ADR 0007](docs/adr/0007-conduit-call-initialization.md)). The session it sends is `model`, `instructions`,
+`audio.output.voice`, `delegation.type: client` and, when the conversation has turns, `initial_items`.
+
+The conversation reaches the model as data, never as instruction text. A conversation of up to 24 turns and 6000
+characters goes word for word as `initial_items`: `{type: message, role: user|assistant, content: [{type:
+input_text|output_text, text}]}`. A longer one goes as its newest turns (at most 10, within 6000 characters) plus a
+summary of everything before them. The summary covers both speakers, decisions, preferences, open questions and
+promises. The plugin's own host model (`ctx.llm`, the Pulse route, no override) writes it once in the background:
+when a call ends, or when a call opens and finds it missing. It is kept as `{text, covers}` in the conversation's
+state and serves until it is more than 10 turns behind. Call setup never waits for it: until it exists the call
+resumes from its latest turns, and from an older summary of the start if one exists. Stored transcripts are only
+read.
+
+The instructions have their own character budgets (`context.budgets`), and the total has one too. A clipped
+section ends with `[clipped]`.
 
 1. A fixed frame. It covers the profile name, the voice limits, and "nothing was executed" when
    asked to do work. It also says ending the call cancels nothing.
-2. An optional language hint.
-3. The profile SOUL, read through the host loader `agent.prompt_builder.load_soul_md` (which applies
-   Hermes' own scan and truncation).
+2. The language rule: `voice.language` (`en` or `uk`), then `voice.language_hint` and `persona.self_reference`.
+3. The voice persona: `persona.text`, else a short default, inside Conduit's `<hermes_persona>` framing. Talk does
+   not read the profile's SOUL.
 4. Skills named in `context.skills`, read through `tools.skills_tool.skill_view`. These are guidance
    text only and register no tools. Skills not on the list are never read.
-5. The summary of earlier turns. This is the latest user requests, extracted at `api/end` with no
-   model call.
-6. The last `recent_turns` turns of this conversation.
-7. Activity since the last visit: the Pulse cards selected for this call (see "Pulse"). Sessions come from the
+5. The summary of the earlier conversation, inside a `<previous_conversation>` data block, when one serves.
+6. Activity since the last visit: the Pulse cards selected for this call (see "Pulse"). Sessions come from the
    configured sources and belong to this Telegram user. Sessions with no chat user (CLI, cron, kanban) are the
    operator's and are briefed only to `activity.owner_user_id`. Talk's own sessions and other users' sessions are
    excluded. Each line keeps its call label (`P1`, `P2`...), status, session id, source and time. Up to
@@ -107,9 +120,10 @@ The server builds the context for every call. Each part has its own character bu
    visit. If more changed, the briefing says older updates were not read, rather than claiming it saw everything.
    When room allows, a short "Pulse updates" section tells the model to name updates by title and how to delegate
    feedback.
-8. The greeting directive, if enabled. The model speaks first only after the call connects and
-   mentions at most two updates. With `greeting.phrases` configured, the call instead opens with exactly one of
-   those lines (chosen locally, never the account's previous one, no model request) and leaves updates for later.
+7. The opening policy, last so no section above overrides it. With the greeting on, the model speaks first in the
+   configured language and says one line: one of `greeting.phrases` (chosen locally, never the account's previous
+   one), else the language's own line, else it follows `greeting.text`. It leaves updates for later. With the
+   greeting off, it waits for the user to speak first.
 
 ### Fast start and in-call catch-up
 
@@ -141,7 +155,7 @@ The briefing uses four statuses:
 
 Being in the instructions is not being heard. An update stays unread until the call itself shows it was told and
 answered (see "Pulse"). A call that fails at the provider exposes nothing. An unended call expires after
-`voice.session_ttl_minutes` and still gets its summary. A conversation whose native row was deleted is replaced on
+`voice.session_ttl_minutes` and keeps its transcript. A conversation whose native row was deleted is replaced on
 the next bootstrap, and its old id answers 404.
 
 ## Pulse
@@ -412,7 +426,8 @@ approvals and SessionDB run unchanged against it.
 See [talk.example.yaml](talk.example.yaml). It sets:
 - profile id, display name and local avatar (URLs are refused);
 - listen and speak colors;
-- model, voice, language hint and call TTL;
+- model, voice, language, language hint and call TTL;
+- the voice persona;
 - the greeting;
 - the skill allowlist and budgets;
 - activity window and sources;
@@ -420,7 +435,8 @@ See [talk.example.yaml](talk.example.yaml). It sets:
 
 Typical changes:
 - **Add a voice skill.** Put its name in `context.skills`.
-- **Change the persona.** Edit the profile's SOUL. Talk reads it through the host on every call.
+- **Change the persona.** Edit `persona.text` (up to 1200 characters). Talk does not read the profile's SOUL.
+- **Change the language.** Set `voice.language`; the call opens and speaks in it.
 - **Change colors or the avatar.** Edit `appearance.*` or `profile.avatar`.
 - **Change budgets.** Edit `context.budgets.*`.
 
@@ -474,10 +490,10 @@ python3 -m hermes_talk.fixtures         # synthetic Talk server for frontend wor
 2. The Talk checks on synthetic history:
    - the frozen bootstrap shape with no private fields;
    - HMAC, bot, user, origin and field rejection on every route, with no state or upstream access;
-   - SOUL, skill allowlist and redaction;
+   - voice persona, opening policy, skill allowlist and redaction;
    - idempotent, out-of-order and invalid events;
    - foreign conversations and voice sessions;
-   - reopen continuity and the summary;
+   - reopen continuity as `initial_items`, the background summary and a call that never waits for it;
    - explicit-new isolation;
    - clipping and config refusals;
    - activity scoping and status, and Pulse cards that only a named, answered mention acknowledges;
@@ -485,7 +501,7 @@ python3 -m hermes_talk.fixtures         # synthetic Talk server for frontend wor
    - expiry;
    - logs.
 3. The same checks in a disposable `HERMES_HOME` under a real Hermes runtime. That run adds:
-   - real `SessionDB`, `load_soul_md` and `skill_view`;
+   - real `SessionDB` and `skill_view`;
    - plugin discovery and registration through `PluginManager`;
    - a real `hermes talk serve` process answering bootstrap, allowlist and new, with the native
      session rows checked afterwards;
@@ -515,7 +531,7 @@ the package's SVG avatar. All identities and text remain synthetic.
 | --- | --- | --- | --- | --- | --- |
 | Auth, routes, contract | yes | yes | yes | no | no |
 | Native session continuity, new, idempotent events | yes | yes | yes (real SessionDB) | no | no |
-| SOUL / skills / summary / activity context | yes | yes | yes (host loaders) | no | no |
+| Persona / skills / summary / initial_items / activity context | yes | yes | yes (host loaders) | no | no |
 | Plugin registration, `hermes talk serve` | yes | n/a | yes | in fixture (named disposable profile) | no |
 | Talk UI served in configured mode; legacy page without config | yes | yes | yes | in fixture | no |
 | Frontend use of the v2 routes (Chromium, local WebRTC peers) | yes | yes | n/a | n/a | no |
@@ -533,7 +549,7 @@ the package's SVG avatar. All identities and text remain synthetic.
 
 - [x] Authenticated, account-bound persistent conversation; reopen resumes; explicit new is isolated
 - [x] Settled text and bounded summaries in native Hermes history; no audio, SDP or tool output
-- [x] Scoped SOUL, allowlisted skills and truthful activity briefing within explicit budgets
+- [x] Voice persona, allowlisted skills and truthful activity briefing within explicit budgets
 - [x] Pulse: per-item exposure, mention and acknowledgement; selection, memory, feedback, follow-ups and
   deduplication per account (`tests/e2e/run-pulse.py`, memory and real SessionDB, plus the Chromium browser job)
 - [x] Pulse engine: model selection, memory extraction and follow-up checks through the plugin's `ctx.llm`,

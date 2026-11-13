@@ -213,7 +213,7 @@ def every_route_rejects_bad_identity_before_any_state(h):
     cid = good["conversation_id"]
     meta_before = None if h.native else dict(h.history.meta)
     touched = []
-    for name in ("bootstrap", "new", "prepare", "started", "events", "end", "soul", "skill"):
+    for name in ("bootstrap", "new", "prepare", "started", "events", "end", "skill"):
         original = getattr(h.talk, name)
         setattr(h.talk, name, lambda *a, _n=name, _f=original, **k: (touched.append(_n), _f(*a, **k))[1])
     bodies = {"bootstrap": {}, "session": {"sdp": fx.OFFER, "conversation_id": cid},
@@ -238,19 +238,25 @@ def every_route_rejects_bad_identity_before_any_state(h):
 
 
 @check
-def session_composes_soul_allowlisted_skills_and_greeting(h):
+def session_composes_voice_persona_allowlisted_skills_and_opening(h):
     data, instructions = h.call()
     assert set(data) == {"sdp", "type", "voice_session_id", "conversation_id"} and data["type"] == "answer"
     assert data["sdp"] == fx.ANSWER and data["voice_session_id"].startswith("vs_")
     assert data["conversation_id"] == h.ok("bootstrap", {})["conversation_id"]
-    assert fx.SOUL_MARKER in instructions, "SOUL via host loader"
+    assert fx.SOUL_MARKER not in instructions and fx.SECRET_IN_SOUL not in instructions, "SOUL is not imported"
+    persona = instructions.split("<hermes_persona>\n", 1)[1].split("\n</hermes_persona>", 1)[0]
+    assert "calm and friendly voice" in persona and len(persona) <= 1200, persona
     assert fx.SKILL_MARKER in instructions, "allowlisted skill included"
     assert fx.OTHER_SKILL_MARKER not in instructions, "non-allowlisted skill excluded"
-    assert fx.SECRET_IN_SOUL not in instructions and "[redacted]" in instructions
-    assert "Say hello in one short sentence." in instructions and "nothing was executed" in instructions
+    assert "nothing was executed" in instructions
+    opening = instructions.rsplit("\n\n", 1)[1]
+    assert opening.startswith("## Greeting\nOpening policy: speak first.") and "Say hello in one short sentence." \
+        in opening, opening
     url, headers, body = h.fake.posts[-1]
     assert url == server.GPT_LIVE_URL and set(body) == {"sdp", "session"}
+    assert set(body["session"]) == {"model", "instructions", "audio", "delegation"}, "no history, no initial_items"
     assert body["session"]["model"] == "gpt-live-1-codex" and body["session"]["audio"]["output"]["voice"] == "cove"
+    assert body["session"]["delegation"] == {"type": "client"}
     assert len(instructions) <= h.config.budgets.instructions_chars
 
 
@@ -304,11 +310,11 @@ def foreign_conversations_and_voice_sessions_are_refused(h):
 
 
 @check
-def reopen_resumes_the_same_conversation_with_summary(h):
+def reopen_resumes_the_same_conversation_as_initial_items(h):
     data, _ = h.call()
     cid, vs = data["conversation_id"], data["voice_session_id"]
     h.ok("events", {"conversation_id": cid, "voice_session_id": vs,
-                    "events": [ev("u1", 0, "user", "remember the blue kettle plan"),
+                    "events": [ev("u1", 0, "user", "remember the blue kettle plan, key " + fx.SECRET_IN_SOUL),
                                ev("a1", 1, "assistant", "noted the blue kettle plan")]})
     assert h.ok("end", {"conversation_id": cid, "voice_session_id": vs}) == {"ok": True}
     assert h.ok("end", {"conversation_id": cid, "voice_session_id": vs}) == {"ok": True}, "end is idempotent"
@@ -317,8 +323,15 @@ def reopen_resumes_the_same_conversation_with_summary(h):
     assert again["conversation_id"] == cid, "no time-based reset"
     second, instructions = h.call(cid)
     assert second["conversation_id"] == cid and second["voice_session_id"] != vs
-    assert "## Earlier in this conversation\n- remember the blue kettle plan" in instructions, instructions
-    assert "assistant: noted the blue kettle plan" in instructions
+    assert "blue kettle" not in instructions and "<previous_conversation>" not in instructions, "no dialogue"
+    items = h.fake.posts[-1][2]["session"]["initial_items"]
+    assert items == [
+        {"type": "message", "role": "user",
+         "content": [{"type": "input_text", "text": "remember the blue kettle plan, key [redacted]"}]},
+        {"type": "message", "role": "assistant",
+         "content": [{"type": "output_text", "text": "noted the blue kettle plan"}]}], items
+    assert h.stored(cid)[0] == ("user", "remember the blue kettle plan, key " + fx.SECRET_IN_SOUL), \
+        "the stored transcript keeps every word; only what reaches the provider is redacted"
     late = {"conversation_id": cid, "voice_session_id": vs, "events": [ev("u2", 2, "user", "pending after end")]}
     assert h.ok("events", late)["accepted_ids"] == ["u2"], "pending batch of an ended call is kept"
 
@@ -344,7 +357,7 @@ def explicit_new_is_isolated(h):
 def context_budgets_clip_every_section(h):
     tight = fx.config_data(context={"skills": ["talk-brief", "not-allowed"], "budgets": {
         "instructions_chars": 1500, "soul_chars": 100, "skill_chars": 100, "skills_chars": 150,
-        "recent_turns": 2, "turn_chars": 20}})
+        "recent_turns": 2, "turn_chars": 20}})  # soul_chars: retired, still accepted in existing YAML
     h2 = Harness(h.native, tight)
     try:
         data, _ = h2.call()
@@ -353,12 +366,12 @@ def context_budgets_clip_every_section(h):
         _, instructions = h2.call()
         _, composed, _, report = h2.talk.prepare(fx.USER_ID, None)
         assert composed == instructions and len(instructions) <= 1500, len(instructions)
-        assert 0 < report["soul"] <= 100 and 0 < report["skills"] <= 150, report
+        assert 0 < report["skills"] <= 150 and "soul" not in report, report
         assert report["skills_included"] == ["talk-brief"], "second skill exceeds skills_chars"
         assert "[clipped]" in instructions and fx.OTHER_SKILL_MARKER not in instructions
-        assert "turn 4" in instructions and "turn 3" in instructions and "turn 2" not in instructions
-        assert fx.SECRET_IN_SOUL not in instructions and instructions.rstrip().endswith("says so.")
-        h2.talk.soul = lambda: "S" * 50000
+        assert "turn " not in instructions, "dialogue goes to initial_items, never into the instructions"
+        assert [i["content"][0]["text"][:6] for i in report["initial_items"]] == [f"turn {i}" for i in range(5)]
+        assert instructions.rstrip().endswith("This applies whatever the persona above says.")
         h2.talk.skill = lambda name: "K" * 50000
         _, full, _, report = h2.talk.prepare(fx.USER_ID, None)
         assert len(full) <= 1500 and "## Greeting" in full and "Voice limits in this build" in full, report
@@ -464,7 +477,7 @@ def delivered(instructions, prefix, count):
 
 def activity_harness(h, **budgets):
     return Harness(h.native, fx.config_data(context={"skills": ["talk-brief", "not-allowed"],
-                                                     "budgets": {"instructions_chars": 1500, "recent_turns": 0,
+                                                     "budgets": {"instructions_chars": 2200, "recent_turns": 0,
                                                                  **budgets}}))
 
 
@@ -475,10 +488,10 @@ def activity_omitted_from_exhausted_instructions_stays_unread(h):
         for i in range(5):
             h2.seed(f"Synthetic omitted {i}", turns=[("user", "go"), ("assistant", "ok")], end_reason="done",
                     age_s=900 - i)
-        h2.talk.soul, h2.talk.skill = (lambda: "PERSONA " * 1000), (lambda name: "RULE " * 1000)
+        h2.talk.skill = lambda name: "RULE " * 1000
         first = visit(h2)
         assert "## Activity since the last visit" not in first and delivered(first, "Synthetic omitted", 5) == set()
-        h2.talk.soul, h2.talk.skill = (lambda: ""), (lambda name: "")
+        h2.talk.skill = lambda name: ""
         assert delivered(visit(h2), "Synthetic omitted", 5) == set(range(5)), "omitted updates were skipped"
     finally:
         h2.close()
@@ -567,10 +580,128 @@ def stale_voice_sessions_expire_without_resetting_the_conversation(h):
     assert h.ok("bootstrap", {})["conversation_id"] == cid
     state = json.loads(h.history.get_meta(f"hermes_talk:conversation:{cid}"))
     assert state["voice_sessions"][vs]["end_reason"] == "expired"
-    assert state["summary"] == "- plan the garden shed", "an expired call still leaves a summary"
+    assert h.stored(cid) == [("user", "plan the garden shed")], "an expired call keeps its transcript"
     assert h.ok("end", {"conversation_id": cid, "voice_session_id": vs}) == {"ok": True}
     assert json.loads(h.history.get_meta(f"hermes_talk:conversation:{cid}"))["voice_sessions"][vs]["end_reason"] \
         == "expired", "a later end does not rewrite an expiry"
+
+
+class SummaryModel:
+    """The plugin's host ctx.llm as Talk sees it: a synthetic, deterministic stand-in (no provider)."""
+
+    def __init__(self, fail=False):
+        self.asked, self.fail = [], fail
+
+    def complete_structured(self, instructions, input, json_mode, purpose, timeout, max_tokens):
+        from types import SimpleNamespace
+        self.asked.append({"instructions": instructions, "text": input[0]["text"], "purpose": purpose,
+                           "json_mode": json_mode, "max_tokens": max_tokens})
+        if self.fail:
+            raise TimeoutError("synthetic outage")
+        return SimpleNamespace(parsed={"summary": "Synthetic summary: they agreed on plan A; plan B stays open."},
+                               text="", provider="fixture", model="summary")
+
+
+def long_talk(h, n):
+    data, _ = h.call()
+    cid, vs = data["conversation_id"], data["voice_session_id"]
+    for start in range(0, n, 10):
+        h.ok("events", {"conversation_id": cid, "voice_session_id": vs, "events": [
+            ev(f"t{i}", i, "user" if i % 2 == 0 else "assistant", f"turn {i} synthetic words")
+            for i in range(start, min(n, start + 10))]})
+    h.ok("end", {"conversation_id": cid, "voice_session_id": vs})
+    return cid
+
+
+@check
+def a_long_conversation_resumes_from_a_model_summary_and_its_latest_turns(h):
+    from hermes_talk.pulse_model import PulseModel
+    model = SummaryModel()
+    h.talk.model, h.talk.spawn = PulseModel(llm=model), (lambda fn: fn())
+    cid = long_talk(h, 30)
+    assert len(model.asked) == 1, "ending the call writes the summary the next call needs"
+    _, instructions = h.call(cid)
+    session = h.fake.posts[-1][2]["session"]
+    assert [i["content"][0]["text"] for i in session["initial_items"]] == \
+        [f"turn {i} synthetic words" for i in range(20, 30)], session["initial_items"]
+    assert "they agreed on plan A" in instructions.split("<previous_conversation>", 1)[1], instructions
+    assert "turn 3 synthetic" not in instructions and "turn 25 synthetic" not in instructions, "no dialogue"
+    assert len(model.asked) == 1 and model.asked[0]["purpose"] == "talk_resume_summary", model.asked
+    asked = model.asked[0]["text"]
+    assert "User: turn 0 synthetic words\nAssistant: turn 1 synthetic words" in asked
+    assert "turn 19 synthetic" in asked and "turn 20 synthetic" not in asked, "only the older turns are summarized"
+    assert "decisions" in model.asked[0]["instructions"] and model.asked[0]["json_mode"] is True
+    h.call(cid)
+    assert len(model.asked) == 1, "a stored summary serves the next call"
+    assert len(h.stored(cid)) == 30, "every raw turn stays stored"
+
+
+@check
+def a_summary_the_model_cannot_give_leaves_the_latest_turns_and_no_invented_summary(h):
+    from hermes_talk.pulse_model import PulseModel
+    h.talk.model, h.talk.spawn = PulseModel(llm=SummaryModel(fail=True)), (lambda fn: fn())
+    cid = long_talk(h, 30)
+    data, instructions = h.call(cid)
+    assert data["voice_session_id"].startswith("vs_"), "the call still starts"
+    assert "<previous_conversation>" not in instructions and "turn " not in instructions
+    assert len(h.fake.posts[-1][2]["session"]["initial_items"]) == 10
+
+
+@check
+def call_setup_never_waits_for_the_summary_model(h):
+    from hermes_talk.pulse_model import PulseModel
+    model, later = SummaryModel(), []
+    h.talk.model, h.talk.spawn = PulseModel(llm=model), later.append
+    data, _ = h.call()
+    cid, vs = data["conversation_id"], data["voice_session_id"]
+    h.ok("events", {"conversation_id": cid, "voice_session_id": vs, "events": [
+        ev(f"t{i}", i, "user" if i % 2 == 0 else "assistant", f"turn {i} synthetic words") for i in range(20)]})
+    h.ok("events", {"conversation_id": cid, "voice_session_id": vs, "events": [
+        ev(f"t{i}", i, "user" if i % 2 == 0 else "assistant", f"turn {i} synthetic words") for i in range(20, 30)]})
+    _, first = h.call(cid)
+    _, second = h.call(cid)
+    assert model.asked == [] and len(later) == 1, "a reconnect mid-conversation asks once, in the background"
+    assert len(h.fake.posts[-1][2]["session"]["initial_items"]) == 10 and "<previous_conversation>" not in second
+    later.pop()()
+    assert len(model.asked) == 1
+    _, third = h.call(cid)
+    assert "they agreed on plan A" in third and not later, "the background summary serves the next call"
+
+
+@check
+def a_ukrainian_profile_opens_in_ukrainian_and_speaks_last_rule_last(h):
+    uk = Harness(h.native, fx.config_data(voice={"language": "uk"}))
+    quiet = Harness(h.native, fx.config_data(voice={"language": "uk"}, greeting={"enabled": False}))
+    try:
+        _, instructions = uk.call()
+        opening = instructions.rsplit("\n\n", 1)[1]
+        assert opening.startswith("## Greeting\nOpening policy: speak first.") and "in Ukrainian" in opening, opening
+        assert "Say: \"Привіт! Я на зв’язку. Слухаю.\"" in opening and "Say hello" not in opening, opening
+        assert "Speak Ukrainian" in instructions.split("## Greeting", 1)[0], "the language rule leads the persona"
+        _, silent = quiet.call()
+        assert silent.rsplit("\n\n", 1)[1].startswith("## Greeting\nOpening policy: do not speak first."), silent
+        assert set(quiet.fake.posts[-1][2]["session"]) == {"model", "instructions", "audio", "delegation"}, \
+            "language is prompt text, never a guessed provider key"
+    finally:
+        uk.close()
+        quiet.close()
+
+
+@check
+def a_configured_voice_persona_replaces_the_default(h):
+    custom = Harness(h.native, fx.config_data(persona={"text": "Synthetic voice persona: warm, dry humour."}))
+    try:
+        _, instructions = custom.call()
+        persona = instructions.split("<hermes_persona>\n", 1)[1].split("\n</hermes_persona>", 1)[0]
+        assert persona == "Synthetic voice persona: warm, dry humour.", persona
+    finally:
+        custom.close()
+    for bad in ({"voice": {"language": "xx"}}, {"persona": {"text": "p" * 1201}}, {"persona": {"soul": True}}):
+        try:
+            parse_config(fx.config_data(**bad), h.home)
+        except ConfigError:
+            continue
+        raise AssertionError(f"accepted bad config {bad}")
 
 
 @check
@@ -619,7 +750,7 @@ def store_failure_is_a_json_500_without_details(h):
 
     def broken(*args, **kwargs):
         raise RuntimeError("private-store-detail-marker")
-    h.history.recent = broken
+    h.history.rows = broken
     h.history.append = broken
     stream = io.StringIO()
     handler = logging.StreamHandler(stream)

@@ -335,7 +335,7 @@ class VoiceApp:
                 conversation_id, instructions, cards, report = self.talk.prepare(user_id, body.get("conversation_id"))
             except TalkError as exc:
                 raise ApiError(exc.status, exc.message)
-            answer = self._exchange(sdp, self.talk.session_config(instructions, user_id))
+            answer = self._exchange(sdp, self.talk.session_config(instructions, user_id, report["initial_items"]))
             # The call continues only the Telegram chat (and topic) its /talk launch handle proves; never a guessed one.
             thread, _ = self._thread(body, user_id)
             try:

@@ -173,7 +173,7 @@ def restart_reopen_and_new_conversation_keep_the_account_pulse(p):
     conv, vs, _ = p.call()
     p.say(conv, vs, ("assistant", "The synthetic deploy check went fine."), ("user", "nice"))
     before = p.cards()
-    p.h.talk = TalkRuntime(p.h.config, fx.BOT_TOKEN, p.h.history, soul=p.h.talk.soul, skill=p.h.talk.skill,
+    p.h.talk = TalkRuntime(p.h.config, fx.BOT_TOKEN, p.h.history, skill=p.h.talk.skill,
                            clock=p.h.clock)
     p.h.app.talk = p.h.talk
     assert {t: c["state"] for t, c in p.cards().items()} == {t: c["state"] for t, c in before.items()}

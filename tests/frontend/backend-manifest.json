@@ -7,16 +7,16 @@
     "hermes_talk/activity.py": "cc447623de468bd5fbab44638b039c5cc21957dba6fd017b8b2c1ee2a4da86be",
     "hermes_talk/agent.py": "ad3317848c6f0ebaafb1bdc3b973d7db8dc466eb4b2fabee63df6c0a73899167",
     "hermes_talk/assets/avatar.svg": "23c225ebdc39efb2bdb7d06296ae03596af5fae603c3de30b185d096057bbc5b",
-    "hermes_talk/config.py": "d7ad1720f48e220cfc7f84863444789be51ce8828b3fd5445fc06d5d84576432",
-    "hermes_talk/context.py": "bacf089b7b6e214642a4e47deab5256614e7eb124c4de970e193b846fc690f9f",
+    "hermes_talk/config.py": "66e7e30a4fd8c27222d2f77cddda758d33835da71a4ec375a96908d8cfc7bea0",
+    "hermes_talk/context.py": "1d80c041f0b5b1d4f44e752139a569832adc9a4572c0b11562ff4c324f75e50b",
     "hermes_talk/fixtures.py": "fd30721b7e53d6a4c860d81618c8cae43456c28710f57869012f8a1781135502",
     "hermes_talk/history.py": "4a92c647fd31087a4228ae93537f9fc520650354d699a0e91309030797533146",
     "hermes_talk/jobs.py": "9f620108b204d5764b476efd66f952fa727f9d365e63c344364c3679c4f6d73c",
     "hermes_talk/receipts.py": "b79b50163ded53a5c14dc7d6ad62723f3f222e65da6f608714e385e4e22dac9b",
     "hermes_talk/spool.py": "b947b9655ebba380738007be1c35f4c2c3ab3b6757bb4d3a72330bf001128057",
-    "hermes_talk/store.py": "57e9789634a52211c09e0e9e6b104a197a0be143c098f146a6acb2179183f98f",
-    "hermes_talk/talk.py": "c8c2684edc9aed0c7bd517e1fe8eb5d96a9d663709552a1e432607c861acbf50",
-    "server.py": "eaa29e66c0c24abc7805941744b7b2d56a7223433fcedda0ff1957f1334ec697",
+    "hermes_talk/store.py": "fbac98a0c8eaf72810260a50b3fb234edf404b4a0ded78f5119d2b59ade0e0c5",
+    "hermes_talk/talk.py": "593f8a25ef4be0c87576ff8b0e245f17a73bfe6d31b21b8e11234d77a226115d",
+    "server.py": "1e22d0f02a463569c583553b9e481b600b174ee3d43ca07250300d6c27fe288e",
     "hermes_talk/gateway_rpc.py": "cb613445c7a6b1cc0101b35449c4153e1f59c462c1f23863cccd25b7af9f937a",
     "hermes_talk/pulse.py": "72cff697b95247e07a0998dbfab8d487c385eaed1a2484cfb0a46b801ae44af4",
     "hermes_talk/pulse_ledger.py": "c4bcc4ae8fd803ce6f86858b80b856dccbbec6f1de5df890b9a4c47dce5ac3ba",
@@ -30,6 +30,7 @@
     "hermes_talk/pulse_claims.py": "e48fb493ad58c172b103b3194b6fea63f6937d3ee8ffdf69fb378386086dd410",
     "hermes_talk/thread_inbox.py": "03fe9e99e9d4e04950712183d371bfc993f69391e0e21da29213288b8529efb9",
     "hermes_talk/thread_gateway.py": "a623b5aa6210d9040dea9c6296b4238e880d6dd62fcd720e9490986fe7451b51",
-    "hermes_talk/avatar.py": "128f29e49d7e943c5554d1c151d5ee2c58eb801953dfcff98cf56b7b31c7fe21"
+    "hermes_talk/avatar.py": "128f29e49d7e943c5554d1c151d5ee2c58eb801953dfcff98cf56b7b31c7fe21",
+    "hermes_talk/resume.py": "433881537241b83128c467e9cb3854586c01e1653e4e9e95c5fd1011ca62e494"
   }
 }
