@@ -1081,10 +1081,10 @@ def telegram_ambiguous_send(model):
         exhausted = settled_report(e, f["job"]["id"])
         assert exhausted.state == "failed" and exhausted.attempts == 3 and "gave up" in exhausted.error, exhausted
         TELEGRAM.reset("ok", "timeout")
-        _, g = e.task(conv, vs, "ambiguous zeta", "del_amb6")
+        _, g = e.task(conv, vs, "slow 2\nTITLE: Ambiguous zeta", "del_amb6")
         e.wait(g["job"]["id"], conv, vs)
         edited = settled_report(e, g["job"]["id"])
-        assert len(TELEGRAM.sent()) == 1 and shown_texts(edited.message_id)[-1] == "✅ ambiguous zeta", TELEGRAM.calls
+        assert len(TELEGRAM.sent()) == 1 and shown_texts(edited.message_id)[-1] == "✅ Ambiguous zeta", TELEGRAM.calls
         assert [x["outcome"] for x in TELEGRAM.calls if x["kind"] == "edit"][0] == "timeout", "a timed-out edit is repeated"
         e.close(keep=True)
         TELEGRAM.reset()

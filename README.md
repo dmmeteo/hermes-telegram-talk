@@ -340,7 +340,8 @@ when the task is accepted, and then edited at each real transition. It never car
 transcript, the prompt or a tool log, and secret-shaped text is redacted. The full result stays in the task's native
 Hermes session and reaches the user by voice.
 
-The title is the voice model's `TITLE:` line, which the call instructions ask for in English. Without a usable one,
+The title is the voice model's last-line `TITLE:`, which the call instructions ask for in English; a `TITLE:` line
+inside the task stays the user's text. Without a usable one,
 the request names the task, shortened the way Conduit titles a background job (`VoiceBackgroundJobs.title(for:)`:
 whitespace collapsed, at most 60 characters cut at a word), when it is English; otherwise it is "Hermes task N".
 Nothing is translated. Title and message id are stored with the task's report record.
@@ -362,7 +363,8 @@ no idempotency key, so a timeout or any unclassified error is uncertain too, nev
 further updates. Only errors that show nothing left (connection refused, rate limit) go back to pending, at most
 `receipts.attempts` times; the task never reruns. A sent message records its Bot API message id, and every later
 status edits that id. An edit is idempotent ("message is not modified" counts as done), so a timed-out edit is repeated
-up to `receipts.attempts` times and a restart repeats an edit that had not been confirmed. An edit Telegram refuses (the
+up to `receipts.attempts` times per status (waiting at least as long as Telegram's flood-control answer asks), and a
+restart repeats an edit that had not been confirmed or that gave up on temporary errors. An edit Telegram refuses (the
 message was deleted) is held until the next status; a new message is never sent. A status that changes while a call
 to Telegram is in flight is applied right after it, one call at a time per task. `receipts.max_chars` is no longer
 used.

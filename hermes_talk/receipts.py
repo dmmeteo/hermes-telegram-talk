@@ -12,8 +12,9 @@ so a crash or restart never sends it blindly again: a claim left by an earlier p
 Telegram's sendMessage has no idempotency key, so a timed-out or otherwise ambiguous send is "uncertain" too
 and never resent; such a task gets no further updates. Only failures that prove nothing was sent (refused
 connection, rate limit) go back to pending, at most `attempts` times. Once the message exists, every later
-status is an editMessageText of that message id. An edit is idempotent, so a lost or ambiguous one is simply
-repeated; one Telegram refuses for good is held until the next status.
+status is an editMessageText of that message id, with its own `attempts`. An edit is idempotent, so a lost or
+ambiguous one is simply repeated. One Telegram refuses (the message is gone) is held until the next status; one
+that kept failing for a temporary reason is held too, and a restart tries it again.
 
 The default destination is the private chat between the authenticated user and the bot whose signed
 initData opened the call. A configured named destination replaces it when the user asked for it explicitly.
@@ -46,12 +47,13 @@ EDIT_DONE, EDIT_RETRY, EDIT_FINAL = "done", "retry", "final"
 EDIT_REFUSED = ("message to edit not found", "message can't be edited", "chat not found", "bot was blocked",
                 "forbidden", "user is deactivated", "bad request", "not installed", "not configured")
 
-TITLE_LINE = re.compile(r"(?im)^\s*title\s*:\s*(.*?)\s*$")
+TITLE_LINE = re.compile(r"TITLE\s*:\s*(.*)")
 TITLE_CHARS = 60  # Conduit VoiceBackgroundJobs.maximumTitleCharacters
 TITLE_WORDS = 8
 # Markup that Hermes' formatter (first send) and a plain-text edit would render differently.
 MARKUP = re.compile(r"[*_`\[\]~|<>#\\]")
 DIRECTIVE = re.compile(r"(?im)^\s*report\s+to\s*:\s*(.+?)\s*$")
+RETRY_AFTER = re.compile(r"(?i)retry (?:in|after) (\d+(?:\.\d+)?)")
 
 
 class TransitionError(Exception):
@@ -79,13 +81,20 @@ def _english(text):
 
 
 def take_title(request):
-    """(request without TITLE lines, the voice model's few-word English title or "")."""
-    match = TITLE_LINE.search(request)
-    if match is None:
-        return request, ""
-    title = _plain(match.group(1))
-    usable = _english(title) and len(title.split()) <= TITLE_WORDS
-    return TITLE_LINE.sub("", request).strip(), conduit_title(title) if usable else ""
+    """(request without its title line, the voice model's few-word English title or ""). Only a last line
+    "TITLE: ..." (before or after a REPORT TO line) is the voice model's; any other line is the user's task."""
+    lines = request.split("\n")
+    for i in range(len(lines) - 1, -1, -1):
+        line = lines[i].strip()
+        if not line or DIRECTIVE.fullmatch(line):
+            continue
+        match = TITLE_LINE.fullmatch(line)
+        if match is None:
+            return request, ""
+        title = _plain(match.group(1))
+        usable = _english(title) and len(title.split()) <= TITLE_WORDS
+        return "\n".join(lines[:i] + lines[i + 1:]).strip(), conduit_title(title) if usable else ""
+    return request, ""
 
 
 def job_title(job, redact):
@@ -115,7 +124,8 @@ class Destination:
 @dataclass(frozen=True)
 class Report:
     """A task's one status message. `state` is whether the message exists; `status` is what it should show,
-    `shown` what Telegram confirmed it shows, `held` a status whose edit Telegram refused or that gave up."""
+    `shown` what Telegram confirmed it shows, `held` a status whose edit Telegram refused or that gave up;
+    `stalled` marks a give-up on temporary errors, which a restart retries."""
     job_id: str
     scope: str
     destination: dict
@@ -123,6 +133,7 @@ class Report:
     status: str = ""  # "" only for a report stored by an earlier version, which is kept as is
     shown: str = None
     held: str = None
+    stalled: bool = False
     state: str = PENDING
     attempts: int = 0
     not_before: float = 0.0
@@ -178,6 +189,12 @@ def classify(result):
     if any(m in lowered for m in NOT_SENT_RETRYABLE):
         return PENDING, None, error
     return UNCERTAIN, None, error
+
+
+def retry_after(error):
+    """Telegram's own wait in a flood-control answer, in seconds, if it named one."""
+    match = RETRY_AFTER.search(error or "")
+    return float(match.group(1)) if match else None
 
 
 def classify_edit(result):
@@ -289,7 +306,9 @@ class ReportDesk:
             elif not report.status or report.status == status:
                 return report
             else:
-                report = self._save(replace(report, status=status))
+                report = self._save(replace(report, status=status, attempts=0 if report.state == SENT else
+                                            report.attempts, not_before=0.0 if report.state == SENT else
+                                            report.not_before))
         self.dispatch(job.id)
         return report
 
@@ -337,8 +356,9 @@ class ReportDesk:
                                                                 owner=self.owner))
         return "edit", report.status, self._save(replace(report, attempts=report.attempts + 1))
 
-    def _retry_at(self, attempts):
-        return self.clock() + self.backoff[min(attempts - 1, len(self.backoff) - 1)]
+    def _retry_at(self, attempts, error=""):
+        wait = self.backoff[min(attempts - 1, len(self.backoff) - 1)]
+        return self.clock() + max(wait, retry_after(error) or 0.0)
 
     def _sent(self, job_id, status, result):
         report = self.reports[job_id]
@@ -347,7 +367,7 @@ class ReportDesk:
         if state == PENDING and report.attempts >= self.attempts:
             state, error = FAILED, f"{error} (gave up after {report.attempts} attempts)"
         if state == PENDING:
-            self._save(report.to(PENDING, error=error, owner=None, not_before=self._retry_at(report.attempts),
+            self._save(report.to(PENDING, error=error, owner=None, not_before=self._retry_at(report.attempts, error),
                                  notes=report.notes + (f"not sent: retry {report.attempts}",)))
         elif state == SENT:
             self._save(report.to(SENT, message_id=message_id, shown=status, attempts=0, error=error, owner=None))
@@ -357,14 +377,14 @@ class ReportDesk:
     def _edited(self, job_id, status, result):
         report = self.reports[job_id]
         outcome = classify_edit(result)
-        error = "" if outcome == EDIT_DONE else self.redact(str(result.get("error", "")))[:300]
+        error = self.redact(str(result.get("error") if isinstance(result, dict) else result))[:300]
         if outcome == EDIT_DONE:
-            self._save(replace(report, shown=status, attempts=0, error="", not_before=0.0))
+            self._save(replace(report, shown=status, attempts=0, error="", not_before=0.0, stalled=False))
         elif outcome == EDIT_RETRY and report.attempts < self.attempts:
-            self._save(replace(report, error=error, not_before=self._retry_at(report.attempts)))
+            self._save(replace(report, error=error, not_before=self._retry_at(report.attempts, error)))
         else:
-            self._save(replace(report, held=status, attempts=0, error=error, not_before=0.0,
-                               notes=report.notes + (f"edit to {status} not applied",)))
+            self._save(replace(report, held=status, stalled=outcome == EDIT_RETRY, attempts=0, error=error,
+                               not_before=0.0, notes=report.notes + (f"edit to {status} not applied",)))
 
     def _later(self, delay, job_id):
         timer = threading.Timer(delay, self.drive, args=(job_id,))
@@ -380,6 +400,8 @@ class ReportDesk:
                     self._save(report.to(UNCERTAIN, owner=None, error="Talk stopped during the send; it may or "
                                          "may not have arrived and was not resent.",
                                          notes=report.notes + ("claim found after restart",)))
+                elif report.stalled:
+                    self._save(replace(report, held=None, stalled=False, attempts=0, not_before=0.0))
             due = [r.job_id for r in self.reports.values() if r.status and (r.state == PENDING or r.needs_edit)]
         for job_id in due:
             self.dispatch(job_id)

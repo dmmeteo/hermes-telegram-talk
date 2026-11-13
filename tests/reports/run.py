@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Focused regression for Telegram task status messages (hermes_talk/receipts.py), offline and without Hermes.
 
-  python3 tests/reports/run.py        prints TALK_REPORTS_OK
+  python3 tests/reports/run.py               prints TALK_REPORTS_OK
+  HERMES_PYTHON tests/reports/run.py --host  also edits through Hermes' real Bot factory and python-telegram-bot
 
 One message per task, created once and then edited: its text is a status mark and a short English title,
 never the result. The real ReportDesk and TelegramSender run against an in-memory SessionDB stand-in, a
 scripted sender, and a synthetic Hermes sender module (tools.send_message_tool / tools.send_message_senders)
-that never contacts Telegram.
+that never contacts Telegram. With --host, under a Hermes runtime that has python-telegram-bot, the real
+tools.send_message_senders._telegram_bot Bot serializes editMessageText into a recording transport and maps
+Telegram's answers to its own errors; nothing leaves the process.
 """
 import asyncio
 import json
@@ -72,7 +75,9 @@ class ScriptedSender:
         return {"error": {"timeout": "Telegram edit failed: Timed out",
                           "not_modified": "Telegram edit failed: Message is not modified: specified new message "
                                           "content and reply markup are exactly the same",
-                          "gone": "Telegram edit failed: Message to edit not found"}[outcome]}
+                          "gone": "Telegram edit failed: Message to edit not found",
+                          "flood": "Telegram edit failed: Flood control exceeded. Retry in 0 seconds",
+                          "flood40": "Telegram edit failed: Flood control exceeded. Retry in 40 seconds"}[outcome]}
 
     def kinds(self):
         return [c["kind"] for c in self.calls]
@@ -106,7 +111,13 @@ def walk(desk, j, *states, settle_each=True):
 def titles():
     take = receipts.take_title
     assert take("check the flight\nTITLE: Check Oslo flights") == ("check the flight", "Check Oslo flights")
-    assert take("TITLE: Read inbox\nпрочитай почту") == ("прочитай почту", "Read inbox")
+    assert take("прочитай почту\nTITLE: Read inbox\n") == ("прочитай почту", "Read inbox")
+    assert take("TITLE: Read inbox\nпрочитай почту") == ("TITLE: Read inbox\nпрочитай почту", ""), \
+        "only a trailing TITLE line is the voice model's; one inside the task is the user's text"
+    assert take("Create a Jira issue.\nTitle: Fix login crash\nTITLE: File Jira issue") == \
+        ("Create a Jira issue.\nTitle: Fix login crash", "File Jira issue"), "the user's own Title: field stays"
+    assert take("alpha\nTITLE: Alpha task\nREPORT TO: ops") == ("alpha\nREPORT TO: ops", "Alpha task")
+    assert take("alpha\nREPORT TO: ops\nTITLE: Alpha task") == ("alpha\nREPORT TO: ops", "Alpha task")
     assert take("cancel task 3\nTITLE: Cancel task") == ("cancel task 3", "Cancel task")
     assert take("найди рейс\nTITLE: Найти рейс") == ("найди рейс", ""), "a non-English title is not used"
     assert take("x\nTITLE: " + "word " * 12) == ("x", ""), "more than a few words is not a title"
@@ -226,7 +237,49 @@ def edits_converge():
     walk(desk, k, jobs.SUCCEEDED)
     assert sender.kinds() == ["send", "edit", "edit"] and desk.get(k.id).shown == "completed"
     assert sender.kinds().count("send") == 1, "an edit failure never sends a second message"
-    return {"timeout_edit_retried": True, "not_modified": "success", "deleted_message": "held, retried on next status"}
+    sender = ScriptedSender("ok", "timeout", "timeout", "timeout", "ok")
+    desk = desk_for(MemoryHistory(), sender, backoff=(0.0, 1000.0))
+    k = walk(desk, job(title="Fresh budget"), jobs.ACCEPTED)
+    k = k.to(jobs.RUNNING)
+    desk.follow(k)
+    deadline = time.time() + 5
+    while desk.get(k.id).attempts < 2 and time.time() < deadline:
+        time.sleep(0.01)
+    assert desk.get(k.id).attempts == 2 and desk.get(k.id).shown == "queued", "running edit waits after two timeouts"
+    walk(desk, k, jobs.SUCCEEDED)
+    assert desk.get(k.id).shown == "completed", "the final status gets its own retry budget, not running's leftovers"
+    history = MemoryHistory()
+    sender = ScriptedSender("ok", "flood", "flood", "flood")
+    desk = desk_for(history, sender)
+    k = walk(desk, job(title="Flooded"), jobs.ACCEPTED, jobs.RUNNING)
+    stalled = desk.get(k.id)
+    assert stalled.shown == "queued" and stalled.held == "running" and stalled.stalled, stalled
+    restarted = desk_for(history, ScriptedSender())
+    restarted.reconcile()
+    assert settle(restarted, k.id).shown == "running", "a restart retries an edit that gave up on a temporary error"
+    gone = desk_for(history, ScriptedSender("ok", "gone"))
+    k2 = walk(gone, job(number=7, title="Gone"), jobs.ACCEPTED, jobs.RUNNING)
+    again = desk_for(history, ScriptedSender())
+    again.reconcile()
+    time.sleep(0.2)
+    assert not again.sender.calls and again.get(k2.id).held == "running", "a refused edit is not retried by a restart"
+    wait = receipts.retry_after("Telegram edit failed: Flood control exceeded. Retry in 40 seconds")
+    assert wait == 40.0 and receipts.retry_after("Timed out") is None
+    clock = Clock()
+    flood = desk_for(MemoryHistory(), ScriptedSender("ok", "flood40"), clock)
+    k4 = walk(flood, job(title="Flood wait", created=clock.now + 1), jobs.ACCEPTED).to(jobs.RUNNING)
+    flood.follow(k4)
+    deadline = time.time() + 5
+    while not flood.get(k4.id).error and time.time() < deadline:
+        time.sleep(0.01)
+    flooded = flood.get(k4.id)
+    assert flooded.not_before >= clock.now + 40 and flooded.shown == "queued", ("Telegram's flood wait is honored", flooded)
+    odd = desk_for(MemoryHistory(), ScriptedSender())
+    odd.sender.edit = lambda destination, message_id, text: None
+    k3 = walk(odd, job(title="Odd sender"), jobs.ACCEPTED, jobs.RUNNING)
+    assert odd.get(k3.id).held == "running" or odd.get(k3.id).stalled, odd.get(k3.id)
+    return {"timeout_edit_retried": True, "not_modified": "success", "deleted_message": "held, retried on next status",
+            "fresh_budget_per_status": True, "flood": "stalled, retried after restart", "retry_after_s": wait}
 
 
 def restart_recovery():
@@ -369,6 +422,54 @@ def no_detail_in_messages():
     return {"max_text_chars": max(len(c["text"]) for c in sender.calls), "attachments": 0}
 
 
+def real_telegram_edit():
+    from telegram.request import BaseRequest
+    import tools.send_message_senders as senders
+
+    class Recording(BaseRequest):
+        def __init__(self, replies):
+            self.replies, self.seen = list(replies), []
+
+        @property
+        def read_timeout(self):
+            return 1.0
+
+        async def initialize(self):
+            pass
+
+        async def shutdown(self):
+            pass
+
+        async def do_request(self, url, method, request_data=None, read_timeout=None, write_timeout=None,
+                             connect_timeout=None, pool_timeout=None):
+            self.seen.append((url.rsplit("/", 1)[-1], dict(request_data.parameters) if request_data else {}))
+            status, body = self.replies.pop(0)
+            return status, json.dumps(body).encode()
+
+    message = {"message_id": 8001, "date": 0, "chat": {"id": USER, "type": "private"}, "text": "✅ Check build"}
+    refusal = lambda text: (400, {"ok": False, "error_code": 400, "description": "Bad Request: " + text})
+    transport = Recording([(200, {"ok": True, "result": message}),
+                           refusal("message is not modified: specified new message content and reply markup are "
+                                   "exactly the same as a current content and reply markup of the message"),
+                           refusal("message to edit not found")])
+    real_factory = senders._telegram_bot
+    bot = real_factory(TOKEN)
+    bot._request = (transport, transport)
+    senders._telegram_bot = lambda token: bot
+    try:
+        sender = receipts.TelegramSender(TOKEN, timeout=5.0)
+        dest = receipts.Destination.private(USER, BOT)
+        outcomes = [receipts.classify_edit(sender.edit(dest, "8001", "✅ Check build")) for _ in range(3)]
+    finally:
+        senders._telegram_bot = real_factory
+    assert transport.seen[0] == ("editMessageText", {"chat_id": USER, "message_id": 8001, "text": "✅ Check build"}), \
+        transport.seen
+    assert outcomes == [receipts.EDIT_DONE, receipts.EDIT_DONE, receipts.EDIT_FINAL], outcomes
+    import telegram
+    return {"python_telegram_bot": telegram.__version__, "factory": real_factory.__module__ + "._telegram_bot",
+            "request": transport.seen[0], "answers": ["ok", "not modified -> done", "not found -> final"]}
+
+
 CHECKS = (titles, one_message_lifecycle, coalesced_transitions, uncertain_create_never_resent,
           refused_create_retries_then_fails, edits_converge, restart_recovery, binding_and_since,
           telegram_sender_contract, no_detail_in_messages)
@@ -376,7 +477,8 @@ CHECKS = (titles, one_message_lifecycle, coalesced_transitions, uncertain_create
 
 def main():
     failures, evidence = 0, {}
-    for check in CHECKS:
+    checks = ((real_telegram_edit,) if "--host" in sys.argv[1:] else ()) + CHECKS
+    for check in checks:
         try:
             evidence[check.__name__] = check()
             print(f"PASS [reports] {check.__name__}", flush=True)
@@ -386,7 +488,7 @@ def main():
             print(f"FAIL [reports] {check.__name__}: {type(exc).__name__}: {exc}\n{traceback.format_exc()[-1500:]}",
                   flush=True)
     print(json.dumps(evidence, indent=1, default=str, ensure_ascii=False))
-    print(f"{len(CHECKS) - failures}/{len(CHECKS)} report checks passed")
+    print(f"{len(checks) - failures}/{len(checks)} report checks passed")
     print("TALK_REPORTS_" + ("FAILED" if failures else "OK"))
     return 1 if failures else 0
 

@@ -219,13 +219,12 @@ class TalkRuntime:
         if self.desk is None:
             return ""
         names = ", ".join(d.name for d in self._destinations(user_id))
-        note = (" Each task also keeps one short status message in the user's Telegram chat with this bot: its "
-                "title and whether it is queued, running, completed, failed or cancelled, never its result. When "
-                "you delegate a new task, end it with a line \"TITLE: <two to five English words naming the "
-                "task>\", in English even when you speak another language.")
+        note = (" Each task also keeps one Telegram status message (its title and state, never its result). End each "
+                "new delegated task with a line \"TITLE: <two to five English words naming the task>\", in English "
+                "even if you speak another language.")
         if names:
-            note += (f" Only if the user explicitly asks for the status message to go to one of: {names}, also end "
-                     "the delegated task with a line \"REPORT TO: <name>\"; it then goes there instead.")
+            note += (f" Only if the user explicitly asks for that message to go to one of: {names}, also add a line "
+                     "\"REPORT TO: <name>\".")
         return note
 
     def _report_to(self, user_id, request):

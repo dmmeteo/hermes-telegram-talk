@@ -1,7 +1,7 @@
 {
   "source": "hermes-telegram-talk: native task backend, receipts, mobile/rename integration and Pulse; exact tested bytes",
   "files": {
-    "INTERFACE.md": "92d257a151191d68b5e493966528add70f9b0e72c7e8aa65913b0871dfa2a297",
+    "INTERFACE.md": "ad358cb242a43e21cd34149aa7bec241a8e67f89060c687075cc868eddc3712b",
     "LICENSE": "d72ed8a5d34acc8d19d9d7590b4b98709bb48c3d2f3c0779e744b24e3d232b84",
     "hermes_talk/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "hermes_talk/activity.py": "cc447623de468bd5fbab44638b039c5cc21957dba6fd017b8b2c1ee2a4da86be",
@@ -12,10 +12,10 @@
     "hermes_talk/fixtures.py": "fd30721b7e53d6a4c860d81618c8cae43456c28710f57869012f8a1781135502",
     "hermes_talk/history.py": "4a92c647fd31087a4228ae93537f9fc520650354d699a0e91309030797533146",
     "hermes_talk/jobs.py": "5aa2bbef85c036dc787681b07b8ff8b81cfcbba2f0a8bc4b01e5420b7e012429",
-    "hermes_talk/receipts.py": "e6cdf1e1bdae37af4ff9b7be795c8714a5e6c56a5a36bd7e4d9448e6c9befdcf",
+    "hermes_talk/receipts.py": "44f03b5e38f89fbfdb673e4f8a5dc6984223d6d395e91f9590dfd975d0431848",
     "hermes_talk/spool.py": "b947b9655ebba380738007be1c35f4c2c3ab3b6757bb4d3a72330bf001128057",
     "hermes_talk/store.py": "57e9789634a52211c09e0e9e6b104a197a0be143c098f146a6acb2179183f98f",
-    "hermes_talk/talk.py": "8ac663ef8d33ea8ccdc93031a69543136c75460e3e137bc850998d560d8294d4",
+    "hermes_talk/talk.py": "0050f2d31310cae7323bab2261844442e572922a029fb9c52887be50dc90c41e",
     "server.py": "eaa29e66c0c24abc7805941744b7b2d56a7223433fcedda0ff1957f1334ec697",
     "hermes_talk/gateway_rpc.py": "cb613445c7a6b1cc0101b35449c4153e1f59c462c1f23863cccd25b7af9f937a",
     "hermes_talk/pulse.py": "72cff697b95247e07a0998dbfab8d487c385eaed1a2484cfb0a46b801ae44af4",
