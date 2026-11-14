@@ -321,8 +321,10 @@ def persistent_two_call_history(model):
         e = Env(model, root=root)
         conv2, vs2 = e.call()
         assert conv2 == conv, "the account's conversation survives a service restart"
-        text = e.instructions()
-        assert text.index("user: alpha question") < text.index("assistant: alpha answer"), text
+        # The previous call reaches the next one as session.initial_items, in order, never as instruction text.
+        items = [(i["role"], i["content"][0]["text"]) for i in e.fake.posts[-1][2]["session"].get("initial_items", [])]
+        assert items.index(("user", "alpha question")) < items.index(("assistant", "alpha answer")), items
+        assert "alpha question" not in e.instructions()
         e.events(conv, vs2, ("user", "recall"))
         _, second = e.task(conv, vs2, "recall", "del_h2")
         job2 = e.wait(second["job"]["id"], conv, vs2)

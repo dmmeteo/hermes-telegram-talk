@@ -156,6 +156,7 @@ class GatewayAgent:
         self._drain = None
         self._attached = set()  # sessions this connection is attached to (a reopened one is attached to none)
         self.finals = {}
+        self._orphans = set()  # jobs whose lost admission this agent already asked the gateway to settle
 
     def readiness(self):
         return readiness(self.tasks, self.home, self._available)
@@ -286,6 +287,12 @@ class GatewayAgent:
                 self.finals[job.id] = None  # the gateway no longer knows this admission: outcome unknown
                 return True
             return False  # unreachable: still unknown, keep following
+        if receipt.get("status") == "unknown" and job.id not in self._orphans:
+            # The gateway that ran it is gone and the core recovered it as unknown: nothing runs it any more.
+            # One interrupt with its generation lets the core settle it as interrupted now, never rerun.
+            if self.stop(job):
+                self._orphans.add(job.id)
+            return False
         if receipt.get("status") != "terminal":
             return False
         try:
