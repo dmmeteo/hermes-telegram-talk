@@ -1,7 +1,7 @@
 {
   "source": "hermes-telegram-talk: native task backend, receipts, mobile/rename integration and Pulse; exact tested bytes",
   "files": {
-    "INTERFACE.md": "ad358cb242a43e21cd34149aa7bec241a8e67f89060c687075cc868eddc3712b",
+    "INTERFACE.md": "1036edf852d9c6fd2b427e07dc0f63e91cdad91e2b92123671a81f987158755d",
     "LICENSE": "d72ed8a5d34acc8d19d9d7590b4b98709bb48c3d2f3c0779e744b24e3d232b84",
     "hermes_talk/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "hermes_talk/activity.py": "cc447623de468bd5fbab44638b039c5cc21957dba6fd017b8b2c1ee2a4da86be",

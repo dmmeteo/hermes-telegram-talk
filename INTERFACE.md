@@ -37,7 +37,7 @@ These notes are backend-owned and add no field. Changing or removing a field abo
   - 502: upstream rejected the call or returned an invalid answer.
   - 503: no ChatGPT sign-in on the host. No API fallback exists.
 - **Avatar.** `profile.avatar_url` is the same-origin path `/tg-voice/avatar`. It serves the configured local file (neutral SVG by default) with a sandboxing CSP.
-- **Greeting.** The instructions tell the model to speak first only after the call connects. The frontend should request the first response once the data channel is open, and only if `greeting_enabled` is true.
+- **Greeting.** With `greeting_enabled` the instructions end with a speak-first opening policy, so the model opens the call itself (Conduit `greetingApplied`). The frontend sends nothing at connect; it asks once with a speakable `session.context.append` only if the model and the user stay silent for 4 s of audible call. Without it the policy is wait-for-user and the frontend asks for nothing.
 - **Tasks.** Starting or cancelling Hermes work from voice is not supported in this build, and the instructions tell the model to say so. `End` (`api/end`) never cancels anything.
 - **Fixtures.** `python3 -m hermes_talk.fixtures --port 8792` runs the real server with synthetic history, credential and upstream, and prints a signed synthetic initData. `hermes_talk.fixtures.sign_init_data(user_id, auth_date)` signs others. Real initData is never generated.
 
