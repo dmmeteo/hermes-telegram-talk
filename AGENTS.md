@@ -28,8 +28,10 @@ Pulse model steps (selection, memory extraction, follow-up checks) call only the
 override (see `docs/adr/0002-pulse-engine-model-route.md`); tests reach `tests/pulse/model_fixture.py` through it,
 never a provider. Never add a model-role slot, credential or billing path for Pulse.
 Pulse read state is per card and per call: being in the instructions is exposure, never hearing; only a named,
-answered mention or feedback acknowledges a card (see README "Pulse" and `docs/adr/0001-pulse-per-item-evidence.md`). For task scheduling or capacity changes, `python3 tests/capacity/run.py` must print `TALK_CAPACITY_OK` (3 running + 5
-queued from one call in independent native sessions; see `docs/adr/0010-parallel-tasks-of-one-call.md`).
+answered mention or feedback acknowledges a card (see README "Pulse" and `docs/adr/0001-pulse-per-item-evidence.md`). For task scheduling or capacity changes, `python3 tests/capacity/run.py` must print `TALK_CAPACITY_OK` (3 running
+from one call in independent native sessions, the rest waiting uncapped; see `docs/adr/0010-parallel-tasks-of-one-call.md`).
+For task kinds, T3 work, task controls or status-message visibility, `python3 tests/work/run.py` must print
+`TALK_WORK_OK` (see `docs/adr/0011-t3-work-and-task-visibility.md`).
 For task, context or delegation changes, `python3 tests/e2e/run-agent.py --require-hermes` must print `TALK_AGENT_OK` and
 `python3 tests/e2e/run-agent.py --browser <out-dir>` `TALK_AGENT_BROWSER_OK`. Voice tasks run as native Hermes sessions:
 either `hermes chat` single-query processes or (manager-authorized 2026-11-03, for current cores whose CLI rejects

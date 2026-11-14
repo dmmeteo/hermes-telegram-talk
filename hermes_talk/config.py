@@ -46,7 +46,6 @@ class Tasks:
     toolsets: tuple = ()
     workdir: Path = None
     max_concurrent: int = 1
-    max_open_per_user: int = 3
     run_budget_s: int = 600
     max_turns: int = 30
     request_chars: int = 2000
@@ -71,6 +70,8 @@ class Receipts:
     attempts: int = 3
     backoff_s: tuple = (5.0, 30.0)
     send_timeout_s: float = 30.0
+    large_work: bool = True  # default for tasks T3 admitted work from; each user may switch it (notify.py)
+    micro_tasks: bool = False  # default for every other task
 
 
 @dataclass(frozen=True)
@@ -231,8 +232,7 @@ def _voices(value, default):
 def _tasks(data, base_dir):
     if not isinstance(data, dict):
         raise ConfigError("tasks must be a mapping")
-    unknown = set(data) - {"enabled", "user_ids", "toolsets", "workdir", "max_concurrent", "max_open_per_user",
-                           "run_budget_seconds", "max_turns", "request_chars", "result_chars"}
+    unknown = set(data) - {"enabled", "user_ids", "toolsets", "workdir", "max_concurrent", "run_budget_seconds", "max_turns", "request_chars", "result_chars"}
     if unknown:
         raise ConfigError(f"unknown tasks keys: {sorted(unknown)}")
     if not data.get("enabled", False):
@@ -251,7 +251,6 @@ def _tasks(data, base_dir):
     return Tasks(enabled=True, user_ids=tuple(dict.fromkeys(users)), toolsets=tuple(dict.fromkeys(toolsets)),
                  workdir=workdir,
                  max_concurrent=_int(data.get("max_concurrent", 1), "tasks.max_concurrent", 1, 3),
-                 max_open_per_user=_int(data.get("max_open_per_user", 3), "tasks.max_open_per_user", 1, 8),
                  run_budget_s=_int(data.get("run_budget_seconds", 600), "tasks.run_budget_seconds", 20, 3600),
                  max_turns=_int(data.get("max_turns", 30), "tasks.max_turns", 1, 200),
                  request_chars=_int(data.get("request_chars", 2000), "tasks.request_chars", 20, 4000),
@@ -266,7 +265,7 @@ PRIVATE_NAMES = ("this chat", "telegram", "here", "my chat")
 def _receipts(data, tasks):
     if not isinstance(data, dict):
         raise ConfigError("receipts must be a mapping")
-    unknown = set(data) - {"enabled", "destinations", "max_chars", "attempts"}
+    unknown = set(data) - {"enabled", "destinations", "max_chars", "attempts", "large_work", "micro_tasks"}
     if unknown:
         raise ConfigError(f"unknown receipts keys: {sorted(unknown)}")
     if data.get("enabled", True) not in (True, False):
@@ -288,9 +287,13 @@ def _receipts(data, tasks):
             raise ConfigError(f"receipts.destinations.{name}.user_ids must list task users allowed to choose it")
         destinations.append(ReportDestination(name, int(match.group(1)),
                                               int(match.group(2)) if match.group(2) else None, tuple(users)))
+    for key in ("large_work", "micro_tasks"):
+        if data.get(key, True) not in (True, False):
+            raise ConfigError(f"receipts.{key} must be true or false")
     return Receipts(enabled=True, destinations=tuple(destinations),
                     max_chars=_int(data.get("max_chars", 700), "receipts.max_chars", 200, 1800),
-                    attempts=_int(data.get("attempts", 3), "receipts.attempts", 1, 5))
+                    attempts=_int(data.get("attempts", 3), "receipts.attempts", 1, 5),
+                    large_work=data.get("large_work", True), micro_tasks=data.get("micro_tasks", False))
 
 
 def _self_reference(persona):

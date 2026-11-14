@@ -126,6 +126,18 @@ class MemoryExtras:
         return [] if text is None else [{"chat_id": int(chat_id or user_id), "text": text, "url": url,
                                          "message_thread_id": thread_id}]
 
+    def notify_flow(self, home, user_id, chat_id=None, chat_type="private", tap=None, tapper=None):
+        from hermes_talk.thread_gateway import notify_panel, notify_switch
+        chat = chat_id or user_id
+        text, buttons = notify_panel(home, BOT_ID, user_id, chat_type, chat)
+        out = [] if text is None else [("sendMessage", text, [b[0] for b in buttons or ()], [b[1] for b in buttons or ()])]
+        if tap is not None:
+            text, buttons = notify_switch(home, BOT_ID, tapper or user_id, chat_type, chat, tap)
+            out.append(("answerCallbackQuery", None, [], []))
+            if text is not None:
+                out.append(("editMessageText", text, [b[0] for b in buttons], [b[1] for b in buttons]))
+        return out
+
     def payload(self, caption, paths):
         return caption + "\n\n" + "\n".join(f"[Image attached at: {p}]" for p in paths)
 
@@ -626,6 +638,30 @@ def run(history_factory, event_factory, dispatch, out, extras=None):
             assert extras.talk_command(rig.home, 999000111, chat_id=-100555, chat_type="supergroup") == []
             (rig.home / "plugin-data" / "hermes-talk" / "threads" / "launch.json").unlink()
             assert extras.talk_command(rig.home, fx.USER_ID) == [], "no voice server: no answer and no handle"
+        finally:
+            rig.close()
+
+    @check("talk_notify_switches_status_messages_for_task_users_only")
+    def _():
+        tasks = {"enabled": True, "user_ids": [fx.USER_ID], "toolsets": ["file"], "workdir": "."}
+        rig = Rig(history_factory, data=fx.config_data(tasks=tasks))
+        try:
+            panel = extras.notify_flow(rig.home, fx.USER_ID)
+            assert [p[0] for p in panel] == ["sendMessage"] and panel[0][2] == ["T3 code work: on", "Quick requests: off"], panel
+            assert panel[0][3] == ["talk_notify:large", "talk_notify:micro"], panel
+            tapped = extras.notify_flow(rig.home, fx.USER_ID, tap="talk_notify:micro")
+            assert [p[0] for p in tapped] == ["sendMessage", "answerCallbackQuery", "editMessageText"], tapped
+            assert tapped[-1][2] == ["T3 code work: on", "Quick requests: on"], tapped
+            scope = rig.talk.account(fx.USER_ID).key
+            assert rig.talk.visibility(scope).public() == {"large": True, "micro": True}, "the voice server reads it"
+            assert rig.talk.visibility(rig.talk.account(fx.OTHER_USER_ID).key).public() == {"large": True, "micro": False}
+            assert extras.notify_flow(rig.home, fx.OTHER_USER_ID) == [], "not a task user: no answer"
+            assert extras.notify_flow(rig.home, 999000111) == []
+            foreign = extras.notify_flow(rig.home, fx.USER_ID, tap="talk_notify:large", tapper=fx.OTHER_USER_ID)
+            assert [p[0] for p in foreign] == ["sendMessage", "answerCallbackQuery"], foreign
+            assert rig.talk.visibility(scope).public() == {"large": True, "micro": True}, "another user's tap changes nothing"
+            group = extras.notify_flow(rig.home, fx.USER_ID, chat_id=-100555, chat_type="supergroup")
+            assert len(group) == 1 and group[0][2] == [] and "private chat" in group[0][1], group
         finally:
             rig.close()
 

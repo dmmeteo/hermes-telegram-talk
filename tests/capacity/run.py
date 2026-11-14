@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Task capacity gate: three tasks of one call run at once in independent native sessions, five more wait.
+"""Task capacity gate: three tasks of one call run at once in independent native sessions; the rest wait, uncapped.
 
   python3 tests/capacity/run.py      prints TALK_CAPACITY_OK
 
@@ -33,14 +33,15 @@ from hermes_talk.talk import TalkRuntime  # noqa: E402
 
 RUNNER = ROOT / "tests" / "capacity" / "runner.py"
 DEFAULT_TASKS = "tasks:\n  enabled: true\n  user_ids: [{user}]\n  toolsets: [file]\n  workdir: {work}\n"
-DESIRED = "  max_concurrent: 3\n  max_open_per_user: 8\n"
-CAPACITY = {"max_concurrent": 3, "max_open_per_user": 8}  # what DESIRED parses to (desired_yaml_parses_and_bounds_hold)
+DESIRED = "  max_concurrent: 3\n"
+CAPACITY = {"max_concurrent": 3}  # what DESIRED parses to (desired_yaml_parses_and_bounds_hold)
+SHOW_ALL = "receipts:\n  micro_tasks: true\n"  # every task posts, so each one's message is checked
 
 
-def yaml_text(work, tasks_extra=""):
+def yaml_text(work, tasks_extra="", receipts=SHOW_ALL):
     base = fx.config_data()
     head = "".join(f"{key}: {json.dumps(value)}\n" for key, value in base.items())
-    return head + DEFAULT_TASKS.format(user=fx.USER_ID, work=work) + tasks_extra
+    return head + DEFAULT_TASKS.format(user=fx.USER_ID, work=work) + tasks_extra + receipts
 
 
 class BoundedAgent(NativeAgent):
@@ -177,14 +178,13 @@ def desired_yaml_parses_and_bounds_hold():
         path = root / "talk.yaml"
         path.write_text(yaml_text(root, DESIRED))
         tasks = load_config(path).tasks
-        assert {"max_concurrent": tasks.max_concurrent, "max_open_per_user": tasks.max_open_per_user} == CAPACITY, tasks
+        assert {"max_concurrent": tasks.max_concurrent} == CAPACITY, tasks
         path.write_text(yaml_text(root))
         tasks = load_config(path).tasks
-        assert (tasks.max_concurrent, tasks.max_open_per_user) == (1, 3), "unset keys keep their defaults"
+        assert tasks.max_concurrent == 1 and not hasattr(tasks, "max_open_per_user"), "no open cap exists"
         refused = {}
         for extra in ("  max_concurrent: 0\n", "  max_concurrent: 4\n", "  max_concurrent: '3'\n",
-                      "  max_concurrent: true\n", "  max_open_per_user: 0\n", "  max_open_per_user: 9\n",
-                      "  max_open_per_user: 2.5\n"):
+                      "  max_concurrent: true\n", "  max_open_per_user: 8\n"):
             path.write_text(yaml_text(root, extra))
             try:
                 load_config(path)
@@ -192,7 +192,7 @@ def desired_yaml_parses_and_bounds_hold():
                 refused[extra.strip()] = str(exc)
                 continue
             raise AssertionError(f"accepted an invalid capacity: {extra!r}")
-        return {"desired": {"max_concurrent": 3, "max_open_per_user": 8}, "refused": refused}
+        return {"desired": CAPACITY, "refused": refused}
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -218,13 +218,9 @@ def eight_open_three_running_one_call():
         assert len({starts[k]["session"] for k in ("k1", "k2", "k3")}) == 3, starts
         assert len({starts[k]["pid"] for k in ("k1", "k2", "k3")}) == 3, starts
 
-        posts_before, open_before = len(w.posts.calls), len(w.talk.board.jobs)
         status, ninth = w.task(conv, vs, "k9")
-        assert status == 429 and "Too many Hermes tasks" in ninth.get("error", ""), (status, ninth)
-        time.sleep(0.3)
-        assert len(w.talk.board.jobs) == open_before and len(w.posts.calls) == posts_before, "the ninth leaves nothing"
-        assert w.history.get_meta(jobs.delegation_key(w.talk.account(fx.USER_ID).key, conv, 1, "del_k9")) is None
-        assert "k9" not in {r["key"] for r in w.ledger()}
+        assert status == 200 and ninth["created"] and ninth["job"]["state"] == "accepted", (status, ninth)
+        assert w.by_state("accepted") == [f"k{n}" for n in range(4, 10)], "a ninth open task waits too: no open cap"
         status, again = w.task(conv, vs, "k2")
         assert status == 200 and not again["created"] and again["job"]["number"] == 2, again
 
@@ -251,30 +247,32 @@ def eight_open_three_running_one_call():
             w.release(key)
         w.until(lambda: w.states()["k7"] == "running", "k7 promoted")
         w.release("k7")
+        w.release("k9")
         w.until(lambda: not w.by_state("running") and not w.by_state("accepted"), "all settled")
-        assert w.by_state("succeeded") == ["k1", "k2", "k4", "k5", "k6", "k7"] and \
+        assert w.by_state("succeeded") == ["k1", "k2", "k4", "k5", "k6", "k7", "k9"] and \
             w.by_state("cancelled") == ["k3", "k8"], w.states()
         started = sorted((j.number, j.started) for j in w.talk.board.jobs.values() if j.started)
         order = [f"k{n}" for n, _ in started]
-        assert order == ["k1", "k2", "k3", "k4", "k5", "k6", "k7"] and \
+        assert order == ["k1", "k2", "k3", "k4", "k5", "k6", "k7", "k9"] and \
             all(a[1] <= b[1] for a, b in zip(started, started[1:])), ("FIFO admission", started)
         assert peak(w.ledger()) == 3, peak(w.ledger())
         assert w.talk.store.agent_session(conv) == own
-        stored = {j.request.split()[-1]: (j.parallel, json.loads(w.history.get_meta(jobs.job_key(j.id))))
+        stored = {j.request.split()[-1]: (j.parallel, json.loads(w.history.get_meta(jobs.job_key(j.id))),
+                                          json.loads(w.history.get_meta(jobs.work_key(j.id)) or "{}"))
                   for j in w.talk.board.jobs.values()}
-        assert all(d.get("parallel", False) is flag and ("parallel" in d) == flag for flag, d in stored.values()), \
-            ("only parallel jobs store the key, so an older Talk still loads the rest", stored)
-        assert {k for k, (flag, _) in stored.items() if flag} >= {"k2", "k3", "k4", "k5"} and \
-            not any(stored[k][0] for k in ("k1", "k6", "k8")), {k: f for k, (f, _) in stored.items()}
+        assert all("parallel" not in d and e.get("parallel", False) is flag for flag, d, e in stored.values()), \
+            ("the lane flag lives beside the base record, so an older Talk still loads every job", stored)
+        assert {k for k, (flag, _, _) in stored.items() if flag} >= {"k2", "k3", "k4", "k5"} and \
+            not any(stored[k][0] for k in ("k1", "k6", "k8")), {k: f for k, (f, _, _) in stored.items()}
 
         for job in w.talk.board.jobs.values():
             w.talk.desk.wait_settled(job.id, 10)
         shown = w.posts.shown()
         sends = [c for c in w.posts.calls if c[0] == "send"]
-        assert len(sends) == 8 and len(shown) == 8, ("one status message per task", w.posts.calls)
+        assert len(sends) == 9 and len(shown) == 9, ("one status message per task", w.posts.calls)
         finals = sorted(texts[-1] for texts in shown.values())
-        assert finals == sorted([f"✅ hold k{n}" for n in (1, 2, 4, 5, 6, 7)] + ["⏹ hold k3", "⏹ hold k8"]), finals
-        return {"running_at_once": ["k1", "k2", "k3"], "queued": ["k4", "k5", "k6", "k7", "k8"], "ninth": status,
+        assert finals == sorted([f"✅ hold k{n}" for n in (1, 2, 4, 5, 6, 7, 9)] + ["⏹ hold k3", "⏹ hold k8"]), finals
+        return {"running_at_once": ["k1", "k2", "k3"], "queued": ["k4", "k5", "k6", "k7", "k8", "k9"], "ninth": status,
                 "sessions": {k: (starts[k]["resume"] == own and "conversation") or "fresh" for k in ("k1", "k2", "k3")},
                 "start_order": order, "peak_running": 3, "status_messages": len(shown)}
     finally:
@@ -303,6 +301,8 @@ def restart_adopts_three_runs_and_keeps_lanes():
             job = jobs.new_job(scope, conv, vs, 1, f"del_{key}", n, f"hold {key}", now + n * 0.01)
             job = replace(job, **fields)
             history.set_meta(jobs.job_key(job.id), jobs.dump(job))
+            if jobs.dump_extra(job):
+                history.set_meta(jobs.work_key(job.id), jobs.dump_extra(job))
             seeded[key] = job
 
         for n, (key, resume) in enumerate((("r1", own), ("r2", None), ("r3", None)), start=1):

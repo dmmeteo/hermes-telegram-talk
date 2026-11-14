@@ -12,7 +12,7 @@ import threading
 import time
 from dataclasses import asdict
 
-from . import activity, pulse, pulse_policy, resume
+from . import activity, notify, pulse, pulse_policy, resume
 from .agent import Readiness
 from .gateway_rpc import TASK_SOURCE, task_agent
 from .config import PRIVATE_NAMES
@@ -35,6 +35,10 @@ SECRETS = [re.compile(p) for p in (
 )]
 CANCEL = re.compile(r"(?i)^\s*(?:please\s+)?(?:cancel|stop)\s+(?:hermes\s+)?task\s*#?\s*(\d{1,4})\b")
 RESULT = re.compile(r"(?i)^\s*(?:the\s+)?(?:full\s+)?result\s+of\s+(?:hermes\s+)?task\s*#?\s*(\d{1,4})\s*[.!?]?\s*$")
+# The application-owned control line the voice model delegates for existing tasks, whatever language was spoken.
+CONTROL = re.compile(r"(?i)^\s*control\s*:\s*(list|status|result|cancel)(?:\s+(?:hermes\s+)?(?:task\s*)?#?\s*(\d{1,4}))?"
+                     r"\s*[.!?]?\s*$")
+LIST_FINISHED = 5
 
 SYNOPSIS_CHARS = 160
 RESUME_ROWS = 10000
@@ -46,8 +50,10 @@ CHAT_CHARS = 8000  # chat input carried by one context update; the rest follows 
 TASK_PROMPT = (
     "[Hermes Telegram Talk voice task {number}. It was delegated from a Telegram voice call and nobody watches this run "
     "live. Use your tools as needed. Nobody can approve a flagged action during this run: if one is blocked, say "
-    "so instead of working around it. End with a short plain-language result that can be read aloud, in the "
-    "language of the conversation.]"
+    "so instead of working around it. If this task is code work you hand to a T3 thread with t3_control (start, or "
+    "send to a thread listed below), do it once and end your turn without waiting for the thread: Talk follows "
+    "the thread itself and reports its outcome. End with a short plain-language result that can be read aloud, in "
+    "the language of the conversation.]"
 )
 NOT_READY = Readiness(False, "Tasks are not available for this account.")
 SNOOZE_S = 3 * 3600
@@ -88,7 +94,7 @@ class TalkRuntime:
     activity_scan_max = 1000
 
     def __init__(self, config, bot_token, history, soul=None, skill=native_skill, clock=time.time,
-                 agent=None, home=None, sender=None, model=None, spawn=None):
+                 agent=None, home=None, sender=None, model=None, spawn=None, t3=None):
         self.config = config
         self.bot_id = bot_token.split(":", 1)[0]
         self.history = history
@@ -104,6 +110,7 @@ class TalkRuntime:
         self._last_greeting = {}
         # Chat input from the exact Telegram thread a call continues (see thread_inbox.py); needs the profile home.
         self.inbox = ThreadInbox(home, clock) if home is not None else None
+        self.home = home
         self._threads = {}
         self.board = self.desk = None
         if config.tasks.enabled:
@@ -113,14 +120,29 @@ class TalkRuntime:
                 history.set_meta(SINCE_KEY, "")  # turning reports back on later reports nothing from this gap
             if r.enabled:
                 self.desk = ReportDesk(history, sender or TelegramSender(bot_token, r.send_timeout_s), clock,
-                                       r.attempts, r.backoff_s, redact, lambda text: ask_title(self.model, text))
+                                       r.attempts, r.backoff_s, redact, lambda text: ask_title(self.model, text),
+                                       lambda job: self.visibility(job.scope).shows(job.kind))
             self.board = JobBoard(history, self.agent, config.tasks, clock, self._task_prompt,
                                   lambda job, sid: self.store.bind_agent_session(job.conversation_id, sid), redact,
-                                  self.desk)
+                                  self.desk, home=home, t3=t3)
             self.board.reconcile()
 
     def account(self, user_id):
         return VoiceScope(self.config.profile_id, self.bot_id, user_id)
+
+    def notify_defaults(self):
+        r = self.config.receipts
+        return notify.Visibility(large=r.large_work, micro=r.micro_tasks)
+
+    def visibility(self, scope_key):
+        """The account's two status-message switches (notify.py)."""
+        return notify.load(self.home, scope_key, self.notify_defaults())
+
+    def published(self):
+        """What the gateway's /talk_notify needs (thread_inbox launch record): who may switch, and the defaults."""
+        if self.desk is None:
+            return {}
+        return {"task_users": sorted(self.config.tasks.user_ids), "notify": self.notify_defaults().public()}
 
     def readiness(self, user_id):
         if self.board is None or user_id not in self.config.tasks.user_ids:
@@ -215,7 +237,7 @@ class TalkRuntime:
         jobs = self.board.of_conversation(account.key, conversation_id)
         done = [(j.id, "- " + redact(j.spoken()), self._synopsis(j)) for j in jobs
                 if j.terminal and j.receipt == UNDELIVERED and j.voice_session_id != exclude_voice_session]
-        running = [(f"open:{j.id}", f"- Hermes task {j.number} ({clip(redact(j.request), 80)}) is {j.state}.", "")
+        running = [(f"open:{j.id}", f"- Hermes task {j.number} ({clip(redact(j.request), 80)}) {j.spoken_state()}.", "")
                    for j in jobs if j.state in OPEN]
         return done + running
 
@@ -485,8 +507,55 @@ class TalkRuntime:
         parts = [TASK_PROMPT.format(number=job.number)]
         if voice:
             parts.append("Voice conversation so far (oldest first):\n" + voice)
+        threads = self._t3_threads(job)
+        if threads:
+            parts.append("T3 threads of earlier tasks in this conversation (send updates of that work there):\n"
+                         + "\n".join(threads))
         parts.append(f"TASK: {request}")
         return "\n\n".join(parts), self.store.agent_session(job.conversation_id)
+
+    def _t3_threads(self, job):
+        """One line per T3 thread an earlier task of this conversation started or continued, newest last."""
+        lines = {}
+        for other in self.board.of_conversation(job.scope, job.conversation_id, limit=20):
+            if other.id == job.id:
+                continue
+            for link in other.links:
+                if link.counts:
+                    lines[link.thread_id] = (f"- task {other.number} ({clip(redact(other.title or other.request), 60)}): "
+                                             f"thread_id {link.thread_id}, {link.status}")
+        return list(lines.values())[-10:]
+
+    def _control(self, account, conversation_id, verb, number):
+        """A control line about existing tasks: answered from server state; never queued, never a new task."""
+        if verb == "list":
+            jobs = self.board.of_conversation(account.key, conversation_id)
+            if not jobs:
+                raise TalkError(404, "There are no Hermes tasks in this conversation.")
+            shown = [j for j in jobs if j.state in OPEN] + [j for j in jobs if j.terminal][-LIST_FINISHED:]
+            lines = [f"Task {j.number} ({clip(redact(j.title or j.request), 60)}) {j.spoken_state()}"
+                     + (", T3 code work" if j.large and j.state not in OPEN else "") + "." for j in shown]
+            return {"job": self._public_job(jobs[-1]), "jobs": [self._public_job(j) for j in shown], "created": False,
+                    "channel": "speakable", "reply": " ".join(lines)}
+        if number is None:
+            raise TalkError(400, f"Name the task: \"CONTROL: {verb} <number>\".")
+        job = self.board.by_number(account.key, conversation_id, int(number))
+        if verb == "cancel":
+            job = self.board.cancel(account.key, conversation_id, job.id)
+            reply = f"Hermes task {job.number} " + ("is being cancelled." if job.state in OPEN else f"already {job.state}.")
+        elif verb == "result" or job.terminal:
+            reply = self._recall(job)
+        else:
+            reply = f"Hermes task {job.number} ({clip(redact(job.title or job.request), 80)}) {job.spoken_state()}."
+        return {"job": self._public_job(job), "created": False, "channel": "speakable", "reply": reply}
+
+    def _recall(self, job):
+        if not job.terminal:
+            return f"Hermes task {job.number} is still {job.state}; it has no result yet."
+        reply = redact(job.spoken())
+        if job.state == SUCCEEDED and len(job.result) >= self.config.tasks.result_chars - 1:
+            reply += " That is as much of the result as voice keeps."
+        return reply
 
     def _tasks_for(self, user_id):
         readiness = self.readiness(user_id)
@@ -507,6 +576,7 @@ class TalkRuntime:
         """Start a native task for a delegation of the live call, cancel one ("cancel task N") or repeat
         one's stored result ("result of task N")."""
         request, title = take_title(request) if isinstance(request, str) else (request, "")
+        control = CONTROL.match(request) if isinstance(request, str) else None
         cancel = CANCEL.match(request) if isinstance(request, str) else None
         recall = RESULT.match(request) if isinstance(request, str) else None
         account = self._board_for(user_id)
@@ -517,6 +587,8 @@ class TalkRuntime:
             raise TalkError(400, f"A task request must be 1..{limit} characters.")
         record = self.store.voice_session(account, conversation_id, voice_session_id, live=True)
         # A resubmitted delegation (its first response was lost) gets its job back even if readiness changed since.
+        if control:
+            return self._control(account, conversation_id, control.group(1).lower(), control.group(2))
         known = self.board.existing(account.key, conversation_id, record.get("generation", 0), delegation_item_id)
         if known is not None and not (cancel or recall):
             return {"job": self._public_job(known), "created": False, "channel": "commentary",
@@ -530,13 +602,7 @@ class TalkRuntime:
                     "reply": f"Hermes task {job.number} " + ("is being cancelled." if job.state in OPEN else f"already {job.state}.")}
         if recall:
             job = self.board.by_number(account.key, conversation_id, int(recall.group(1)))
-            if not job.terminal:
-                reply = f"Hermes task {job.number} is still {job.state}; it has no result yet."
-            else:
-                reply = redact(job.spoken())
-                if job.state == SUCCEEDED and len(job.result) >= self.config.tasks.result_chars - 1:
-                    reply += " That is as much of the result as voice keeps."
-            return {"job": self._public_job(job), "created": False, "channel": "speakable", "reply": reply}
+            return {"job": self._public_job(job), "created": False, "channel": "speakable", "reply": self._recall(job)}
         request, report_to = self._report_to(user_id, request)
         if not request:
             raise TalkError(400, "A task request must say what to do.")

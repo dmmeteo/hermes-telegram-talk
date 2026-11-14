@@ -1,0 +1,99 @@
+"""A bounded stand-in for `hermes chat` in the work gate. No model, provider, Hermes core or T3.
+
+Talk starts it exactly as it starts Hermes (agent.NativeAgent behind spool.py, its own process group, with
+HERMES_TALK_JOB). Where a real turn would call t3_control, it runs the post_tool_call hook body (work.observe) with
+the result T3 would give, against the synthetic T3 store in $TALK_WORK_DIR/t3. TASK words:
+
+  hold K                 a micro request: hold until release/K
+  code K                 t3 start of thread th-K, then end the turn
+  codewait K             t3 start of thread th-K, then hold until release/K (a turn that waits on T3)
+  send THREAD K          t3 send to THREAD, then end the turn
+  lost K / lostnone K    a t3 start whose answer was lost; T3 has the thread / does not
+  refused K              a t3 start T3 refused
+  look THREAD K          a t3 read of THREAD (a status read), then end the turn
+"""
+import json
+import os
+import secrets
+import signal
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from hermes_talk.work import observe  # noqa: E402
+from tests.work.fake_t3 import FakeT3  # noqa: E402
+
+HOLD_MAX_S = 120
+
+root = Path(os.environ["TALK_WORK_DIR"])
+home = os.environ["HERMES_HOME"]
+t3 = FakeT3(root / "t3")
+args = sys.argv[1:]
+resume = args[args.index("--resume") + 1] if "--resume" in args else ""
+prompt = sys.stdin.read()
+words = [line[5:].strip() for line in prompt.splitlines() if line.startswith("TASK:")][-1].split()
+verb, key = words[0], words[-1]
+session = resume or "syn_" + secrets.token_hex(6)
+
+
+def emit(event):
+    print(json.dumps(event), flush=True)
+
+
+def log(kind, **extra):
+    with open(root / "ledger.jsonl", "a") as handle:
+        handle.write(json.dumps({"event": kind, "key": key, "session": session, "resume": resume, "pid": os.getpid(),
+                                 "job": os.environ.get("HERMES_TALK_JOB"), "at": time.time(), **extra}) + "\n")
+
+
+def tool(action, result, **call):
+    observe(tool_name="t3_control", args={"action": action, "request_id": f"req-{key}-{action}", **call},
+            result=json.dumps(result), session_id=session, home=home)
+
+
+def stop(*_):
+    raise KeyboardInterrupt
+
+
+def hold():
+    deadline = time.monotonic() + HOLD_MAX_S
+    while not (root / "release" / key).exists():
+        if time.monotonic() > deadline:
+            raise KeyboardInterrupt
+        time.sleep(0.05)
+
+
+signal.signal(signal.SIGINT, stop)
+signal.signal(signal.SIGTERM, stop)
+emit({"type": "system", "session_id": session})
+log("start", verb=verb)
+try:
+    text = f"done {key}"
+    if verb in ("code", "codewait"):
+        tool("start", {"ok": True, "action": "start", **t3.start(f"th-{key}")}, cwd="/synthetic", message=key)
+        log("t3", thread=f"th-{key}")
+        text = f"Started T3 thread th-{key}."
+    elif verb == "send":
+        tool("send", {"ok": True, "action": "send", **t3.send(words[1])}, thread_id=words[1], message=key)
+        log("t3", thread=words[1])
+        text = f"Sent to {words[1]}."
+    elif verb == "lost":
+        t3.start(f"th-{key}")
+        tool("start", {"ok": False, "error": "transport_error", "outcome_unknown": True, "thread_id": f"th-{key}"},
+             cwd="/synthetic", message=key)
+    elif verb == "lostnone":
+        tool("start", {"ok": False, "error": "transport_error", "outcome_unknown": True, "thread_id": f"th-{key}"},
+             cwd="/synthetic", message=key)
+    elif verb == "refused":
+        tool("start", {"ok": False, "error": "rejected", "outcome_unknown": False}, cwd="/synthetic", message=key)
+    elif verb == "look":
+        tool("read", {"ok": True, "action": "read", "state": t3.state(words[1])}, thread_id=words[1])
+    if verb in ("hold", "codewait"):
+        hold()
+    log("end")
+    emit({"type": "result", "exit_code": 0, "text": text, "session_id": session})
+except KeyboardInterrupt:
+    log("stop")
+    emit({"type": "result", "exit_code": 130, "text": "", "error": "interrupted", "session_id": session})
+    sys.exit(130)

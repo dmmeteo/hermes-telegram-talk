@@ -389,9 +389,27 @@ message was deleted) is held until the next status; a new message is never sent.
 to Telegram is in flight is applied right after it, one call at a time per task. `receipts.max_chars` is no longer
 used.
 
-Limits: `tasks.max_concurrent` (1..3) native runs at once across the profile, `tasks.max_open_per_user` (1..8) open
-jobs per user, queued and running together (3 and 8: three run while five wait, and a ninth is refused), `tasks.request_chars`,
-`tasks.result_chars`, `tasks.max_turns` and `tasks.run_budget_seconds` (Hermes' own budget, then a stop 60 s later).
+Which tasks get a message: two switches per user. `receipts.large_work` (default true) covers tasks T3 admitted work
+from; `receipts.micro_tasks` (default false) covers every other task. `/talk_notify` in the user's private chat with
+the bot shows both as buttons (task users only) and stores the choice per profile, bot and user. A task that already
+has a message keeps it to the end; a still-open task gets one at its next status change after its switch turns on; a
+finished task is never posted. A hidden quick task that hands work to T3 is posted once, as running. ❓ marks T3 work
+that waits for an answer or approval.
+
+### T3 work
+
+A task is large only when Talk observes T3 admit work from its own turn: the plugin's `post_tool_call` hook records a
+successful `t3_control` start or send (or a lost answer T3 may have committed) for that task. Reads, waits, refusals
+and other sessions record nothing. The large task's turn then holds no slot. When the turn ends, the task stays
+running and Talk follows the thread through the profile's own `t3_control` handler until T3 shows the run completed
+(the result is T3's final message), failed, interrupted, or stopped after a cancel. A blocked thread stays open. A
+restart keeps following; nothing is relaunched or resent. The voice model handles existing tasks with control lines
+(`CONTROL: list`, `CONTROL: status N`, `CONTROL: result N`, `CONTROL: cancel N`), answered at once from server state and
+never queued. See `docs/adr/0011-t3-work-and-task-visibility.md`.
+
+Limits: `tasks.max_concurrent` (1..3) turns at once across the profile, counting only tasks that are not large. Waiting
+tasks are not capped (`tasks.max_open_per_user` was removed). `tasks.request_chars`, `tasks.result_chars`,
+`tasks.max_turns` and `tasks.run_budget_seconds` (Hermes' own budget, then a stop 60 s later) bound each turn.
 Every task route is rate limited per user and accepts 32 KiB.
 
 ### Decision trail

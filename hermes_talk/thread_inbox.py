@@ -156,10 +156,11 @@ class ThreadInbox:
             os.close(fd)  # closing releases the flock
 
     # Launch handles ----------------------------------------------------------------------------------------------
-    def publish(self, url, profile, bot_id, users):
-        """Where the voice server serves the Mini App, for the gateway's /talk handler (same HERMES_HOME)."""
+    def publish(self, url, profile, bot_id, users, extra=None):
+        """Where the voice server serves the Mini App, for the gateway's /talk and /talk_notify handlers (same
+        HERMES_HOME). extra adds fields of its own (task users and status-message defaults)."""
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        _write(self.root / "launch.json", {"url": url, "profile": profile, "bot_id": str(bot_id),
+        _write(self.root / "launch.json", {**(extra or {}), "url": url, "profile": profile, "bot_id": str(bot_id),
                                            "users": sorted(int(u) for u in users)})
 
     def published(self):

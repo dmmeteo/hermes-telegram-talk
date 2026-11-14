@@ -18,11 +18,13 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .work import ENV_JOB
+
 SOURCE = "telegram-voice"
 DATA_DIR = ("plugin-data", "hermes-talk", "jobs")
 # Talk's own launch secrets: read once by server.py, never by a task or by a gateway daemon Talk starts.
 LAUNCH_SECRETS = ("TG_VOICE_BOT_TOKEN", "TG_VOICE_ALLOWED_USER_IDS")
-CHILD_ENV_DROP = (*LAUNCH_SECRETS, "HERMES_YOLO_MODE", "HERMES_ACCEPT_HOOKS", "HERMES_EXEC_ASK",
+CHILD_ENV_DROP = (*LAUNCH_SECRETS, ENV_JOB, "HERMES_YOLO_MODE", "HERMES_ACCEPT_HOOKS", "HERMES_EXEC_ASK",
                   "HERMES_GATEWAY_SESSION", "HERMES_SESSION_PLATFORM", "HERMES_CRON_SESSION", "HERMES_INTERACTIVE",
                   "HERMES_SESSION_SOURCE")
 APPROVING = {"approve", "off", "allow", "yes", "true"}
@@ -168,8 +170,9 @@ class NativeAgent:
         self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         output = self.dir / f"{job_id}.jsonl"
         data = prompt.encode("utf-8", "replace")
+        # The job id lets Talk's post_tool_call hook in that process attribute T3 admissions (work.py).
         process = subprocess.Popen([sys.executable, str(SPOOL), str(output), "--", *self.argv(resume)],
-                                   cwd=str(self.tasks.workdir), env=self.env, stdin=subprocess.PIPE,
+                                   cwd=str(self.tasks.workdir), env={**self.env, ENV_JOB: job_id}, stdin=subprocess.PIPE,
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         try:
             process.stdin.write(data)

@@ -36,7 +36,7 @@ PENDING, SENDING, SENT, FAILED, UNCERTAIN = "pending", "sending", "sent", "faile
 TRANSITIONS = {PENDING: {SENDING}, SENDING: {SENT, PENDING, FAILED, UNCERTAIN}}
 STATUS = {jobs.ACCEPTED: "queued", jobs.RUNNING: "running", jobs.SUCCEEDED: "completed", jobs.FAILED: "failed",
           jobs.INTERRUPTED: "failed", jobs.CANCELLED: "cancelled"}
-MARKS = {"queued": "🕓", "running": "⏳", "completed": "✅", "failed": "❌", "cancelled": "⏹"}
+MARKS = {"queued": "🕓", "running": "⏳", "blocked": "❓", "completed": "✅", "failed": "❌", "cancelled": "⏹"}
 REPORT_PREFIX = "hermes_talk:report:"
 SINCE_KEY = "hermes_talk:reports_since"
 SEND_TIMEOUT_S = 30.0
@@ -106,6 +106,13 @@ def take_title(request):
             return request, ""
         return "\n".join(lines[:i] + lines[i + 1:]).strip(), usable_title(match.group(1))
     return request, ""
+
+
+def report_status(job):
+    """What the message shows: a running job's T3 work may be queued in T3 or blocked on a question or approval."""
+    if job.state == jobs.RUNNING and job.large:
+        return job.work_status or "running"
+    return STATUS[job.state]
 
 
 def job_title(job, redact):
@@ -288,8 +295,9 @@ class ReportDesk:
     """Durable status messages: created once at a task's first status, claimed before the only send, then
     edited to each later status by one worker per task."""
 
-    def __init__(self, history, sender, clock, attempts=3, backoff=(5.0, 30.0), redact=str, namer=None):
+    def __init__(self, history, sender, clock, attempts=3, backoff=(5.0, 30.0), redact=str, namer=None, visible=None):
         self.history, self.sender, self.clock, self.redact, self.namer = history, sender, clock, redact, namer
+        self.visible = visible  # job -> whether a job without a message gets one (notify.py); None: every job
         self.requests = {}  # job id -> redacted request, for a report still naming
         self.passed = {}  # job id -> statuses it passed while naming, shown in order after the first send
         self.attempts, self.backoff = attempts, backoff
@@ -315,12 +323,15 @@ class ReportDesk:
         return self.reports.get(job_id)
 
     def follow(self, job):
-        """Called with every stored version of a job: records its status and starts the message's update."""
-        status = STATUS[job.state]
+        """Called with every stored version of a job: records its status and starts the message's update.
+
+        A job its account does not show gets no message; once it has one (it was shown, or became large T3 work
+        while large work is shown), the message follows it to the end."""
+        status = report_status(job)
         with self.lock:
             report = self.reports.get(job.id)
             if report is None:
-                if (job.created or 0) < self.since:
+                if (job.created or 0) < self.since or (self.visible is not None and not self.visible(job)):
                     return None
                 destination = job.report_to or asdict(Destination.private(
                     int(job.scope.rsplit(":", 1)[1]), job.scope.rsplit(":", 2)[1][2:]))

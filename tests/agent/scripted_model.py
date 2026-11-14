@@ -13,6 +13,7 @@ Script, keyed on the newest user message:
   "shell <cmd>"   -> a terminal tool call (approval checks)
   "slowshell <s> <cmd>" -> wait <s> seconds, then a terminal tool call (no late side effect after a stop)
   "big <n>"       -> a result of about <n> characters between BIG-START and BIG-END markers
+  "t3start <name>" / "t3read <name>" -> a t3_control start of thread th-<name> / a read of it
   anything else   -> "SCRIPTED-ANSWER: <request>"
 """
 import json
@@ -78,6 +79,11 @@ def plan(messages):
         delay, _, command = rest.partition(" ")
         time.sleep(float(delay))
         return ("tool", "terminal", {"command": command.strip()})
+    if word in ("t3start", "t3read") and rest:
+        name = rest.strip()
+        call = {"action": "start", "cwd": "/synthetic", "message": name, "request_id": f"req-start-{name}"} \
+            if word == "t3start" else {"action": "read", "thread_id": f"th-{name}"}
+        return ("tool", "t3_control", call)
     if word == "slow":
         time.sleep(float(rest or "5"))
         return ("text", "SCRIPTED-SLOW-DONE")

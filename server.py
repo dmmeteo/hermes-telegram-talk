@@ -239,7 +239,8 @@ class VoiceApp:
         self.avatar = BotAvatar(self.bot_token, talk.bot_id, (path.read_bytes(), AVATAR_TYPES[path.suffix.lower()]),
                                 self.avatar_fetch)
         if talk.inbox is not None:
-            talk.inbox.publish(self.origin + self.base_path, talk.config.profile_id, talk.bot_id, self.allowed_ids)
+            talk.inbox.publish(self.origin + self.base_path, talk.config.profile_id, talk.bot_id, self.allowed_ids,
+                               talk.published())
 
     @property
     def routes(self):

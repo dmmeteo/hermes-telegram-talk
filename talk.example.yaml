@@ -48,8 +48,8 @@ tasks:
   # user_ids: [123456789]    # required when enabled: Telegram ids allowed to start tasks
   # toolsets: [file, web, session_search]   # required when enabled: Hermes toolsets a task may use
   # workdir: .               # the task's working directory, relative to this file
-  # max_concurrent: 1        # 1..3 native runs at once, across the profile
-  # max_open_per_user: 3     # 1..8 open (queued + running) per user; 3 and 8 = three running, five waiting
+  # max_concurrent: 1        # 1..3 turns at once across the profile; waiting tasks are not capped, and a task
+  #                          # that handed work to T3 holds no slot (Talk follows the T3 thread)
   # run_budget_seconds: 600  # Hermes' own run budget; Talk stops the run 60 s after it
   # max_turns: 30
   # request_chars: 2000
@@ -57,6 +57,8 @@ tasks:
 receipts:                    # with tasks on, each task keeps one status message (title and state, no result)
   enabled: true              # in the user's own private chat with the Talk bot, even after the call ended
   # attempts: 3              # sends that provably did not leave (refused, rate limited) and edits retry this often
+  # large_work: true         # default: tasks T3 admitted work from get a status message
+  # micro_tasks: false       # default: every other task gets none; each user switches both with /talk_notify
   # destinations:            # explicit alternatives the user may name with "REPORT TO: <name>"
   #   ops:
   #     target: "telegram:-1001234567890:17"   # telegram:<chat id>[:<topic id>] the Talk bot can post to

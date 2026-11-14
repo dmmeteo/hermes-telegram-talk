@@ -1,6 +1,6 @@
 # 0010 Three tasks of one call at once: the conversation's session plus parallel fresh sessions
 
-Status: accepted for the source branch `default/talk-english-labels-1114` (2026-11-14). The default profile asks for
+Status: accepted for the source branch `default/talk-english-labels-1114` (2026-11-14); its open cap is superseded by 0011. The default profile asks for
 three running and five waiting voice tasks (`tasks.max_concurrent: 3`, `tasks.max_open_per_user: 8`).
 
 ## Context

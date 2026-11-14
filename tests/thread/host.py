@@ -149,16 +149,16 @@ class HostExtras:
             else:
                 os.environ["HERMES_HOME"] = previous
 
-    def talk_command(self, home, user_id, chat_id=None, chat_type="private", thread_id=None, bot_id=None):
+    def _updates(self, home, bot_id, updates):
+        """Feed Bot API updates through a real PTB Application wired by the Telegram adapter; returns the Bot API
+        calls it made as (method, params) and the texts the core command handler saw."""
         import json
-        from checks import BOT_ID
         from gateway.config import PlatformConfig
         from plugins.platforms.telegram.adapter import TelegramAdapter
         from telegram import Bot, Update
         from telegram.ext import ApplicationBuilder
         from telegram.request import BaseRequest
-        bot_id = int(bot_id or BOT_ID)
-        sent = []
+        sent, core = [], []
 
         class Capture(BaseRequest):  # the disposable sender: Bot API calls are recorded, nothing leaves the host
             async def initialize(self):
@@ -176,15 +176,17 @@ class HostExtras:
                 params = dict(request_data.parameters) if request_data is not None else {}
                 if name == "getMe":
                     result = {"id": bot_id, "is_bot": True, "first_name": "Synthetic bot", "username": "synthetic_bot"}
+                elif name == "answerCallbackQuery":
+                    sent.append((name, params))
+                    result = True
                 else:
-                    sent.append(params)
+                    sent.append((name, params))
                     result = {"message_id": 9000 + len(sent), "date": 1_900_000_000, "text": params.get("text", ""),
                               "chat": {"id": int(params["chat_id"]), "type": "private"}}
                 return 200, json.dumps({"ok": True, "result": result}).encode()
 
         def run():
             adapter = TelegramAdapter(PlatformConfig(enabled=True, token=f"{bot_id}:synthetic-offline-bot-token"))
-            core = []
 
             async def core_command(update, context):
                 core.append(update.effective_message.text)
@@ -193,30 +195,67 @@ class HostExtras:
                    .updater(None).build())
             adapter._wire_plugin_handlers(app)  # what connect() does before registering the core handlers
             adapter._register_handlers(app)
-            chat = {"id": int(chat_id or user_id), "type": chat_type}
-            if chat_type != "private":
-                chat["title"] = "Synthetic group"
-            data = {"update_id": 1, "message": {"message_id": 70, "date": 1_900_000_000, "chat": chat, "text": "/talk",
-                                                "from": {"id": int(user_id), "is_bot": False, "first_name": "Test"},
-                                                "entities": [{"type": "bot_command", "offset": 0, "length": 5}]}}
-            if thread_id is not None:
-                data["message"].update(message_thread_id=int(thread_id), is_topic_message=True)
 
             async def go():
                 await app.initialize()
-                await app.process_update(Update.de_json(data, app.bot))
+                for data in updates:
+                    await app.process_update(Update.de_json(data, app.bot))
                 await app.shutdown()
             self.loop.run_until_complete(go())
-            assert core == [], "the core command handler must not also answer /talk"
         self._with_home(home, run)
+        return sent, core
+
+    @staticmethod
+    def _command(user_id, chat_id, chat_type, text, update_id=1, thread_id=None):
+        chat = {"id": int(chat_id or user_id), "type": chat_type}
+        if chat_type != "private":
+            chat["title"] = "Synthetic group"
+        data = {"update_id": update_id, "message": {
+            "message_id": 70, "date": 1_900_000_000, "chat": chat, "text": text,
+            "from": {"id": int(user_id), "is_bot": False, "first_name": "Test"},
+            "entities": [{"type": "bot_command", "offset": 0, "length": len(text)}]}}
+        if thread_id is not None:
+            data["message"].update(message_thread_id=int(thread_id), is_topic_message=True)
+        return data
+
+    def talk_command(self, home, user_id, chat_id=None, chat_type="private", thread_id=None, bot_id=None):
+        import json
+        from checks import BOT_ID
+        bot_id = int(bot_id or BOT_ID)
+        sent, core = self._updates(home, bot_id, [self._command(user_id, chat_id, chat_type, "/talk",
+                                                                thread_id=thread_id)])
+        assert core == [], "the core command handler must not also answer /talk"
         out = []
-        for params in sent:
+        for _, params in sent:
             markup = params.get("reply_markup")
             markup = json.loads(markup) if isinstance(markup, str) else markup
             url = markup["inline_keyboard"][0][0]["web_app"]["url"] if markup else None
             thread = params.get("message_thread_id")
             out.append({"chat_id": int(params["chat_id"]), "text": params["text"], "url": url,
                         "message_thread_id": int(thread) if thread is not None else None})
+        return out
+
+    def notify_flow(self, home, user_id, chat_id=None, chat_type="private", tap=None, tapper=None):
+        """`/talk_notify`, then (tap) a press of that button by `tapper` (default the same user) in the same chat:
+        [(Bot API method, text, [button labels], [callback data])]."""
+        import json
+        from checks import BOT_ID
+        bot_id = int(BOT_ID)
+        updates = [self._command(user_id, chat_id, chat_type, "/talk_notify")]
+        if tap is not None:
+            chat = {"id": int(chat_id or user_id), "type": chat_type}
+            updates.append({"update_id": 2, "callback_query": {
+                "id": "cbq-1", "chat_instance": "synthetic", "data": tap,
+                "from": {"id": int(tapper or user_id), "is_bot": False, "first_name": "Test"},
+                "message": {"message_id": 9001, "date": 1_900_000_000, "chat": chat, "text": "panel"}}})
+        sent, core = self._updates(home, bot_id, updates)
+        assert core == [], "the core command handler must not also answer /talk_notify"
+        out = []
+        for method, params in sent:
+            markup = params.get("reply_markup")
+            markup = json.loads(markup) if isinstance(markup, str) else markup
+            rows = markup["inline_keyboard"] if markup else []
+            out.append((method, params.get("text"), [r[0]["text"] for r in rows], [r[0]["callback_data"] for r in rows]))
         return out
 
     def payload(self, caption, paths):

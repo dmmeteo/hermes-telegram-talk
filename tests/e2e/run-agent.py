@@ -64,8 +64,8 @@ def talk_data(workdir, profile="synthetic", receipts=None, **tasks):
                           tasks={"enabled": True, "user_ids": [fx.USER_ID, fx.OTHER_USER_ID],
                                  "toolsets": ["file", "terminal"], "workdir": str(workdir),
                                  "run_budget_seconds": 120, **tasks})
-    if receipts is not None:
-        data["receipts"] = receipts
+    # Unless a check sets its own, every task posts a status message, so the message mechanics stay checked.
+    data["receipts"] = {"micro_tasks": True} if receipts is None else receipts
     return data
 
 
@@ -670,7 +670,7 @@ def delegation_id_dedup(model):
 
 def one_call_three_native_runs(model):
     """Three tasks of one call run at once in three native sessions; the fourth waits for a slot."""
-    e = Env(model, max_concurrent=3, max_open_per_user=8)
+    e = Env(model, max_concurrent=3)
     try:
         conv, vs = e.call()
         warm = e.task(conv, vs, "parallel warm-up", "del_par0")[1]
@@ -806,7 +806,7 @@ def limits_and_approvals(model):
     os.environ["HERMES_YOLO_MODE"] = "1"
     os.environ["TG_VOICE_BOT_TOKEN"] = fx.BOT_TOKEN
     os.environ["TG_VOICE_ALLOWED_USER_IDS"] = str(fx.USER_ID)
-    e = Env(model, max_open_per_user=2)
+    e = Env(model)
     try:
         conv, vs = e.call()
         limits = {
@@ -818,9 +818,10 @@ def limits_and_approvals(model):
         }
         assert limits == {"request_too_long": 400, "malformed_delegation": 400, "extra_field": 400,
                           "body_too_large": 413}, limits
-        open_jobs = [e.task(conv, vs, "slow 90")[1]["job"]["id"] for _ in range(2)]
-        limits["open_cap"] = e.task(conv, vs, "slow 90")[0]
-        assert limits["open_cap"] == 429
+        submitted = [e.task(conv, vs, "slow 90") for _ in range(4)]
+        limits["beyond_old_open_cap"] = [status for status, _ in submitted]
+        assert limits["beyond_old_open_cap"] == [200] * 4 and all(b["created"] for _, b in submitted), submitted
+        open_jobs = [b["job"]["id"] for _, b in submitted]
         for job_id in open_jobs:
             e.post("task/cancel", {"conversation_id": conv, "job_id": job_id})
         for job_id in open_jobs:
@@ -1348,7 +1349,7 @@ def large_old_unread_result(model):
                                        "- Hermes task 1 finished. Its result is long; delegate \"result of task 1\".")],
                                   [], 0, "", 3200)
     assert ids == ["job"] and "result of task 1" in text, text
-    e = Env(model, result_chars=4000, max_open_per_user=5)
+    e = Env(model, result_chars=4000)
     try:
         conv, vs = e.call()
         _, body = e.task(conv, vs, "big 3900", "del_big")
@@ -1374,7 +1375,7 @@ def large_old_unread_result(model):
             e.history.set_meta(jobs.job_key(j.id), jobs.dump(j))
             old.append(j)
         e.close(keep=True)
-        e = Env(model, root=e.root, result_chars=4000, max_open_per_user=5)
+        e = Env(model, root=e.root, result_chars=4000)
         _, vs3 = e.call()
         listed = sorted(j["number"] for j in e.jobs(conv, vs3)[0].values())
         assert 101 in listed and 112 in listed, listed
@@ -1492,7 +1493,7 @@ def bounded_native_spool(model):
 
 COMMON = (native_tool_roundtrip, background_result_delivery, context_update_injection, persistent_two_call_history,
           pulse_visibility_and_cursor, pulse_late_after_fast_start, cross_user_denial, cross_profile_denial, restart_job_reconciliation,
-          voice_disconnect_vs_cancel, delegation_id_dedup, one_call_three_native_runs, plugin_native_install, unauthenticated_job_denial,
+          voice_disconnect_vs_cancel, delegation_id_dedup, one_call_three_native_runs, t3_admission_real_hook, plugin_native_install, unauthenticated_job_denial,
           limits_and_approvals, smart_approval_profile, receipt_ack_no_double_speech, telegram_default_receipt,
           telegram_alternate_destination, telegram_closed_call_delivery, telegram_ambiguous_send,
           telegram_restart_dedup, queue_start_failure, large_old_unread_result, ambiguous_task_submission,
@@ -1774,6 +1775,53 @@ def rpc_composite_toolsets(model):
 # The gateway transport's own safety properties; every COMMON check also runs on it.
 RPC_ONLY = (rpc_composite_toolsets, rpc_tool_resume_idempotency, rpc_destructive_denial, rpc_cancel_no_late_effect,
             rpc_budget_timeout, rpc_lost_admission_ack, rpc_genuine_refusal, rpc_stop_survives_outage)
+
+
+def t3_admission_real_hook(model):
+    """A real turn's t3_control start, seen by the real post_tool_call hook, makes exactly its job large T3 work
+    that Talk follows to T3's own outcome; a read makes nothing large. Default switches post only the large one."""
+    sys.path.insert(0, str(ROOT / "tests" / "agent"))
+    import fake_t3_plugin
+    from tests.work.fake_t3 import FakeT3
+    TELEGRAM.reset()
+    root = Path(tempfile.mkdtemp(prefix="talk-agent-t3-"))
+    home = root / "home"
+    fx.write_home(home)
+    (home / "config.yaml").write_text(model_config(model, "plugins:\n  enabled:\n    - hermes-telegram-talk\n"
+                                                         "    - t3-bridge\n"))
+    store = FakeT3(root / "t3")
+    fake_t3_plugin.install(home, ROOT, root / "t3")
+    e = Env(model, root=root, toolsets=["file", "t3_bridge"], receipts={"enabled": True})
+    try:
+        bind_host_model(e)  # the profile's plugins are discovered as the voice server does: t3_control is registered
+        e.talk.board.follow_s = 0.5
+        conv, vs = e.call()
+        _, body = e.task(conv, vs, "t3start alpha", "del_t3a")
+        big = body["job"]["id"]
+        deadline = time.time() + 120
+        while time.time() < deadline and not (e.native(big).large and e.native(big).turn):
+            time.sleep(0.3)
+        job = e.native(big)
+        assert job.large and job.turn is not None and job.state == "running", job
+        assert [l.thread_id for l in job.links] == ["th-alpha"] and store.get("th-alpha")["count"] == 1, job.links
+        assert "TOOL-RESULT-QUOTED" in job.turn.get("result", ""), "the outer turn ended after the start"
+        _, body = e.task(conv, vs, "t3read alpha", "del_t3r")
+        read = e.wait(body["job"]["id"], conv, vs)
+        assert read["state"] == "succeeded" and read["kind"] == "micro", read
+        assert e.jobs(conv, vs)[0][big]["state"] == "running", "T3 work outlives its turn"
+        assert store.get("th-alpha")["reads"] >= 1, "Talk read the thread through the profile's t3_control"
+        store.finish("th-alpha", "completed", "ALPHA-T3-DONE")
+        done = e.wait(big, conv, vs)
+        assert done["state"] == "succeeded" and done["result"] == "ALPHA-T3-DONE" and done["kind"] == "large", done
+        assert settled_report(e, big) is not None and e.desk.get(body["job"]["id"]) is None, \
+            "default switches: the large task posts, the quick read does not"
+        assert store.get("th-alpha")["count"] == 1, "nothing was launched twice"
+        return {"transport": TRANSPORT, "large": big, "thread": "th-alpha", "result": done["result"],
+                "read_job_kind": read["kind"], "posted": [r["state"] for r in [e.desk.get(big).public()]]}
+    finally:
+        e.close()
+        from hermes_talk import pulse_model
+        pulse_model.bind(None)
 
 
 def run_inner(receipts, only, rpc_target=None):

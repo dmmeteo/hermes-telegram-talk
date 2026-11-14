@@ -1,0 +1,9 @@
+name: t3-bridge
+version: 0.0.1
+description: Synthetic stand-in for the t3-bridge plugin's t3_control tool, backed by tests/work/fake_t3.py files.
+author: Hermes Telegram Talk tests
+license: MIT
+kind: standalone
+requires_env: []
+provides_tools:
+  - t3_control

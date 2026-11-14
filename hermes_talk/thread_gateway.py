@@ -5,6 +5,9 @@ chat and topic the command arrived in with a web_app button. Its URL is the voic
 plus a fresh launch handle the inbox stores for (profile, bot, user, chat, topic); the voice server binds a call to
 that thread only through the handle (thread_inbox.launch_thread).
 
+`/talk_notify` shows a task user, in their private chat with the bot, the two switches that decide which voice tasks
+get a Telegram status message (notify.py), as inline buttons; a tap switches one for that user only.
+
 `post_llm_call` sees each finished chat-agent turn. When that turn answered a photo or file a live call of the same
 thread passed on to the chat agent (matched by the exact cached file the agent was given, and by the session's
 origin in the gateway's own SessionStore), the reply is stored once as an attributed analysis item for that call.
@@ -20,9 +23,12 @@ import json
 import os
 import time
 
+from . import notify
 from .thread_inbox import ANALYSIS_CHARS, LOCK_WAIT_S, SESSION_STORE, Busy, Thread, ThreadInbox, _digest, _value
 
 NOT_PRIVATE = "Talk opens only in a private chat with this bot."
+NOTIFY_PRIVATE = "Task status settings open only in a private chat with this bot."
+NOTIFY_DATA = "talk_notify:"
 
 
 def _home():
@@ -51,10 +57,47 @@ def offer(home, bot_id, user_id, chat_id, chat_type, thread_id, clock=time.time)
     return f"Voice call for {where}. Photos, files and messages you send here during the call reach it.", url
 
 
+def _notify_account(home, bot_id, user_id):
+    """(scope key, defaults) of a task user of this bot's voice server, else None (no answer to anyone else)."""
+    published = ThreadInbox(home, time.time).published()
+    if published is None or published.get("bot_id") != str(bot_id) or not isinstance(published.get("notify"), dict):
+        return None
+    if int(user_id) not in set(published.get("task_users") or ()):
+        return None
+    defaults = published["notify"]
+    default = notify.Visibility(**{k: defaults.get(k) is True for k in notify.KINDS})
+    return f"{published['profile']}:tg{bot_id}:{int(user_id)}", default
+
+
+def notify_panel(home, bot_id, user_id, chat_type, chat_id):
+    """(text, [(label, callback data)]) for `/talk_notify`; (None, None) answers nothing."""
+    account = _notify_account(home, bot_id, user_id)
+    if account is None:
+        return None, None
+    if chat_type != "private" or str(chat_id) != str(user_id):
+        return NOTIFY_PRIVATE, None
+    text, buttons = notify.panel(notify.load(home, *account))
+    return text, [(label, NOTIFY_DATA + kind) for label, kind in buttons]
+
+
+def notify_switch(home, bot_id, user_id, chat_type, chat_id, data):
+    """A tap on one switch of the panel: stores it for this user and returns the new panel, else (None, None)."""
+    account = _notify_account(home, bot_id, user_id)
+    kind = data[len(NOTIFY_DATA):] if isinstance(data, str) and data.startswith(NOTIFY_DATA) else None
+    if account is None or kind not in notify.KINDS or chat_type != "private" or str(chat_id) != str(user_id):
+        return None, None
+    notify.toggle(home, account[0], kind, account[1])
+    return notify_panel(home, bot_id, user_id, chat_type, chat_id)
+
+
 def telegram_handlers(native, adapter=None):
-    """`register_telegram_handler` factory: `/talk` in a private chat or topic offers the Mini App bound to it."""
+    """`register_telegram_handler` factory: `/talk` in a private chat or topic offers the Mini App bound to it;
+    `/talk_notify` and its buttons switch which voice tasks get a status message."""
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
-    from telegram.ext import CommandHandler
+    from telegram.ext import CallbackQueryHandler, CommandHandler
+
+    def keyboard(buttons):
+        return InlineKeyboardMarkup([[InlineKeyboardButton(label, callback_data=data)] for label, data in buttons])
 
     async def talk(update, context):
         message = update.effective_message
@@ -72,7 +115,33 @@ def telegram_handlers(native, adapter=None):
         await context.bot.send_message(chat_id=chat.id, text=text, reply_markup=markup,
                                        message_thread_id=thread_id)
 
+    async def notify_command(update, context):
+        message = update.effective_message
+        chat, user = update.effective_chat, update.effective_user
+        home = _home()
+        if message is None or chat is None or user is None or user.is_bot or not home:
+            return
+        text, buttons = notify_panel(home, context.bot.id, user.id, chat.type, chat.id)
+        if text is None:
+            return
+        thread_id = message.message_thread_id if getattr(message, "is_topic_message", False) else None
+        await context.bot.send_message(chat_id=chat.id, text=text, message_thread_id=thread_id,
+                                       reply_markup=keyboard(buttons) if buttons else None)
+
+    async def notify_tap(update, context):
+        query = update.callback_query
+        home = _home()
+        if query is None or query.from_user is None or query.message is None or not home:
+            return
+        chat = query.message.chat
+        text, buttons = notify_switch(home, context.bot.id, query.from_user.id, chat.type, chat.id, query.data)
+        await query.answer()
+        if text is not None and buttons:
+            await query.edit_message_text(text=text, reply_markup=keyboard(buttons))
+
     native.add_handler(CommandHandler("talk", talk))
+    native.add_handler(CommandHandler("talk_notify", notify_command))
+    native.add_handler(CallbackQueryHandler(notify_tap, pattern="^" + NOTIFY_DATA))
 
 
 def _user_text(message):
