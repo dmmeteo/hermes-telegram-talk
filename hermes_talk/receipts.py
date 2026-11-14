@@ -340,8 +340,6 @@ class ReportDesk:
             if report is None:
                 if (job.created or 0) < self.since:
                     return None
-                if job.terminal:
-                    return None  # a task never gets its first message once it has finished
                 destination = job.report_to or asdict(Destination.private(
                     int(job.scope.rsplit(":", 1)[1]), job.scope.rsplit(":", 2)[1][2:]))
                 if self.visible is not None and not self.visible(job):

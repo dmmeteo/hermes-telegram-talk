@@ -65,7 +65,7 @@ def talk_data(workdir, profile="synthetic", receipts=None, **tasks):
                                  "toolsets": ["file", "terminal"], "workdir": str(workdir),
                                  "run_budget_seconds": 120, **tasks})
     # Unless a check sets its own, every task posts a status message, so the message mechanics stay checked.
-    data["receipts"] = {"micro_tasks": True} if receipts is None else receipts
+    data["receipts"] = {"micro_tasks": True, **(receipts or {})}
     return data
 
 
@@ -1505,10 +1505,14 @@ def t3_admission_real_hook(model):
                                                          "    - t3-bridge\n"))
     store = FakeT3(root / "t3")
     fake_t3_plugin.install(home, ROOT, root / "t3")
-    e = Env(model, root=root, toolsets=["file", "t3_bridge"], receipts={"enabled": True})
+    e = Env(model, root=root, toolsets=["file", "t3_bridge"], receipts={"micro_tasks": False})
     try:
         bind_host_model(e)  # the profile's plugins are discovered as the voice server does: t3_control is registered
         e.talk.board.follow_s = 0.5
+        import toolsets
+        from hermes_talk.gateway_rpc import launch_toolsets
+        live_grant = {"hermes-telegram resolves t3_control": "t3_control" in toolsets.resolve_toolset("hermes-telegram"),
+                      "launch toolsets for [hermes-telegram]": launch_toolsets(["hermes-telegram"])}
         conv, vs = e.call()
         _, body = e.task(conv, vs, "t3start alpha", "del_t3a")
         big = body["job"]["id"]
@@ -1535,7 +1539,8 @@ def t3_admission_real_hook(model):
         assert settled_report(e, big) is not None and e.desk.get(body["job"]["id"]) is None, \
             "default switches: the large task posts, the quick read does not"
         assert store.get("th-alpha")["count"] == 1, "nothing was launched twice"
-        return {"transport": TRANSPORT, "large": big, "thread": "th-alpha", "result": done["result"],
+        return {"transport": TRANSPORT, "live_toolset_grant": live_grant, "large": big, "thread": "th-alpha",
+                "result": done["result"],
                 "read_job_kind": read["kind"], "posted": [r["state"] for r in [e.desk.get(big).public()]]}
     finally:
         e.close()

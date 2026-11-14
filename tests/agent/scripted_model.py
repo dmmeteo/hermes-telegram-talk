@@ -14,6 +14,7 @@ Script, keyed on the newest user message:
   "slowshell <s> <cmd>" -> wait <s> seconds, then a terminal tool call (no late side effect after a stop)
   "big <n>"       -> a result of about <n> characters between BIG-START and BIG-END markers
   "t3start <name>" / "t3read <name>" -> a t3_control start of thread th-<name> / a read of it
+A tool the request does not offer directly but that sits behind Hermes' Tool Search bridge is called via tool_call.
   anything else   -> "SCRIPTED-ANSWER: <request>"
 """
 import json
@@ -148,6 +149,10 @@ class ScriptedModel:
                 kind, *rest = plan(messages)
                 if kind == "tool":
                     name, args = rest
+                    offered = {t.get("function", {}).get("name") for t in body.get("tools") or () if isinstance(t, dict)}
+                    if name not in offered and "tool_call" in offered:
+                        # Deferred behind Hermes' Tool Search bridge: call it the way a model does, through tool_call.
+                        name, args = "tool_call", {"calls": [{"name": name, "arguments": args}]}
                     message = {"role": "assistant", "content": None, "tool_calls": [{
                         "id": f"call_{len(model.requests)}", "type": "function",
                         "function": {"name": name, "arguments": json.dumps(args)}}]}
