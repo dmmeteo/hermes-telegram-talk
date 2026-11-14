@@ -1491,6 +1491,58 @@ def bounded_native_spool(model):
     return results
 
 
+def t3_admission_real_hook(model):
+    """A real turn's t3_control start, seen by the real post_tool_call hook, makes exactly its job large T3 work
+    that Talk follows to T3's own outcome; a read makes nothing large. Default switches post only the large one."""
+    sys.path.insert(0, str(ROOT / "tests" / "agent"))
+    import fake_t3_plugin
+    from tests.work.fake_t3 import FakeT3
+    TELEGRAM.reset()
+    root = Path(tempfile.mkdtemp(prefix="talk-agent-t3-"))
+    home = root / "home"
+    fx.write_home(home)
+    (home / "config.yaml").write_text(model_config(model, "plugins:\n  enabled:\n    - hermes-telegram-talk\n"
+                                                         "    - t3-bridge\n"))
+    store = FakeT3(root / "t3")
+    fake_t3_plugin.install(home, ROOT, root / "t3")
+    e = Env(model, root=root, toolsets=["file", "t3_bridge"], receipts={"enabled": True})
+    try:
+        bind_host_model(e)  # the profile's plugins are discovered as the voice server does: t3_control is registered
+        e.talk.board.follow_s = 0.5
+        conv, vs = e.call()
+        _, body = e.task(conv, vs, "t3start alpha", "del_t3a")
+        big = body["job"]["id"]
+        deadline = time.time() + 120
+        while time.time() < deadline and not (e.native(big).large and e.native(big).turn):
+            time.sleep(0.3)
+        job = e.native(big)
+        assert job.large and job.turn is not None and job.state == "running", job
+        assert [l.thread_id for l in job.links] == ["th-alpha"] and store.get("th-alpha")["count"] == 1, job.links
+        assert "TOOL-RESULT-QUOTED" in job.turn.get("result", ""), "the outer turn ended after the start"
+        if TRANSPORT == "gateway":
+            from hermes_talk import jobs
+            stored = json.loads(e.history.get_meta(jobs.job_key(big)))
+            assert stored["admission_id"] is None and job.turn.get("admission_id"), \
+                "the base record keeps no admission once the turn ended, so a rollback cannot settle it as done"
+        _, body = e.task(conv, vs, "t3read alpha", "del_t3r")
+        read = e.wait(body["job"]["id"], conv, vs)
+        assert read["state"] == "succeeded" and read["kind"] == "micro", read
+        assert e.jobs(conv, vs)[0][big]["state"] == "running", "T3 work outlives its turn"
+        assert store.get("th-alpha")["reads"] >= 1, "Talk read the thread through the profile's t3_control"
+        store.finish("th-alpha", "completed", "ALPHA-T3-DONE")
+        done = e.wait(big, conv, vs)
+        assert done["state"] == "succeeded" and done["result"] == "ALPHA-T3-DONE" and done["kind"] == "large", done
+        assert settled_report(e, big) is not None and e.desk.get(body["job"]["id"]) is None, \
+            "default switches: the large task posts, the quick read does not"
+        assert store.get("th-alpha")["count"] == 1, "nothing was launched twice"
+        return {"transport": TRANSPORT, "large": big, "thread": "th-alpha", "result": done["result"],
+                "read_job_kind": read["kind"], "posted": [r["state"] for r in [e.desk.get(big).public()]]}
+    finally:
+        e.close()
+        from hermes_talk import pulse_model
+        pulse_model.bind(None)
+
+
 COMMON = (native_tool_roundtrip, background_result_delivery, context_update_injection, persistent_two_call_history,
           pulse_visibility_and_cursor, pulse_late_after_fast_start, cross_user_denial, cross_profile_denial, restart_job_reconciliation,
           voice_disconnect_vs_cancel, delegation_id_dedup, one_call_three_native_runs, t3_admission_real_hook, plugin_native_install, unauthenticated_job_denial,
@@ -1775,53 +1827,6 @@ def rpc_composite_toolsets(model):
 # The gateway transport's own safety properties; every COMMON check also runs on it.
 RPC_ONLY = (rpc_composite_toolsets, rpc_tool_resume_idempotency, rpc_destructive_denial, rpc_cancel_no_late_effect,
             rpc_budget_timeout, rpc_lost_admission_ack, rpc_genuine_refusal, rpc_stop_survives_outage)
-
-
-def t3_admission_real_hook(model):
-    """A real turn's t3_control start, seen by the real post_tool_call hook, makes exactly its job large T3 work
-    that Talk follows to T3's own outcome; a read makes nothing large. Default switches post only the large one."""
-    sys.path.insert(0, str(ROOT / "tests" / "agent"))
-    import fake_t3_plugin
-    from tests.work.fake_t3 import FakeT3
-    TELEGRAM.reset()
-    root = Path(tempfile.mkdtemp(prefix="talk-agent-t3-"))
-    home = root / "home"
-    fx.write_home(home)
-    (home / "config.yaml").write_text(model_config(model, "plugins:\n  enabled:\n    - hermes-telegram-talk\n"
-                                                         "    - t3-bridge\n"))
-    store = FakeT3(root / "t3")
-    fake_t3_plugin.install(home, ROOT, root / "t3")
-    e = Env(model, root=root, toolsets=["file", "t3_bridge"], receipts={"enabled": True})
-    try:
-        bind_host_model(e)  # the profile's plugins are discovered as the voice server does: t3_control is registered
-        e.talk.board.follow_s = 0.5
-        conv, vs = e.call()
-        _, body = e.task(conv, vs, "t3start alpha", "del_t3a")
-        big = body["job"]["id"]
-        deadline = time.time() + 120
-        while time.time() < deadline and not (e.native(big).large and e.native(big).turn):
-            time.sleep(0.3)
-        job = e.native(big)
-        assert job.large and job.turn is not None and job.state == "running", job
-        assert [l.thread_id for l in job.links] == ["th-alpha"] and store.get("th-alpha")["count"] == 1, job.links
-        assert "TOOL-RESULT-QUOTED" in job.turn.get("result", ""), "the outer turn ended after the start"
-        _, body = e.task(conv, vs, "t3read alpha", "del_t3r")
-        read = e.wait(body["job"]["id"], conv, vs)
-        assert read["state"] == "succeeded" and read["kind"] == "micro", read
-        assert e.jobs(conv, vs)[0][big]["state"] == "running", "T3 work outlives its turn"
-        assert store.get("th-alpha")["reads"] >= 1, "Talk read the thread through the profile's t3_control"
-        store.finish("th-alpha", "completed", "ALPHA-T3-DONE")
-        done = e.wait(big, conv, vs)
-        assert done["state"] == "succeeded" and done["result"] == "ALPHA-T3-DONE" and done["kind"] == "large", done
-        assert settled_report(e, big) is not None and e.desk.get(body["job"]["id"]) is None, \
-            "default switches: the large task posts, the quick read does not"
-        assert store.get("th-alpha")["count"] == 1, "nothing was launched twice"
-        return {"transport": TRANSPORT, "large": big, "thread": "th-alpha", "result": done["result"],
-                "read_job_kind": read["kind"], "posted": [r["state"] for r in [e.desk.get(big).public()]]}
-    finally:
-        e.close()
-        from hermes_talk import pulse_model
-        pulse_model.bind(None)
 
 
 def run_inner(receipts, only, rpc_target=None):

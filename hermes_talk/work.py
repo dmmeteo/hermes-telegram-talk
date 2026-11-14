@@ -6,10 +6,16 @@ whichever process runs the turn (the `hermes chat` child, which carries HERMES_T
 which finds the job by the session marker Talk wrote before submitting) and writes one observation file per
 admission, keyed by the call's request_id, so a retried call never makes a second link.
 
+A gateway turn whose context was compressed continues in a child session; the hook follows the session's
+parent chain (public SessionDB.get_session) back to the marked one.
+
 Talk then follows each link through the profile's own `t3_control` handler (registry dispatch, which fires no tool
-hooks, so these reads never look like admissions). A link is done only when T3 shows its run settled; an unreadable
-T3 changes nothing. A possibly admitted start or send (T3's answer was lost) is confirmed only by the thread itself
-and is never resent.
+hooks, so these reads never look like admissions). A link is its own T3 run: identified by the run id T3 shows
+(`active_id`, else the newest `latest_id` that is not the run it was admitted behind), with the thread's run count as
+the fallback when T3 shows no ids. It is done once T3 shows that run settled, or a later run of the thread started
+(T3 starts a queued run only after the earlier one ended). An unreadable T3 changes nothing. A possibly admitted
+start or send (T3's answer was lost) is confirmed only by the thread itself and is never resent; a lost start that
+came back without a thread id is kept as a note, since nothing can follow it.
 """
 import hashlib
 import json
@@ -24,8 +30,11 @@ WORK_DIR = ("plugin-data", "hermes-talk", "work")
 JOB_ID = re.compile(r"jb_[A-Za-z0-9_-]{16,64}")
 ADMITTING = ("start", "send")
 LIVE = ("running", "blocked")
+LINEAGE_HOPS = 16
 DONE = frozenset({"completed", "failed", "interrupted", "idle"})
 DROPPED = "unconfirmed"
+LOST_START = ("T3's answer to a start was lost before it named a thread; T3 may run that work unseen by Talk. "
+              "Check T3.")
 RESULT_CHARS = 6000
 
 
@@ -33,9 +42,10 @@ RESULT_CHARS = 6000
 class Link:
     """One T3 run a task started (`start`) or continued (`send`), and what T3 last showed of it.
 
-    `base_runs` is the thread's run count before this run (None when unknown); `queued` marks a send T3 put behind
-    another active run; `started` that this run was seen live or counted. `confirmed` is False only for an admission
-    whose answer was lost, until the thread shows the run."""
+    `run_id` is this run's T3 id once known; `prior_run_id` the run it must differ from (the active run a queued send
+    waits behind, or the latest run of an idle thread); `base_runs` the thread's run count before it (None when
+    unknown), for a T3 that shows no run ids. `started` marks the run seen live or counted. `confirmed` is False only
+    for an admission whose answer was lost, until the thread shows the run."""
     key: str
     thread_id: str
     via: str
@@ -49,6 +59,8 @@ class Link:
     continues: int = None
     admitted: float = 0.0
     seen: float = 0.0  # when T3 first confirmed or disproved a possible admission
+    run_id: str = None
+    prior_run_id: str = None
 
     @property
     def done(self):
@@ -111,11 +123,35 @@ def unmark_session(home, session_id, job_id):
             pass
 
 
-def _session_job(home, session_id):
-    if not session_id:
-        return None
+def _marked(home, session_id):
     data = _read(work_dir(home) / f"session-{_digest(str(session_id))}.json")
     return data.get("job_id") if data and data.get("session_id") == str(session_id) else None
+
+
+def _parent(home, session_id):
+    """The session a compressed one continues, through the public SessionDB (None when there is none)."""
+    from hermes_state import SessionDB
+    db = SessionDB(db_path=Path(home) / "state.db")
+    try:
+        row = db.get_session(session_id) or {}
+    finally:
+        db.close()
+    return row.get("parent_session_id")
+
+
+def _session_job(home, session_id, parent=_parent):
+    """The job whose turn runs in this session, or in the session it was compressed from."""
+    seen = set()
+    while session_id and str(session_id) not in seen and len(seen) < LINEAGE_HOPS:
+        seen.add(str(session_id))
+        job_id = _marked(home, session_id)
+        if job_id:
+            return job_id
+        try:
+            session_id = parent(home, str(session_id))
+        except Exception:
+            return None
+    return None
 
 
 def _home():
@@ -136,28 +172,27 @@ def _result(result):
     return data if isinstance(data, dict) else None
 
 
-def observe(tool_name=None, args=None, result=None, session_id=None, home=None, environ=None, clock=time.time, **_):
+def observe(tool_name=None, args=None, result=None, session_id=None, home=None, environ=None, clock=time.time,
+            parent=_parent, **_):
     """`post_tool_call` body: record a T3 start or send this Talk task's turn made; returns the record or None.
 
-    Only an `ok` answer, or a lost answer T3 may have committed (`outcome_unknown` with a thread id), is recorded.
-    A refusal, a status or read call, or a call outside a Talk task records nothing."""
+    Only an `ok` answer, or a lost answer T3 may have committed (`outcome_unknown`), is recorded. A refusal, a status
+    or read call, or a call outside a Talk task records nothing."""
     if tool_name != "t3_control" or not isinstance(args, dict) or args.get("action") not in ADMITTING:
         return None
     environ = os.environ if environ is None else environ
     home = home or _home()
     if not home:
         return None
-    job_id = environ.get(ENV_JOB) or _session_job(home, session_id)
+    data = _result(result)
+    if data is None or (data.get("ok") is not True and data.get("outcome_unknown") is not True):
+        return None
+    job_id = environ.get(ENV_JOB) or _session_job(home, session_id, parent)
     if not isinstance(job_id, str) or not JOB_ID.fullmatch(job_id):
         return None
-    data = _result(result)
-    if data is None:
-        return None
     ok = data.get("ok") is True
-    if not ok and data.get("outcome_unknown") is not True:
-        return None
     thread_id = data.get("thread_id") or (args.get("thread_id") if args["action"] == "send" else None)
-    if not isinstance(thread_id, str) or not thread_id or len(thread_id) > 600:
+    if thread_id is not None and (not isinstance(thread_id, str) or not thread_id or len(thread_id) > 600):
         return None
     state = data.get("state") if isinstance(data.get("state"), dict) else {}
     run = state.get("run") if isinstance(state.get("run"), dict) else {}
@@ -165,8 +200,10 @@ def observe(tool_name=None, args=None, result=None, session_id=None, home=None, 
     record = {"job_id": job_id, "session_id": str(session_id or ""), "action": args["action"], "thread_id": thread_id,
               "confirmed": ok, "delivery": data.get("delivery") if args["action"] == "send" else "started",
               "outcome": state.get("outcome") if ok else None,
-              "run_count": count if type(count) is int and ok else None, "at": clock()}
-    record["key"] = _digest(f"{args['action']}:{args.get('request_id')}:{thread_id}")
+              "run_count": count if type(count) is int and ok else None,
+              "active_id": run.get("active_id") if ok else None, "latest_id": run.get("latest_id") if ok else None,
+              "at": clock()}
+    record["key"] = _digest(f"{args['action']}:{args.get('request_id')}:{thread_id or args.get('cwd') or ''}")
     path = work_dir(home) / job_id / f"{record['key']}.json"
     earlier = _read(path)
     if earlier is not None and earlier.get("confirmed") and not ok:
@@ -185,19 +222,34 @@ def observations(home, job_id):
                   key=lambda r: (r.get("at") or 0, r["key"]))
 
 
+def _ident(value):
+    return value if isinstance(value, str) and value else None
+
+
 def link_from(record):
     """The link an observation opens. A start's thread is new, so its run is the first one."""
     via = record.get("action")
+    if not record.get("thread_id"):
+        return Link(key=record["key"], thread_id="", via=via, confirmed=False, status=DROPPED,
+                    admitted=float(record.get("at") or 0), error=LOST_START)
     confirmed = record.get("confirmed") is True
     queued = via == "send" and record.get("delivery") == "queued"
     count = record.get("run_count") if type(record.get("run_count")) is int else None
-    base = 0 if via == "start" else count
+    active, latest = _ident(record.get("active_id")), _ident(record.get("latest_id"))
     live = record.get("outcome") in LIVE
-    # A confirmed send without a readable count: the run was admitted, so whatever T3 shows next is about it.
-    started = confirmed and ((live and not queued) or (via == "send" and base is None and not queued))
+    if via == "start":
+        base, run_id, prior = 0, active, None
+    elif queued:
+        base, run_id, prior = count, None, active
+    elif active is not None:  # a send to an idle thread: the active run is the one it started
+        base, run_id, prior = None, active, None
+    else:  # started but not yet visible: the run to tell it from is the thread's latest one
+        base, run_id, prior = count, None, latest
+    started = confirmed and run_id is not None or (confirmed and live and not queued and via == "start")
+    unknown = confirmed and via == "send" and count is None and active is None and latest is None
     return Link(key=record["key"], thread_id=record["thread_id"], via=via, confirmed=confirmed, base_runs=base,
-                queued=queued, started=started, status="running" if started and live else "queued",
-                admitted=float(record.get("at") or 0))
+                queued=queued, started=started or unknown, status="running" if started and live else "queued",
+                admitted=float(record.get("at") or 0), run_id=run_id, prior_run_id=prior)
 
 
 def merge(link, record):
@@ -215,45 +267,71 @@ def _final_text(messages):
     return ""
 
 
+def _settled(link, outcome, read):
+    text = _final_text(read.get("messages"))[-RESULT_CHARS:]
+    if outcome not in DONE:  # a later run started, so this one ended; how is no longer shown
+        return replace(link, status="completed", result=text or "Its T3 run ended and a later run continued the thread.")
+    return replace(link, status=outcome, result=text if outcome in ("completed", "idle") else "",
+                   error=text[-300:] if outcome == "failed" else "")
+
+
 def assess(link, read, now):
     """The link after one T3 read. Nothing it cannot read is ever concluded."""
     if link.done or not isinstance(read, dict):
         return link
     if read.get("ok") is not True:
-        if read.get("error") == "not_found" and not link.confirmed:
-            return replace(link, status=DROPPED, seen=now, error="T3 has no such thread; nothing was admitted.")
+        if read.get("error") == "not_found":
+            if not link.confirmed:
+                return replace(link, status=DROPPED, seen=now, error="T3 has no such thread; nothing was admitted.")
+            return replace(link, status="failed", error="T3 no longer has this thread.")
         return link
     state = read.get("state") if isinstance(read.get("state"), dict) else {}
     outcome = state.get("outcome")
     run = state.get("run") if isinstance(state.get("run"), dict) else {}
     count = run.get("count") if type(run.get("count")) is int else None
-    counted = count is not None and link.base_runs is not None and count > link.base_runs
+    active, latest = _ident(run.get("active_id")), _ident(run.get("latest_id"))
     live = outcome in LIVE
+    run_id = link.run_id
+    if run_id is None:
+        candidate = active or latest
+        if candidate is not None and candidate != link.prior_run_id and (link.via == "start" or link.prior_run_id
+                                                                          or link.base_runs is None or count is None
+                                                                          or count > link.base_runs):
+            run_id = candidate
+    counted = count is not None and link.base_runs is not None and count > link.base_runs
     if not link.confirmed:
         # A start's thread id is derived from its request, so the thread exists only if T3 committed the launch.
-        if link.via == "start" or counted or (live and link.base_runs is None):
+        if link.via == "start" or run_id is not None or counted:
             link = replace(link, confirmed=True, seen=now)
         else:
             return replace(link, status=DROPPED, seen=now,
                            error="T3 never showed a run for the possibly sent message; it was not resent.")
+    if run_id is not None:
+        link = replace(link, run_id=run_id, started=True)
+        if active == run_id:
+            return replace(link, status="blocked" if outcome == "blocked" else "running")
+        if latest not in (None, run_id) or (count is not None and link.base_runs is not None
+                                            and count > link.base_runs + 1):
+            return _settled(link, None, read)
+        return _settled(link, outcome, read) if outcome in DONE else replace(link, status="running")
+    # T3 shows no run ids: fall back to the run count and the thread's outcome.
     started = link.started or counted or (live and (not link.queued or link.base_runs is None))
     link = replace(link, started=started)
     if not started:
         return replace(link, status="queued")
     if count is not None and link.base_runs is not None and count > link.base_runs + 1:
-        # A later run began, which T3 starts only after this one ended; how it ended is no longer shown.
-        text = _final_text(read.get("messages"))[-RESULT_CHARS:]
-        return replace(link, status="completed",
-                       result=text or "Its T3 run ended and a later message continued the thread.")
+        return _settled(link, None, read)
     if outcome == "blocked":
         return replace(link, status="blocked")
     if live:
         return replace(link, status="running")
-    if outcome in DONE:
-        text = _final_text(read.get("messages"))[-RESULT_CHARS:]
-        return replace(link, status=outcome, result=text if outcome in ("completed", "idle") else "",
-                       error=text[-300:] if outcome == "failed" else "")
-    return link
+    return _settled(link, outcome, read) if outcome in DONE else link
+
+
+def interruptible(link, read):
+    """Whether T3's active run is this link's own run, so an interrupt stops nothing else."""
+    run = ((read or {}).get("state") or {}).get("run") or {}
+    return bool(link.run_id) and run.get("active_id") == link.run_id
 
 
 def work_status(links):

@@ -9,6 +9,7 @@ the result T3 would give, against the synthetic T3 store in $TALK_WORK_DIR/t3. T
   codewait K             t3 start of thread th-K, then hold until release/K (a turn that waits on T3)
   send THREAD K          t3 send to THREAD, then end the turn
   lost K / lostnone K    a t3 start whose answer was lost; T3 has the thread / does not
+  lostnothread K         a t3 start whose answer was lost before any thread id came back
   refused K              a t3 start T3 refused
   look THREAD K          a t3 read of THREAD (a status read), then end the turn
 """
@@ -84,6 +85,9 @@ try:
              cwd="/synthetic", message=key)
     elif verb == "lostnone":
         tool("start", {"ok": False, "error": "transport_error", "outcome_unknown": True, "thread_id": f"th-{key}"},
+             cwd="/synthetic", message=key)
+    elif verb == "lostnothread":
+        tool("start", {"ok": False, "error": "transport_error", "outcome_unknown": True, "committed_calls": 0},
              cwd="/synthetic", message=key)
     elif verb == "refused":
         tool("start", {"ok": False, "error": "rejected", "outcome_unknown": False}, cwd="/synthetic", message=key)

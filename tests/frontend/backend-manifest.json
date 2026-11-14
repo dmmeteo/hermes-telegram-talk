@@ -11,8 +11,8 @@
     "hermes_talk/context.py": "5001602bca54066998a88989e4fac65aadaa5541923566a39631273d8e9233df",
     "hermes_talk/fixtures.py": "8af565185c610c4068492f31ff9d5abe9c43c7a837087f8eef619202eee86b79",
     "hermes_talk/history.py": "87db530e4ced74a6162baff3dbe1101a8c2874e35ec0c4d59d27a145ec1d9851",
-    "hermes_talk/jobs.py": "c3f3fea271f49b2bbc06d31b6e86c4d9cbe2ccfd583af4019bec129bc2370e55",
-    "hermes_talk/receipts.py": "26332ef0c7cd54e8fbceeecdbc4ebb4463a5c43bb91566c87cde7952c4fdf609",
+    "hermes_talk/jobs.py": "47c79427947d184c445614ebee2698a1156b35bbeafb05482776d055427aa36a",
+    "hermes_talk/receipts.py": "7c29edae284bbdaf115d1141b3d8de1c2959fb539ab3b3f2938e1ebbc60ad9f5",
     "hermes_talk/spool.py": "b947b9655ebba380738007be1c35f4c2c3ab3b6757bb4d3a72330bf001128057",
     "hermes_talk/store.py": "4dcb84b9d7a8aec83cb1853cda540c714e10eea38a5eb2ad7caef0576d627f53",
     "hermes_talk/talk.py": "ad5185aedaff96925a6e9420b884f73981afeec9d9aa7b9aa93e55e516a8c157",
@@ -32,7 +32,7 @@
     "hermes_talk/thread_gateway.py": "2575cabee27f1fe91b42c0a1b6aae0930d1aa262bfe59388182f71fe9dac7860",
     "hermes_talk/avatar.py": "128f29e49d7e943c5554d1c151d5ee2c58eb801953dfcff98cf56b7b31c7fe21",
     "hermes_talk/resume.py": "bfd37f95aeaca7fc4e2622d63b272e33791317c8f3a3e943828339cb23f57378",
-    "hermes_talk/work.py": "410020741c10d770f5f7e9199579303b258ed10aa3b91d282377076f7c50e7f6",
+    "hermes_talk/work.py": "3659628dbd98bd170a1ecae21bb3abe5edc4b583a4b955e0b13b01331fb2a86d",
     "hermes_talk/notify.py": "6ce674616002d8c59556db0efdcee873a1940a84284db37e56f9b5c8bba67e89"
   }
 }

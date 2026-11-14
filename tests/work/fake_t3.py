@@ -24,8 +24,12 @@ class FakeT3:
             return None
 
     def put(self, thread_id, **changes):
-        data = {**(self.get(thread_id) or {"outcome": "idle", "count": 0, "messages": [], "interrupts": 0}),
+        data = {**(self.get(thread_id) or {"outcome": "idle", "count": 0, "messages": [], "interrupts": 0, "runs": []}),
                 **changes}
+        runs = list(data.get("runs") or [])
+        while len(runs) < data["count"]:  # every counted run has an id, as T3's thread show reports them
+            runs.append(f"run-{thread_id}-{len(runs) + 1}")
+        data["runs"] = runs
         tmp = self._path(thread_id).with_suffix(f".{os.getpid()}.tmp")
         tmp.write_text(json.dumps(data))
         os.replace(tmp, self._path(thread_id))
@@ -33,7 +37,13 @@ class FakeT3:
 
     def state(self, thread_id):
         data = self.get(thread_id) or {}
-        return {"outcome": data.get("outcome"), "run": {"count": data.get("count"), "active_id": None}}
+        runs = data.get("runs") or []
+        live = data.get("outcome") in ("running", "blocked")
+        run = {"count": data.get("count"), "active_id": runs[-1] if live and runs else None,
+               "latest_id": runs[-1] if runs else None}
+        if data.get("no_ids"):  # a T3 that reports no run ids: Talk falls back to the run count
+            run = {"count": data.get("count"), "active_id": None, "latest_id": None}
+        return {"outcome": data.get("outcome"), "run": run}
 
     def start(self, thread_id):
         if self.get(thread_id) is None:

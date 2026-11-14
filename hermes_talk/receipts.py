@@ -33,6 +33,7 @@ from . import jobs
 from .agent import process_start
 
 PENDING, SENDING, SENT, FAILED, UNCERTAIN = "pending", "sending", "sent", "failed", "uncertain"
+HIDDEN = "hidden"  # a task its account does not show; inert for every desk version (nothing to send or edit)
 TRANSITIONS = {PENDING: {SENDING}, SENDING: {SENT, PENDING, FAILED, UNCERTAIN}}
 STATUS = {jobs.ACCEPTED: "queued", jobs.RUNNING: "running", jobs.SUCCEEDED: "completed", jobs.FAILED: "failed",
           jobs.INTERRUPTED: "failed", jobs.CANCELLED: "cancelled"}
@@ -320,7 +321,9 @@ class ReportDesk:
         return report
 
     def get(self, job_id):
-        return self.reports.get(job_id)
+        """The task's status message record; None while it has none (never sent, or hidden)."""
+        report = self.reports.get(job_id)
+        return None if report is None or report.state == HIDDEN else report
 
     def follow(self, job):
         """Called with every stored version of a job: records its status and starts the message's update.
@@ -330,11 +333,22 @@ class ReportDesk:
         status = report_status(job)
         with self.lock:
             report = self.reports.get(job.id)
-            if report is None:
-                if (job.created or 0) < self.since or (self.visible is not None and not self.visible(job)):
+            if report is not None and report.state == HIDDEN:
+                if job.terminal or self.visible is None or not self.visible(job):
                     return None
+                report = None  # its switch is on now and the task is still open: it gets its one message
+            if report is None:
+                if (job.created or 0) < self.since:
+                    return None
+                if job.terminal:
+                    return None  # a task never gets its first message once it has finished
                 destination = job.report_to or asdict(Destination.private(
                     int(job.scope.rsplit(":", 1)[1]), job.scope.rsplit(":", 2)[1][2:]))
+                if self.visible is not None and not self.visible(job):
+                    # Stored so that this and every earlier desk version leave the task without a message.
+                    self._save(Report(job_id=job.id, scope=job.scope, destination=destination, state=HIDDEN,
+                                      status=status, created=self.clock()))
+                    return None
                 title, final = job_title(job, self.redact)
                 report = self._save(Report(job_id=job.id, scope=job.scope, destination=destination, title=title,
                                            naming=not final and self.namer is not None, status=status,
@@ -489,7 +503,7 @@ class ReportDesk:
             with self.lock:
                 report = self.reports.get(job_id)
                 idle = job_id not in self.busy
-            if report is not None and idle and report.state in (SENT, FAILED, UNCERTAIN) and not report.needs_edit:
+            if report is not None and idle and report.state in (SENT, FAILED, UNCERTAIN, HIDDEN) and not report.needs_edit:
                 return report
             time.sleep(0.02)
         return self.reports.get(job_id)

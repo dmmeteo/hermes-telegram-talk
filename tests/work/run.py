@@ -269,7 +269,19 @@ def promotion_is_exact():
         w.release("r3")
         w.until(lambda: w.state("r3") == "succeeded", "r3")
         assert w.job("r3").result == "done r3"
-        return {"large": ["s1", "u1"], "micro": ["r1 (read)", "r2 (refused)", "r3"], "u1_continues": link.continues}
+        w.t3.put("th-idle", outcome="completed", count=1, messages=[{"role": "assistant", "text": "old"}])
+        assert w.task(conv, vs, "send th-idle a1")[0] == 200
+        w.until(lambda: w.job("a1").large and w.job("a1").work_status == "running", "a1 started a run on an idle thread")
+        assert w.task(conv, vs, "send th-idle a2")[0] == 200
+        w.until(lambda: w.job("a2").large and w.job("a2").work_status == "queued", "a2 queued behind a1's run")
+        w.t3.finish("th-idle", "completed", "A1 result.")
+        w.until(lambda: w.state("a1") == "succeeded" and w.job("a2").work_status == "running", "a1 ends, a2 runs")
+        assert w.job("a1").result == "A1 result.", w.job("a1").result
+        assert w.task(conv, vs, "CONTROL: cancel " + str(w.job("a2").number))[0] == 200
+        w.until(lambda: w.state("a2") == "cancelled", "a2 cancelled from T3")
+        assert w.state("a1") == "succeeded" and w.t3.get("th-idle")["interrupts"] == 1, "only a2's own run was stopped"
+        return {"large": ["s1", "u1", "a1", "a2"], "micro": ["r1 (read)", "r2 (refused)", "r3"],
+                "u1_continues": link.continues, "a1_result": w.job("a1").result}
     finally:
         w.close()
 
@@ -445,9 +457,15 @@ def visibility_flags_and_telegram_control():
         w.until(lambda: w.job("v8").large, "v8 promoted")
         w.settle_reports()
         tail = [c[2] for c in w.posts.calls[count:]]
-        assert tail == ["⏳ code v6", "⏳ code v8"], ("open large work gets its message once its switch is on (v6 at its "
-                                                    "next change); a hidden quick request that became T3 work (v8) is "
-                                                    "posted once; finished v5 is never backfilled", tail)
+        assert tail == ["⏳ code v8"], ("a hidden quick request that became T3 work (v8) is posted once; open v6 waits "
+                                        "for its next status change; finished v5 is never backfilled", tail)
+        w.t3.finish("th-v6", "completed", "V6 done.")
+        w.until(lambda: w.state("v6") == "succeeded", "v6 done")
+        w.settle_reports()
+        v6 = [c for c in w.posts.calls[count:] if c[2].endswith("code v6")]
+        assert [c[0] for c in v6 if c[0] == "send"] == ["send"] and v6[-1][2] == "✅ code v6", \
+            ("open v6 gets its one message at its next change after the switch turned on", v6)
+        assert not any(c[2].endswith("hold v5") for c in w.posts.calls), "finished v5 is never backfilled"
         return {"default": "large only", "micro_on": "hold v3 shown", "micro_only": "large hidden",
                 "all_off": "quiet", "promoted_hidden_micro": tail}
     finally:
@@ -482,6 +500,11 @@ def hook_records_only_real_admissions():
         assert work.observe("t3_control", {"action": "send", "thread_id": "th-9", "request_id": "r10"},
                             json.dumps({"ok": True, "thread_id": "th-9"}), "sess-gw", home, {}) is not None, \
             "another job's turn end leaves the marker"
+        lineage = {"sess-child": "sess-gw"}
+        assert work.observe("t3_control", {"action": "start", "request_id": "r12"},
+                            json.dumps({"ok": True, "thread_id": "th-12", "state": {}}), "sess-child", home, {},
+                            parent=lambda h, sid: lineage.get(sid))["job_id"] == gateway_job, \
+            "a turn compressed into a child session is still found through its parent"
         work.unmark_session(home, "sess-gw", gateway_job)
         assert work.observe("t3_control", {"action": "send", "thread_id": "th-9", "request_id": "r11"},
                             json.dumps({"ok": True, "thread_id": "th-9"}), "sess-gw", home, {}) is None
@@ -556,9 +579,88 @@ def rollback_keeps_every_job():
         shutil.rmtree(root, ignore_errors=True)
 
 
-CHECKS = (hook_records_only_real_admissions, config_contract, rollback_keeps_every_job,
+def runs_are_told_apart():
+    """Pure: a link's own run by id, the run count when T3 shows no ids, and nothing concluded from no answer."""
+    rec = {"key": "k", "thread_id": "th", "action": "send", "confirmed": True, "delivery": "queued",
+           "outcome": "running", "run_count": 1, "active_id": "run-1", "latest_id": "run-1", "at": 1.0}
+    link = work.link_from(rec)
+    assert link.queued and link.prior_run_id == "run-1" and link.status == "queued"
+    read = lambda outcome, count, active, latest, text="": {"ok": True, "state": {"outcome": outcome, "run": {
+        "count": count, "active_id": active, "latest_id": latest}}, "messages": [{"role": "assistant", "text": text}]}
+    assert work.assess(link, read("running", 1, "run-1", "run-1"), 2).status == "queued", "behind another run"
+    assert work.assess(link, read("completed", 1, None, "run-1"), 2).status == "queued", "between runs"
+    mine = work.assess(link, read("running", 2, "run-2", "run-2"), 3)
+    assert mine.run_id == "run-2" and mine.status == "running"
+    assert work.assess(mine, read("completed", 2, None, "run-2", "Mine."), 4).result == "Mine."
+    assert work.assess(mine, read("running", 3, "run-3", "run-3", "Mine."), 4).status == "completed", "a later run"
+    assert work.interruptible(mine, read("running", 2, "run-2", "run-2")) and \
+        not work.interruptible(mine, read("running", 3, "run-3", "run-3")), "never interrupt another run"
+    started = work.link_from({**rec, "delivery": "started", "active_id": None, "latest_id": "run-1"})
+    assert started.prior_run_id == "run-1" and not started.run_id
+    assert work.assess(started, read("completed", 2, None, "run-2", "Fast."), 5).status == "completed", \
+        "a run that finished before the first read is still recognized"
+    plain = work.link_from({**rec, "active_id": None, "latest_id": None})
+    noid = lambda outcome, count: {"ok": True, "state": {"outcome": outcome, "run": {"count": count}}, "messages": []}
+    assert work.assess(plain, noid("completed", 1), 2).status == "queued"
+    assert work.assess(work.assess(plain, noid("running", 2), 2), noid("completed", 2), 3).status == "completed"
+    for raw in ({"ok": False, "error": "server_unreachable"}, {"ok": False, "error": "unavailable"}, None):
+        assert work.assess(mine, raw, 9) == mine, "an unreadable T3 changes nothing"
+    assert work.assess(mine, {"ok": False, "error": "not_found"}, 9).status == "failed"
+    return {"by_id": "queued, mine, later run, interrupt guard", "by_count": "fallback", "unreadable": "unchanged"}
+
+
+def review_regressions():
+    w = World(max_concurrent=1).serve()
+    try:
+        conv, vs = w.call()
+        assert w.task(conv, vs, "hold z1")[0] == 200
+        w.release("z1")
+        w.until(lambda: w.state("z1") == "succeeded", "z1 done while quick requests are hidden")
+        w.settle_reports()
+        thread_gateway.notify_switch(str(w.home), fx.BOT_TOKEN.split(":")[0], fx.USER_ID, "private", fx.USER_ID,
+                                     "talk_notify:micro")
+        w.talk.board.mark_delivered([w.job("z1").id], "context")
+        assert w.task(conv, vs, "lostnothread n1")[0] == 200
+        w.until(lambda: w.state("n1") == "succeeded", "a lost start without a thread id settles from its turn")
+        assert not w.job("n1").large and work.LOST_START in w.job("n1").result, w.job("n1").result
+        assert w.task(conv, vs, "code d1")[0] == 200
+        w.until(lambda: w.job("d1").large, "d1 promoted")
+        (w.root / "t3" / "th-d1.json").unlink()
+        w.until(lambda: w.state("d1") == "failed", "a deleted thread fails its task instead of hanging")
+        assert "no longer has this thread" in w.job("d1").error
+        for key in ("r1", "r2"):
+            assert w.task(conv, vs, f"codewait {key}")[0] == 200
+            w.until(lambda: w.job(key).large, f"{key} promoted")
+        w.until(lambda: w.ledger("stop", "r1"), "the oldest live turn of large work is stopped past the bound")
+        assert not w.ledger("stop", "r2") and not w.ledger("end", "r2"), "the newer one keeps its turn"
+        w.until(lambda: w.job("r1").turn is not None, "r1's stopped turn is recorded")
+        assert w.state("r1") == "running" and w.job("r1").turn["state"] == "interrupted", "its T3 work goes on"
+        w.t3.finish("th-r1", "completed", "R1 done.")
+        w.until(lambda: w.state("r1") == "succeeded", "r1 from T3")
+        w.release("r2")
+        w.t3.finish("th-r2", "completed", "R2 done.")
+        w.until(lambda: w.state("r2") == "succeeded", "r2")
+        w.settle_reports()
+        history, root, posts = w.history, w.root, w.posts
+        w.stop_serving()
+        w2 = World(root=root, max_concurrent=1, history=history)
+        w2.posts = posts
+        w2.serve()
+        w = w2
+        w.settle_reports()
+        texts = [c[2] for c in w.posts.calls]
+        assert not any(t.endswith("hold z1") for t in texts), ("a finished hidden task is never backfilled", texts)
+        assert sum(1 for c in w.posts.sends() if c[2].endswith("lostnothread n1")) == 1, texts
+        return {"backfill": "none after a switch, a save and a restart", "lost_start": "noted", "deleted_thread":
+                "failed", "live_turn_bound": "oldest large turn stopped"}
+    finally:
+        w.close()
+
+
+CHECKS = (hook_records_only_real_admissions, runs_are_told_apart, config_contract, rollback_keeps_every_job,
           slow_t3_keeps_requests_responsive, promotion_is_exact, other_user_no_crossover,
-          restart_and_uncertain_admission, cancel_large_and_queued_and_blocked, visibility_flags_and_telegram_control)
+          restart_and_uncertain_admission, cancel_large_and_queued_and_blocked, visibility_flags_and_telegram_control,
+          review_regressions)
 
 
 def main(argv):

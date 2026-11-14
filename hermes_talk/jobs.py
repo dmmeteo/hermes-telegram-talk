@@ -223,7 +223,9 @@ class JobBoard:
     (work.T3) reads and interrupts the T3 threads large jobs follow.
 
     Execution: at most tasks.max_concurrent turns of jobs that are not large run at once, oldest first. Waiting
-    jobs are not capped; a large job's turn and its T3 work hold no slot.
+    jobs are not capped; a large job's turn and its T3 work hold no slot. At most tasks.max_concurrent turns of large
+    jobs stay live beside them: past that, the oldest such turn is stopped (its T3 work goes on), so live turns stay
+    bounded at twice the setting.
     """
 
     def __init__(self, history, agent, tasks, clock, prompt_for, bind, redact, desk=None, home=None, t3=None,
@@ -237,6 +239,7 @@ class JobBoard:
         self.jobs = {}
         self.following = False
         self.interrupts = {}  # link key -> monotonic time of the last T3 interrupt asked for a cancelled job
+        self.reaped = set()  # large jobs whose still-running turn is being stopped to keep live turns bounded
         extras = dict(history.list_meta_prefix(WORK_PREFIX))
         for key, raw in history.list_meta_prefix(JOB_PREFIX):
             job = load(raw, extras.get(WORK_PREFIX + key[len(JOB_PREFIX):]))
@@ -320,6 +323,10 @@ class JobBoard:
         A large job's turn takes no slot: it waits on T3, which runs the work outside this profile's turns."""
         with self.lock:
             turns = [j for j in self.jobs.values() if j.turn_open]
+            promoted = sorted((j for j in turns if j.large),
+                              key=lambda j: min(link.admitted for link in j.links if link.counts))
+            for job in promoted[:max(0, len(promoted) - self.tasks.max_concurrent)]:
+                self._reap(job)
             held = {j.conversation_id for j in turns if not j.parallel}
             slots = self.tasks.max_concurrent - sum(1 for j in turns if not j.large)
             for job in sorted((j for j in self.jobs.values() if j.state == ACCEPTED), key=lambda j: (j.created, j.id)):
@@ -329,6 +336,15 @@ class JobBoard:
                 if self._launch(replace(job, parallel=parallel)):
                     slots -= 1
                     held.add(job.conversation_id)
+
+    def _reap(self, job):
+        """Stop a large job's turn that is still live; its T3 work is followed as before (the lock is held)."""
+        if job.id in self.reaped:
+            return
+        self.reaped.add(job.id)
+        logger.info("stopping the turn of a task whose T3 work is followed, to keep live turns bounded")
+        if not self.gateway:  # a gateway job's watcher sends the stop
+            threading.Thread(target=self.agent.stop, args=(job.pid, job.pid_start), daemon=True).start()
 
     def _adopt_gateway(self, job):
         """A gateway job outlives Talk: follow its admission, or admit it once if Talk stopped before the receipt."""
@@ -443,7 +459,7 @@ class JobBoard:
             if not timed_out and self.clock() > (job.started or 0) + self.tasks.run_budget_s + 60:
                 timed_out = True
             now = time.monotonic()
-            if (timed_out or job.cancel_requested) and job.admission_id and now >= retry_at:
+            if (timed_out or job.cancel_requested or job_id in self.reaped) and job.admission_id and now >= retry_at:
                 # Single-flight (this thread only) and bounded: never more often than the backoff allows.
                 delivered = self.agent.stop(job)
                 backoff = STOP_RETRY_MIN_S if delivered else min(backoff * 2, STOP_RETRY_MAX_S)
@@ -493,8 +509,12 @@ class JobBoard:
             if not job.parallel:
                 self.bind(job, outcome.session_id)
         state, fields = self._turn_outcome(job, outcome, timed_out, restarted)
+        self.reaped.discard(job.id)
         if job.links:
-            job = self._save(replace(job, turn={"state": state, "at": now, **fields}))
+            # The admission moves into `turn`: a rollback to a Talk before T3 work then finds no admission to settle
+            # this still-running job from, and marks it interrupted instead of completed with the turn's reply.
+            job = self._save(replace(job, turn={"state": state, "at": now, "admission_id": job.admission_id, **fields},
+                                     admission_id=None, submission_text=None))
             self.handles.pop(job.id, None)
             self._conclude(job.id)
             self._follow_soon()
@@ -566,7 +586,13 @@ class JobBoard:
         counted = [link for link in job.links if link.counts]
         statuses = {link.status for link in counted}
         if not counted:  # every possible admission proved empty: the turn's own outcome stands
-            job = job.to(turn["state"], finished=now, result=turn.get("result", ""), error=turn.get("error", ""))
+            lost = " " + work.LOST_START if any(l.error == work.LOST_START for l in job.links) else ""
+            result, error = turn.get("result", ""), turn.get("error", "")
+            if lost and turn["state"] == SUCCEEDED:
+                result = clip(result + lost, self.tasks.result_chars)
+            elif lost:
+                error = clip(error + lost, 300)
+            job = job.to(turn["state"], finished=now, result=result, error=error)
         elif job.cancel_requested and "interrupted" in statuses:
             job = job.to(CANCELLED, finished=now)
         elif "failed" in statuses:
@@ -598,8 +624,14 @@ class JobBoard:
                         self.following = False
                         return
                 for job_id in ids:
-                    self._follow_job(job_id)
-                self.pump()
+                    try:
+                        self._follow_job(job_id)
+                    except Exception as exc:  # one job's failed read or store must not stop following the others
+                        logger.warning("T3 work of a task could not be followed this round: %s", type(exc).__name__)
+                try:
+                    self.pump()
+                except Exception as exc:
+                    logger.warning("queued tasks could not be started this round: %s", type(exc).__name__)
                 time.sleep(self.follow_s)
         except BaseException:
             with self.lock:
@@ -611,13 +643,16 @@ class JobBoard:
         if job.state != RUNNING:
             return
         now = self.clock()
-        read = {}
+        assessed = {}
         for link in job.links:
             if link.done:
                 continue
-            read[link.key] = work.assess(link, self.t3.read(link.thread_id), now)
-            fresh = read[link.key]
-            if job.cancel_requested and fresh.counts and fresh.started and fresh.status in ("running", "blocked"):
+            raw = self.t3.read(link.thread_id)
+            fresh = work.assess(link, raw, now)
+            assessed[link.key] = (link, fresh)
+            # Only this link's own run is interrupted, never one another task queued on the same thread.
+            if job.cancel_requested and fresh.counts and fresh.status in ("running", "blocked") \
+                    and work.interruptible(fresh, raw):
                 last = self.interrupts.get(link.key)
                 if last is None or time.monotonic() - last >= STOP_RECHECK_S:
                     self.interrupts[link.key] = time.monotonic()
@@ -626,7 +661,8 @@ class JobBoard:
             job = self.jobs[job_id]
             if job.state != RUNNING:
                 return
-            links = tuple(read.get(link.key, link) if not link.done else link for link in job.links)
+            # A link that changed meanwhile (a retried call confirmed it) keeps its new value until the next round.
+            links = tuple(assessed[l.key][1] if l.key in assessed and assessed[l.key][0] == l else l for l in job.links)
             if links != job.links:
                 self._save(replace(job, links=links))
             self._conclude(job_id)
