@@ -5,16 +5,18 @@
   python3 tests/e2e/run-agent.py --browser OUT_DIR    Chromium delegation job (real app.js, server and tasks)
   python3 tests/e2e/run-agent.py --rpc-target SDK [--receipts DIR]   gateway-RPC transport against a pinned core source
 
-Each check runs the real Talk server over HTTP against a disposable HERMES_HOME. Tasks run as real
-`hermes chat` processes from the Hermes runtime (HERMES_TALK_HERMES_PYTHON, else the first
-~/.hermes/installs/*/environments/*/venv/bin/python): Hermes' own AIAgent, tool registry, tool
-execution, approval policy and SessionDB. Only the inference provider is replaced, by the labelled
+Each check runs the real Talk server over HTTP against a disposable HERMES_HOME, with the Hermes runtime
+from HERMES_TALK_HERMES_PYTHON, else the first ~/.hermes/installs/*/environments/*/venv/bin/python. Tasks
+run on the transport the product picks for that core (`gateway_rpc.client_available()`): real `hermes chat`
+processes, or native turns of the profile's own gateway daemon. Either way it is Hermes' own AIAgent, tool
+registry, tool execution, approval policy and SessionDB. The checks common to both transports run on
+either; the gateway transport adds its own (RPC_ONLY). Only the inference provider is replaced, by the labelled
 scripted model in tests/agent/scripted_model.py. Nothing calls a paid or live provider. Without a
 runtime the gate prints SKIPPED, and --require-hermes makes that a failure.
 
---rpc-target runs the same Talk server against a pinned Hermes core source tree (put first on the
-runtime's path) whose public hermes_cli.gateway_client selects the gateway-RPC transport. Each check's
-disposable home gets its own real gateway daemon, started by that client and reaped afterwards.
+--rpc-target runs the same checks against a pinned Hermes core source tree (put first on the runtime's
+path) whose public hermes_cli.gateway_client must select the gateway-RPC transport. On that transport each
+check's disposable home gets its own real gateway daemon, started by that client and reaped afterwards.
 """
 import argparse
 import glob
@@ -46,6 +48,7 @@ from hermes_talk.config import parse_config  # noqa: E402
 NO_TASK_USER = 1003
 BLACKHOLE = "http://127.0.0.1:9"
 TELEGRAM = None
+TRANSPORT = None  # the product's own transport for this core, decided once in run_inner
 PLUGIN_FILES = ("plugin.yaml", "__init__.py", "server.py", "hermes_talk", "static", "LICENSE")
 TERMINAL = ("succeeded", "failed", "cancelled", "interrupted")
 
@@ -225,12 +228,22 @@ def native_tool_roundtrip(model):
         job = e.wait(body["job"]["id"], conv, vs)
         assert job["state"] == "succeeded" and marker in job["result"], job
         native = e.native(job["id"])
-        rows = e.history.db.get_messages(native.native_session_id)
+        stored = native.native_session_id
+        if TRANSPORT == "gateway":
+            stored = e.talk.agent.call("session.resume", session_id=stored, omit_messages=True)["stored_session_id"]
+        rows = e.history.db.get_messages(stored)
         tool_rows = [r for r in rows if r["role"] == "tool" and marker in (r.get("content") or "")]
         assert tool_rows, "the native session stored the real read_file result"
-        assert e.history.db.get_session(native.native_session_id)["source"] == "telegram-voice"
-        assert not Path(native.output).exists(), "the per-job output file is removed once the job settles"
+        source = e.history.db.get_session(stored)["source"]
+        assert source == {"cli": "telegram-voice", "gateway": "tool"}[TRANSPORT], source
+        if TRANSPORT == "gateway":
+            assert native.output is None and native.pid is None, native
+            from hermes_talk.agent import DATA_DIR
+            assert not list(e.home.joinpath(*DATA_DIR).glob(job["id"] + "*")), "a gateway job leaves no per-job file"
+        else:
+            assert not Path(native.output).exists(), "the per-job output file is removed once the job settles"
         return {"marker": marker, "job": job["id"], "native_session": native.native_session_id,
+                "stored_session": stored, "source": source, "transport": TRANSPORT,
                 "tool_rows": len(tool_rows), "result": job["result"][:200], "model": "scripted-deterministic-model"}
     finally:
         e.close()
@@ -490,6 +503,14 @@ def prepare_call(home, data):
         history.close()
 
 
+def run_started(model, home, job_id, text):
+    """Waits until the model saw the job's run and, on the gateway, Talk stored its admission."""
+    deadline = time.time() + 60
+    while not (requests_with(model, text) and (TRANSPORT != "gateway" or stored_job(home, job_id).admission_id)) \
+            and time.time() < deadline:
+        time.sleep(0.2)
+
+
 def restart_job_reconciliation(model):
     root = Path(tempfile.mkdtemp(prefix="talk-restart-"))
     home, work = root / "profiles" / "synthetic", root / "work"
@@ -510,13 +531,15 @@ def restart_job_reconciliation(model):
         status, body = request(port, "task", {**call, "delegation_item_id": "del_r1", "request": "slow 8"})
         assert status == 200, body
         adopted_id = body["job"]["id"]
-        deadline = time.time() + 60
-        while not requests_with(model, "TASK: slow 8") and time.time() < deadline:
-            time.sleep(0.2)
+        run_started(model, home, adopted_id, "TASK: slow 8")
         proc.send_signal(signal.SIGKILL)
         proc.wait(10)
         running = stored_job(home, adopted_id)
-        assert running.state == "running" and running.pid, running
+        if TRANSPORT == "gateway":
+            assert running.state == "running" and running.admission_id and running.pid is None, running
+            assert gateway_pids(root), "the gateway keeps the admitted work after Talk dies"
+        else:
+            assert running.state == "running" and running.pid and running.pid_start, running
         proc = serve(root, port, env)
         procs.append(proc)
         deadline = time.time() + 90
@@ -527,6 +550,7 @@ def restart_job_reconciliation(model):
             time.sleep(0.3)
         adopted = stored_job(home, adopted_id)
         assert adopted.state == "succeeded" and "adopted after restart" in adopted.notes, adopted
+        assert "SCRIPTED-SLOW-DONE" in adopted.result, adopted
         second = subprocess.run([sys.executable, str(ROOT / "server.py"), "--config", str(root / "talk.yaml"),
                                  "--origin", fx.ORIGIN, "--port", str(free_port())], cwd=root, env=env,
                                 capture_output=True, text=True, timeout=60)
@@ -538,21 +562,40 @@ def restart_job_reconciliation(model):
         status, body = request(port, "task", {**call, "initData": init(), "delegation_item_id": "del_r2",
                                               "request": "slow 60"})
         lost_id = body["job"]["id"]
-        deadline = time.time() + 60
-        while not requests_with(model, "TASK: slow 60") and time.time() < deadline:
-            time.sleep(0.2)
+        run_started(model, home, lost_id, "TASK: slow 60")
         lost = stored_job(home, lost_id)
         proc.send_signal(signal.SIGKILL)
         proc.wait(10)
-        os.killpg(lost.pid, signal.SIGKILL)
-        time.sleep(0.5)
+        if TRANSPORT == "gateway":
+            # The run's owner is the gateway daemon: it dies too while Talk is down.
+            assert lost.admission_id and lost.pid is None, lost
+            daemons = gateway_pids(root)
+            assert daemons, "the gateway runs the admitted work while Talk is down"
+            for pid in daemons:
+                os.kill(pid, signal.SIGKILL)
+            deadline = time.time() + 10
+            while gateway_pids(root) and time.time() < deadline:
+                time.sleep(0.1)
+            assert not gateway_pids(root), "the gateway that ran the lost job is gone"
+            lost_errors = ("The Hermes gateway lost this task's run; its outcome is unknown.",
+                           "The run was interrupted before it finished.")
+        else:
+            os.killpg(lost.pid, signal.SIGKILL)
+            time.sleep(0.5)
+            lost_errors = ("Talk restarted while the task ran; it was not rerun.",)
         proc = serve(root, port, env)
         procs.append(proc)
-        job = {j["id"]: j for j in request(port, "tasks", {**call, "initData": init()})[1]["jobs"]}[lost_id]
-        assert job["state"] == "interrupted" and "not rerun" in job["error"], job
+        deadline = time.time() + 90
+        while time.time() < deadline:
+            job = {j["id"]: j for j in request(port, "tasks", {**call, "initData": init()})[1]["jobs"]}[lost_id]
+            if job["state"] in TERMINAL:
+                break
+            time.sleep(0.3)
+        assert job["state"] == "interrupted" and job["error"] in lost_errors, job
         time.sleep(2)
         assert len(requests_with(model, "TASK: slow 60")) == 1, "an interrupted job is never rerun"
-        return {"adopted": adopted_id, "adopted_state": adopted.state, "interrupted": lost_id,
+        return {"transport": TRANSPORT, "adopted": adopted_id, "adopted_state": adopted.state,
+                "adopted_admission": adopted.admission_id, "interrupted": lost_id,
                 "second_server_on_profile": "refused before recovery",
                 "interrupted_error": job["error"], "server_restarts": 2}
     finally:
@@ -560,6 +603,7 @@ def restart_job_reconciliation(model):
             if p.poll() is None:
                 p.terminate()
                 p.wait(10)
+        reap_gateways(root)
         shutil.rmtree(root, ignore_errors=True)
 
 
@@ -724,8 +768,10 @@ def unauthenticated_job_denial(model):
 
 
 def limits_and_approvals(model):
+    probed = ("HERMES_YOLO_MODE", "TG_VOICE_BOT_TOKEN", "TG_VOICE_ALLOWED_USER_IDS")
     os.environ["HERMES_YOLO_MODE"] = "1"
     os.environ["TG_VOICE_BOT_TOKEN"] = fx.BOT_TOKEN
+    os.environ["TG_VOICE_ALLOWED_USER_IDS"] = str(fx.USER_ID)
     e = Env(model, max_open_per_user=2)
     try:
         conv, vs = e.call()
@@ -751,15 +797,25 @@ def limits_and_approvals(model):
         _, body = e.task(conv, vs, f"shell rm -rf {victim}")
         blocked = e.wait(body["job"]["id"], conv, vs)
         assert "BLOCKED" in blocked["result"] and (victim / "keep.txt").exists(), blocked
-        _, body = e.task(conv, vs, "shell printenv HERMES_HOME HERMES_YOLO_MODE TG_VOICE_BOT_TOKEN TG_VOICE_ALLOWED_USER_IDS")
+        names = "|".join(("HERMES_HOME", *probed))
+        _, body = e.task(conv, vs, f"shell printenv HERMES_HOME; env | sed -nE 's/^({names})=.*/SET:\\1/p'")
         environ = e.wait(body["job"]["id"], conv, vs)
         assert environ["state"] == "succeeded" and str(e.home) in environ["result"], environ
-        assert "HERMES_YOLO_MODE" not in environ["result"] and "synthetic-offline-bot-token" not in environ["result"]
-        assert "TG_VOICE" not in environ["result"]
+        assert "SET:HERMES_HOME" in environ["result"], f"control: the probe reports a set name: {environ}"
+        leaked = [name for name in probed if "SET:" + name in environ["result"]]
+        assert not leaked and "synthetic-offline-bot-token" not in environ["result"], (leaked, environ)
+        assert "TG_VOICE" not in environ["result"], environ
+        daemons = {}
+        if TRANSPORT == "gateway":
+            for pid in gateway_pids(e.root):
+                env_names = {entry.split(b"=", 1)[0].decode(errors="replace") for entry in
+                             Path(f"/proc/{pid}/environ").read_bytes().split(b"\0") if entry}
+                daemons[pid] = sorted(env_names & set(probed))
+            assert daemons and not any(daemons.values()), f"the gateway daemon Talk started holds {daemons}"
     finally:
         e.close()
-        os.environ.pop("HERMES_YOLO_MODE", None)
-        os.environ.pop("TG_VOICE_BOT_TOKEN", None)
+        for name in probed:
+            os.environ.pop(name, None)
     risky = Env(model, profile_extra="approvals:\n  single_query_mode: approve\n")
     try:
         conv, vs = risky.call()
@@ -770,7 +826,8 @@ def limits_and_approvals(model):
     finally:
         risky.close()
     return {"limits": limits, "dangerous_command": "BLOCKED by native single-query approval; target kept",
-            "child_env": "no HERMES_YOLO_MODE, bot token or allowlist", "auto_approving_profile": 503}
+            "child_env": "no HERMES_YOLO_MODE, bot token or allowlist", "gateway_daemon_env_hits": daemons,
+            "transport": TRANSPORT, "auto_approving_profile": 503}
 
 
 # The target profile's approvals shape: smart, with single_query_mode left at the native default (deny).
@@ -805,9 +862,11 @@ def smart_approval_profile(model):
         assert "single-query mode (-q) runs without a user present" in blocked["result"], blocked
         assert (victim / "keep.txt").read_text() == "keep", "the flagged command never ran"
         assert guardian_calls() == guardian_before, "the smart classifier was not consulted"
+        from hermes_talk.agent import CHILD_ENV_DROP
+        profile_env = {k: v for k, v in os.environ.items() if k not in CHILD_ENV_DROP} | {"HERMES_HOME": str(e.home)}
         control = subprocess.run([sys.executable, "-c", "from tools.approval_smart import _smart_approve;"
                                   "print(_smart_approve('rm -rf /nonexistent-talk-probe', 'recursive delete'))"],
-                                 env=e.talk.agent.env, cwd=str(e.work),
+                                 env=profile_env, cwd=str(e.work),
                                  capture_output=True, text=True, timeout=120)
         assert guardian_calls() == guardian_before + 1, ("control: a direct classifier call reaches the scripted "
                                                          f"model, so a hidden one would be seen: {control.stderr[-400:]}")
@@ -1170,7 +1229,7 @@ def telegram_restart_dedup(model):
 
 
 class FlakyAgent:
-    """The real NativeAgent whose first `failures` starts raise OSError before any process exists."""
+    """The core's real task agent whose first `failures` starts raise OSError before anything is launched."""
 
     def __init__(self, inner, failures):
         self.inner, self.failures, self.starts = inner, failures, 0
@@ -1188,7 +1247,7 @@ class FlakyAgent:
 def queue_start_failure(model):
     TELEGRAM.reset()
     from hermes_talk import jobs
-    from hermes_talk.agent import NativeAgent
+    from hermes_talk.gateway_rpc import task_agent
     root = Path(tempfile.mkdtemp(prefix="talk-start-failure-"))
     e = Env(model, root=root)
     conv, vs = e.call()
@@ -1206,20 +1265,24 @@ def queue_start_failure(model):
             seeded.append(job.id)
         history.close()
         config = parse_config(talk_data(root / "work"), root / "home")
-        agent = FlakyAgent(NativeAgent(config.tasks, root / "home"), failures=1)
+        agent = FlakyAgent(task_agent(config.tasks, root / "home"), failures=1)
         e = Env(model, root=root, agent=agent)
         first = e.native(seeded[0])
-        assert first.state == "failed" and "could not start (OSError)" in first.error, first
+        start_error = {"cli": "could not start (OSError)", "gateway": "did not take the task (OSError)"}[TRANSPORT]
+        assert first.state == "failed" and start_error in first.error, first
         second = e.wait(seeded[1], conv, vs)
         assert agent.starts == 2 and second["state"] == "succeeded" and "SCRIPTED-ANSWER: queued 2" in second["result"]
         failed_report = settled_report(e, seeded[0])
         assert failed_report.state == "sent" and failed_report.shown == "failed" and failed_report.text == "❌ queued 1"
-        always = FlakyAgent(NativeAgent(config.tasks, root / "home"), failures=99)
+        always = FlakyAgent(task_agent(config.tasks, root / "home"), failures=99)
         e.talk.board.agent = always
         ids = [e.task(conv, vs, f"doomed {n}", f"del_q{n + 2}")[1]["job"]["id"] for n in (1, 2)]
         states = [e.native(i).state for i in ids]
         assert states == ["failed", "failed"] and always.starts == 2, states
-        return {"restart_queue": {"first": first.state, "second": second["state"], "spawn_attempts": agent.starts},
+        if TRANSPORT == "gateway":
+            agent.close()
+        return {"transport": TRANSPORT,
+                "restart_queue": {"first": first.state, "second": second["state"], "spawn_attempts": agent.starts},
                 "failed_report": failed_report.text, "always_failing": states}
     finally:
         e.close()
@@ -1374,7 +1437,7 @@ def bounded_native_spool(model):
     return results
 
 
-CHECKS = (native_tool_roundtrip, background_result_delivery, context_update_injection, persistent_two_call_history,
+COMMON = (native_tool_roundtrip, background_result_delivery, context_update_injection, persistent_two_call_history,
           pulse_visibility_and_cursor, pulse_late_after_fast_start, cross_user_denial, cross_profile_denial, restart_job_reconciliation,
           voice_disconnect_vs_cancel, delegation_id_dedup, plugin_native_install, unauthenticated_job_denial,
           limits_and_approvals, smart_approval_profile, receipt_ack_no_double_speech, telegram_default_receipt,
@@ -1512,53 +1575,6 @@ def rpc_budget_timeout(model):
                 "receipt_outcome": receipt["outcome"], "talk_backstop_s": 80, "late_effect": effect.exists()}
     finally:
         e.close()
-
-
-def rpc_restart_adoption(model):
-    root = Path(tempfile.mkdtemp(prefix="talk-rpc-restart-"))
-    home, work = root / "profiles" / "synthetic", root / "work"
-    work.mkdir(parents=True)
-    fx.write_home(home)
-    (home / "config.yaml").write_text(model_config(model))
-    data = talk_data(work, receipts={"enabled": False})
-    (root / "talk.yaml").write_text(json.dumps(data))
-    conv, vs = prepare_call(home, data)
-    env = {**os.environ, "HERMES_HOME": str(home), "TG_VOICE_BOT_TOKEN": fx.BOT_TOKEN, "TELEGRAM_PROXY": BLACKHOLE,
-           "TG_VOICE_ALLOWED_USER_IDS": f"{fx.USER_ID},{fx.OTHER_USER_ID}"}
-    port = free_port()
-    procs = [serve(root, port, env)]
-    call = {"initData": init(), "conversation_id": conv, "voice_session_id": vs}
-    try:
-        status, body = request(port, "task", {**call, "delegation_item_id": "del_rpc_r1", "request": "slow 8"})
-        assert status == 200, body
-        job_id = body["job"]["id"]
-        deadline = time.time() + 60
-        while not requests_with(model, "TASK: slow 8") and time.time() < deadline:
-            time.sleep(0.2)
-        procs[0].send_signal(signal.SIGKILL)
-        procs[0].wait(10)
-        running = stored_job(home, job_id)
-        assert running.state == "running" and running.admission_id and running.pid is None, running
-        assert gateway_pids(root), "the gateway keeps the admitted work after Talk dies"
-        procs.append(serve(root, port, env))
-        deadline = time.time() + 90
-        while time.time() < deadline:
-            job = {j["id"]: j for j in request(port, "tasks", {**call, "initData": init()})[1]["jobs"]}[job_id]
-            if job["state"] in TERMINAL:
-                break
-            time.sleep(0.3)
-        adopted = stored_job(home, job_id)
-        assert adopted.state == "succeeded" and "adopted after restart" in adopted.notes, adopted
-        assert "SCRIPTED-SLOW-DONE" in adopted.result, adopted
-        assert len(requests_with(model, "TASK: slow 8")) == 1, "the adopted run was not started twice"
-        return {"job": job_id, "admission": adopted.admission_id, "state": adopted.state, "server_restarts": 1}
-    finally:
-        for p in procs:
-            if p.poll() is None:
-                p.terminate()
-                p.wait(10)
-        reap_gateways(root)
-        shutil.rmtree(root, ignore_errors=True)
 
 
 def _fault(agent, inject):
@@ -1701,15 +1717,14 @@ def rpc_composite_toolsets(model):
         e.close()
 
 
-RPC_CHECKS = (rpc_composite_toolsets, rpc_tool_resume_idempotency, rpc_destructive_denial, rpc_cancel_no_late_effect, rpc_budget_timeout,
-              rpc_restart_adoption, rpc_lost_admission_ack, rpc_genuine_refusal, rpc_stop_survives_outage,
-              background_result_delivery, persistent_two_call_history, delegation_id_dedup,
-              receipt_ack_no_double_speech, telegram_default_receipt, telegram_alternate_destination,
-              telegram_ambiguous_send, cross_user_denial, unauthenticated_job_denial)
+# The gateway transport's own safety properties; every COMMON check also runs on it.
+RPC_ONLY = (rpc_composite_toolsets, rpc_tool_resume_idempotency, rpc_destructive_denial, rpc_cancel_no_late_effect,
+            rpc_budget_timeout, rpc_lost_admission_ack, rpc_genuine_refusal, rpc_stop_survives_outage)
 
 
 def run_inner(receipts, only, rpc_target=None):
-    global TELEGRAM
+    global TELEGRAM, TRANSPORT
+    from hermes_talk import gateway_rpc
     from scripted_model import ScriptedModel
     from synthetic_telegram import SyntheticTelegram
     TELEGRAM = SyntheticTelegram()
@@ -1717,10 +1732,16 @@ def run_inner(receipts, only, rpc_target=None):
     os.environ["TELEGRAM_PROXY"] = BLACKHOLE
     model = ScriptedModel()
     failures = 0
+    TRANSPORT = gateway_rpc.TRANSPORT if gateway_rpc.client_available() else "cli"
     if rpc_target:
         import hermes_cli
         assert Path(hermes_cli.__file__).resolve().is_relative_to(Path(rpc_target).resolve()), hermes_cli.__file__
-    selected = [fn for fn in (RPC_CHECKS if rpc_target else CHECKS) if not only or fn.__name__ in only]
+        assert TRANSPORT == "gateway", "the pinned core's public gateway client selects the RPC transport"
+    checks = COMMON + (RPC_ONLY if TRANSPORT == "gateway" else ())
+    unknown = set(only) - {fn.__name__ for fn in checks}
+    assert not unknown, f"not run on the {TRANSPORT} transport: {sorted(unknown)}"
+    selected = [fn for fn in checks if not only or fn.__name__ in only]
+    print(f"transport: {TRANSPORT}", flush=True)
     for fn in selected:
         started = time.time()
         try:

@@ -33,14 +33,17 @@ A gateway error fails or delays the task; it never falls back to a local process
 import asyncio
 import contextlib
 import logging
+import os
 import threading
 from pathlib import Path
 
-from .agent import APPROVING, TASK_APPROVAL_MODES, Outcome, Readiness, _profile_config
+from .agent import APPROVING, LAUNCH_SECRETS, TASK_APPROVAL_MODES, Outcome, Readiness, _profile_config
 
 logger = logging.getLogger(__name__)
 
 TRANSPORT = "gateway"
+# The core's public create label for third-party integrations, kept out of user session lists.
+TASK_SOURCE = "tool"
 RPC_TIMEOUT_S = 30.0
 INTERRUPTED_OUTCOMES = frozenset({"cancelled", "interrupted", "terminated"})
 
@@ -169,6 +172,10 @@ class GatewayAgent:
     async def _open(self):
         if self._client is not None:
             return self._client
+        # A daemon that connect starts inherits this process's environment, so Talk's launch secrets
+        # (read once by server.py) leave it first; the core strips only its own names.
+        for name in LAUNCH_SECRETS:
+            os.environ.pop(name, None)
         connect = self._connect
         if connect is None:
             from hermes_cli.gateway_client import connect_gateway as connect
@@ -241,7 +248,7 @@ class GatewayAgent:
         else:
             from hermes_cli.gateway_client import GatewayRPCError
             try:
-                snapshot = self.call("session.create", cwd=str(self.tasks.workdir),
+                snapshot = self.call("session.create", source=TASK_SOURCE, cwd=str(self.tasks.workdir),
                                      toolsets=launch_toolsets(self.tasks.toolsets), max_turns=self.tasks.max_turns,
                                      run_budget=float(self.tasks.run_budget_s), timeout=60.0)
             except GatewayRPCError as exc:

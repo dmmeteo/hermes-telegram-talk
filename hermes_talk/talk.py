@@ -14,7 +14,7 @@ from dataclasses import asdict
 
 from . import activity, pulse, pulse_policy, resume
 from .agent import Readiness
-from .gateway_rpc import task_agent
+from .gateway_rpc import TASK_SOURCE, task_agent
 from .config import PRIVATE_NAMES
 from .context import UPDATE_HEADER, chat_section, compose, update
 from .jobs import DELEGATION_ID, OPEN, SUCCEEDED, UNDELIVERED, JobBoard
@@ -157,7 +157,7 @@ class TalkRuntime:
         if since is None:
             since = (now - c.activity_window_s, "")
         try:
-            rows, exhaustive = self.history.activity_rows(SOURCE, since[0], self.activity_scan_max)
+            rows, exhaustive = self.history.activity_rows((SOURCE, TASK_SOURCE), since[0], self.activity_scan_max)
             mine = activity.unread(rows, since=since, user_id=user_id, owner_user_id=c.activity_owner_user_id,
                                    sources=c.activity_sources, exclude_ids={conversation_id})
             known = self.pulse.known(account)

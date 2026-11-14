@@ -95,7 +95,7 @@ class NativeHistory:
         with self.lock:
             return _rows(self.db.get_messages(session_id, limit=limit, latest=True))
 
-    def activity_rows(self, exclude_source, since_ts, max_rows):
+    def activity_rows(self, exclude_sources, since_ts, max_rows):
         """(rows active at or after since_ts, newest first; exhaustive) read page by page.
 
         exhaustive is False when max_rows was reached before the scan got back to since_ts.
@@ -104,7 +104,7 @@ class NativeHistory:
         with self.lock:
             while True:
                 page = self.db.list_sessions_rich(limit=PAGE, offset=offset, order_by_last_active=True,
-                                                  exclude_sources=[exclude_source])
+                                                  exclude_sources=list(exclude_sources))
                 for row in page:
                     if row.get("last_active") is None or row["id"] in seen:
                         continue  # an undated row says nothing about where the scan is in time
@@ -170,9 +170,9 @@ class MemoryHistory:
     def end_session(self, session_id, reason, at=None):
         self.sessions[session_id].update(ended_at=at or time.time(), end_reason=reason)
 
-    def activity_rows(self, exclude_source, since_ts, max_rows):
+    def activity_rows(self, exclude_sources, since_ts, max_rows):
         rows = sorted((dict(s) for s in self.sessions.values()
-                       if s["source"] != exclude_source and s["last_active"] >= since_ts),
+                       if s["source"] not in exclude_sources and s["last_active"] >= since_ts),
                       key=lambda s: s["last_active"], reverse=True)
         return rows[:max_rows], len(rows) <= max_rows
 

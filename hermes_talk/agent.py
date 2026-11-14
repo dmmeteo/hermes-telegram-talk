@@ -20,9 +20,11 @@ from pathlib import Path
 
 SOURCE = "telegram-voice"
 DATA_DIR = ("plugin-data", "hermes-talk", "jobs")
-CHILD_ENV_DROP = ("TG_VOICE_BOT_TOKEN", "TG_VOICE_ALLOWED_USER_IDS", "HERMES_YOLO_MODE", "HERMES_ACCEPT_HOOKS",
-                  "HERMES_EXEC_ASK", "HERMES_GATEWAY_SESSION", "HERMES_SESSION_PLATFORM", "HERMES_CRON_SESSION",
-                  "HERMES_INTERACTIVE", "HERMES_SESSION_SOURCE")
+# Talk's own launch secrets: read once by server.py, never by a task or by a gateway daemon Talk starts.
+LAUNCH_SECRETS = ("TG_VOICE_BOT_TOKEN", "TG_VOICE_ALLOWED_USER_IDS")
+CHILD_ENV_DROP = (*LAUNCH_SECRETS, "HERMES_YOLO_MODE", "HERMES_ACCEPT_HOOKS", "HERMES_EXEC_ASK",
+                  "HERMES_GATEWAY_SESSION", "HERMES_SESSION_PLATFORM", "HERMES_CRON_SESSION", "HERMES_INTERACTIVE",
+                  "HERMES_SESSION_SOURCE")
 APPROVING = {"approve", "off", "allow", "yes", "true"}
 TASK_APPROVAL_MODES = {"manual", "smart"}
 CANCEL_GRACE_S = 8.0
