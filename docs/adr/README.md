@@ -8,3 +8,4 @@
 - [0006 tg-talk + full-duplex = <3: a hermes-fullduplex core and a Telegram add-on](0006-talk-full-duplex-merge.md) (proposed)
 - [0007 Call initialization follows Conduit: initial_items, a background summary, a voice persona and a configured opening](0007-conduit-call-initialization.md)
 - [0008 The call's dialogue follows Conduit: speak-first opening, one idle-gated speakable queue, exactly-once delivery](0008-conduit-dialogue-lifecycle.md)
+- [0009 Telegram task status titles: an English sentence from the host model for other languages](0009-task-status-titles.md)

@@ -357,8 +357,11 @@ Hermes session and reaches the user by voice.
 The title is the voice model's last-line `TITLE:`, which the call instructions ask for in English; a `TITLE:` line
 inside the task stays the user's text. Without a usable one,
 the request names the task, shortened the way Conduit titles a background job (`VoiceBackgroundJobs.title(for:)`:
-whitespace collapsed, at most 60 characters cut at a word), when it is English; otherwise it is "Hermes task N".
-Nothing is translated. Title and message id are stored with the task's report record.
+whitespace collapsed, at most 60 characters cut at a word), when it is English. A request in another language is named
+by the plugin's own host model (`ctx.llm`, the Pulse route, no override): once, before the only send, with the redacted
+request, asking for one plain English sentence of at most eight words. If there is no model route yet, the call fails,
+or the answer is not a few plain English words, the request's own words stay the title. The title never changes after
+the first send. Title and message id are stored with the task's report record (see `docs/adr/0009-task-status-titles.md`).
 
 The user can send the status message elsewhere only by naming a destination the operator listed in `receipts.destinations` for
 that user (`REPORT TO: <name>` at the end of the delegation). It then goes only there. The browser cannot pass a chat

@@ -4,7 +4,8 @@ The message is a status mark and a few English words naming the task: queued, ru
 or cancelled. It never carries the result, which stays in the native task session and reaches the user by
 voice. The title is the voice model's TITLE line when it gave a usable one; otherwise the request itself,
 shortened the way Conduit titles a background job (VoiceBackgroundJobs.title(for:)), when it is English;
-otherwise "Hermes task N". Nothing is translated.
+otherwise one short English sentence from the profile's own model through the plugin's host ctx.llm, asked
+once before the only send. If that gives nothing usable, the request's own words stay the title.
 
 A task's record (title, bound destination, status to show, message identity) is stored in the profile's
 state.db (SessionDB meta) before anything is sent. The first send is claimed (pending -> sending, stored),
@@ -50,6 +51,12 @@ EDIT_REFUSED = ("message to edit not found", "message can't be edited", "chat no
 TITLE_LINE = re.compile(r"TITLE\s*:\s*(.*)")
 TITLE_CHARS = 60  # Conduit VoiceBackgroundJobs.maximumTitleCharacters
 TITLE_WORDS = 8
+TITLE_PURPOSE = "talk_task_title"
+TITLE_TIMEOUT_S = 20.0
+TITLE_INSTRUCTIONS = (
+    "You name a background task for its one-line status message. The request below is what the user asked an "
+    "assistant to do, possibly in another language. Reply with a JSON object {\"title\": \"...\"}: one short plain "
+    f"English sentence of at most {TITLE_WORDS} words saying what the task does. No quotes, markup, emoji or numbers.")
 # Markup that Hermes' formatter (first send) and a plain-text edit would render differently.
 MARKUP = re.compile(r"[*_`\[\]~|<>#\\]")
 DIRECTIVE = re.compile(r"(?im)^\s*report\s+to\s*:\s*(.+?)\s*$")
@@ -80,6 +87,12 @@ def _english(text):
     return bool(letters) and all(c.isascii() for c in letters)
 
 
+def usable_title(text):
+    """A plain English title of a few words, Conduit-shortened, else ""."""
+    title = _plain(text)
+    return conduit_title(title) if _english(title) and len(title.split()) <= TITLE_WORDS else ""
+
+
 def take_title(request):
     """(request without its title line, the voice model's few-word English title or ""). Only a last line
     "TITLE: ..." (before or after a REPORT TO line) is the voice model's; any other line is the user's task."""
@@ -91,17 +104,22 @@ def take_title(request):
         match = TITLE_LINE.fullmatch(line)
         if match is None:
             return request, ""
-        title = _plain(match.group(1))
-        usable = _english(title) and len(title.split()) <= TITLE_WORDS
-        return "\n".join(lines[:i] + lines[i + 1:]).strip(), conduit_title(title) if usable else ""
+        return "\n".join(lines[:i] + lines[i + 1:]).strip(), usable_title(match.group(1))
     return request, ""
 
 
 def job_title(job, redact):
+    """(title, final). A request in another language is shown in its own words only if the host model cannot name it."""
     if job.title:
-        return conduit_title(_plain(redact(job.title)))
+        return conduit_title(_plain(redact(job.title))), True
     request = _plain(redact(job.request))
-    return conduit_title(request) if _english(request) else f"Hermes task {job.number}"
+    return conduit_title(request), _english(request)
+
+
+def ask_title(model, request):
+    """The host model's English title for a request (pulse_model.PulseModel over ctx.llm); raises when it has none."""
+    title = model.ask(TITLE_INSTRUCTIONS, request, TITLE_PURPOSE, max_tokens=1000, timeout=TITLE_TIMEOUT_S).get("title")
+    return title if isinstance(title, str) else ""
 
 
 @dataclass(frozen=True)
@@ -125,7 +143,9 @@ class Destination:
 class Report:
     """A task's one status message. `state` is whether the message exists; `status` is what it should show,
     `shown` what Telegram confirmed it shows, `held` a status whose edit Telegram refused or that gave up;
-    `stalled` marks a give-up on temporary errors, which a restart retries."""
+    `stalled` marks a give-up on temporary errors, which a restart retries; `naming` a title still in the request's
+    own words, which the host model is asked to name once before the first send. While it names, `status` stays the
+    first one and later statuses wait in order, so every step is still shown."""
     job_id: str
     scope: str
     destination: dict
@@ -134,6 +154,7 @@ class Report:
     shown: str = None
     held: str = None
     stalled: bool = False
+    naming: bool = False
     state: str = PENDING
     attempts: int = 0
     not_before: float = 0.0
@@ -267,8 +288,10 @@ class ReportDesk:
     """Durable status messages: created once at a task's first status, claimed before the only send, then
     edited to each later status by one worker per task."""
 
-    def __init__(self, history, sender, clock, attempts=3, backoff=(5.0, 30.0), redact=str):
-        self.history, self.sender, self.clock, self.redact = history, sender, clock, redact
+    def __init__(self, history, sender, clock, attempts=3, backoff=(5.0, 30.0), redact=str, namer=None):
+        self.history, self.sender, self.clock, self.redact, self.namer = history, sender, clock, redact, namer
+        self.requests = {}  # job id -> redacted request, for a report still naming
+        self.passed = {}  # job id -> statuses it passed while naming, shown in order after the first send
         self.attempts, self.backoff = attempts, backoff
         self.owner = f"{os.getpid()}:{process_start(os.getpid())}:{secrets.token_hex(4)}"
         self.lock = threading.RLock()
@@ -301,16 +324,42 @@ class ReportDesk:
                     return None
                 destination = job.report_to or asdict(Destination.private(
                     int(job.scope.rsplit(":", 1)[1]), job.scope.rsplit(":", 2)[1][2:]))
-                report = self._save(Report(job_id=job.id, scope=job.scope, destination=destination,
-                                           title=job_title(job, self.redact), status=status, created=self.clock()))
+                title, final = job_title(job, self.redact)
+                report = self._save(Report(job_id=job.id, scope=job.scope, destination=destination, title=title,
+                                           naming=not final and self.namer is not None, status=status,
+                                           created=self.clock()))
+            elif report.naming or self.passed.get(job.id):
+                self._remember(report, job)
+                passed = self.passed.setdefault(job.id, [])
+                if status != (passed[-1] if passed else report.status):
+                    passed.append(status)
+                if report.naming:
+                    return report
             elif not report.status or report.status == status:
                 return report
             else:
-                report = self._save(replace(report, status=status, attempts=0 if report.state == SENT else
-                                            report.attempts, not_before=0.0 if report.state == SENT else
-                                            report.not_before))
+                report = self._show(report, status)
+            self._remember(report, job)
         self.dispatch(job.id)
         return report
+
+    def _remember(self, report, job):
+        if report.naming:
+            self.requests[job.id] = _plain(self.redact(job.request))
+
+    def _show(self, report, status):
+        return self._save(replace(report, status=status, attempts=0 if report.state == SENT else report.attempts,
+                                  not_before=0.0 if report.state == SENT else report.not_before))
+
+    def _replay(self, job_id):
+        """After naming, the statuses a job passed meanwhile, one per edit, once its message exists."""
+        report, passed = self.reports.get(job_id), self.passed.get(job_id)
+        if report is None or report.state == PENDING or not passed:
+            return None
+        self._show(report, passed.pop(0))
+        if not passed:
+            del self.passed[job_id]
+        return self._claim(job_id) or self._replay(job_id)
 
     def dispatch(self, job_id):
         threading.Thread(target=self.drive, args=(job_id,), daemon=True).start()
@@ -325,11 +374,17 @@ class ReportDesk:
         try:
             while True:
                 with self.lock:
-                    step = self._claim(job_id)
+                    step = self._claim(job_id) or self._replay(job_id)
                     if step is None:
                         self.busy.discard(job_id)
                         return self.reports.get(job_id)
                 kind, status, report = step
+                if kind == "name":
+                    title = self._name(report)
+                    with self.lock:
+                        self._save(replace(self.reports[job_id], title=title, naming=False))
+                        self.requests.pop(job_id, None)
+                    continue
                 destination = Destination(**report.destination)
                 try:
                     result = (self.sender.send(destination, report.text) if kind == "send" else
@@ -347,6 +402,8 @@ class ReportDesk:
         report = self.reports.get(job_id)
         if report is None or not report.status or not (report.state == PENDING or report.needs_edit):
             return None
+        if report.state == PENDING and report.naming:
+            return "name", report.status, report
         wait = report.not_before - self.clock()
         if wait > 0:
             self._later(wait, job_id)
@@ -355,6 +412,14 @@ class ReportDesk:
             return "send", report.status, self._save(report.to(SENDING, attempts=report.attempts + 1,
                                                                 owner=self.owner))
         return "edit", report.status, self._save(replace(report, attempts=report.attempts + 1))
+
+    def _name(self, report):
+        """The host model's English title, else the request's own words; asked outside the lock."""
+        try:
+            named = self.namer(self.requests.get(report.job_id, report.title)) if self.namer else ""
+        except Exception:  # no model route, an outage or a refusal: the request's own words name the task
+            named = ""
+        return usable_title(self.redact(named or "")) or report.title
 
     def _retry_at(self, attempts, error=""):
         wait = self.backoff[min(attempts - 1, len(self.backoff) - 1)]

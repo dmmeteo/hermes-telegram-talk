@@ -21,7 +21,7 @@ from .jobs import DELEGATION_ID, OPEN, SUCCEEDED, UNDELIVERED, JobBoard
 from .pulse_engine import SELECT_ON_CALL_S, PulseEngine
 from .pulse_ledger import PulseLedger
 from .pulse_model import ModelUnavailable, PulseModel
-from .receipts import DIRECTIVE, SINCE_KEY, Destination, ReportDesk, TelegramSender, take_title
+from .receipts import DIRECTIVE, SINCE_KEY, Destination, ReportDesk, TelegramSender, ask_title, take_title
 from .store import SOURCE, TalkError, TalkStore, VoiceScope, clip
 from .thread_inbox import ThreadInbox, history_text, item_line, receipt
 
@@ -113,7 +113,7 @@ class TalkRuntime:
                 history.set_meta(SINCE_KEY, "")  # turning reports back on later reports nothing from this gap
             if r.enabled:
                 self.desk = ReportDesk(history, sender or TelegramSender(bot_token, r.send_timeout_s), clock,
-                                       r.attempts, r.backoff_s, redact)
+                                       r.attempts, r.backoff_s, redact, lambda text: ask_title(self.model, text))
             self.board = JobBoard(history, self.agent, config.tasks, clock, self._task_prompt,
                                   lambda job, sid: self.store.bind_agent_session(job.conversation_id, sid), redact,
                                   self.desk)

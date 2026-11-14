@@ -26,6 +26,7 @@ sys.path.insert(0, str(ROOT))
 
 from hermes_talk import jobs, receipts  # noqa: E402
 from hermes_talk.history import MemoryHistory  # noqa: E402
+from hermes_talk.pulse_model import PulseModel  # noqa: E402
 
 USER, BOT = 1001, "123456"
 TOKEN = BOT + ":" + "t" * 35
@@ -134,14 +135,140 @@ def titles():
         "Summarize the quarterly synthetic infrastructure costs and…"
     assert conduit("x" * 70) == "x" * 60 + "…"
     fallback = receipts.job_title
-    assert fallback(job(title="Check build"), str) == "Check build"
-    assert fallback(job(request="check the synthetic build"), str) == "check the synthetic build"
-    assert fallback(job(number=4, request="проверь сборку"), str) == "Hermes task 4", "no fake translation"
+    assert fallback(job(title="Check build"), str) == ("Check build", True)
+    assert fallback(job(request="check the synthetic build"), str) == ("check the synthetic build", True)
+    assert fallback(job(number=4, request="перевір збірку"), str) == ("перевір збірку", False), \
+        "another language keeps its own words until the host model names it, never 'Hermes task N'"
     secret = "sk-" + "s" * 24
     redact = lambda t: t.replace(secret, "[redacted]")
-    assert secret not in fallback(job(request=f"rotate {secret}"), redact)
+    assert secret not in fallback(job(request=f"rotate {secret}"), redact)[0]
     return {"directive": "TITLE: <few English words>", "fallback": "Conduit title(for:) on an English request, "
-            "else 'Hermes task N'", "max_chars": receipts.TITLE_CHARS}
+            "else the host model's English sentence", "max_chars": receipts.TITLE_CHARS}
+
+
+class HostModel:
+    """The plugin's host ctx.llm as a report sees it through PulseModel: a synthetic stand-in (no provider)."""
+
+    def __init__(self, *answers):
+        self.answers, self.asked = list(answers), []
+
+    def complete_structured(self, instructions, input, json_mode, purpose, timeout, max_tokens):
+        self.asked.append({"instructions": instructions, "text": input[0]["text"], "purpose": purpose})
+        answer = self.answers.pop(0) if self.answers else {"title": "Check the synthetic build"}
+        if isinstance(answer, Exception):
+            raise answer
+        return types.SimpleNamespace(parsed=answer, text="", provider="fixture", model="titles")
+
+
+def namer(host):
+    return lambda request: receipts.ask_title(PulseModel(llm=host), request)
+
+
+def other_language_named_in_english():
+    ukrainian = "перевір синтетичну збірку і скажи, чи все гаразд"
+    host, history, sender = HostModel(), MemoryHistory(), ScriptedSender()
+    desk = desk_for(history, sender, namer=namer(host))
+    j = walk(desk, job(number=4, request=ukrainian), jobs.ACCEPTED, jobs.RUNNING, jobs.SUCCEEDED)
+    assert [c["text"] for c in sender.calls] == ["🕓 Check the synthetic build", "⏳ Check the synthetic build",
+                                                  "✅ Check the synthetic build"], sender.calls
+    assert [(a["text"], a["purpose"]) for a in host.asked] == [(ukrainian, receipts.TITLE_PURPOSE)], \
+        "the host model is asked once, before the only send"
+    assert receipts.load(history.get_meta(receipts.report_key(j.id))).title == "Check the synthetic build"
+    sender.calls.clear()
+    walk(desk, job(number=5, request="перевір інше"), jobs.ACCEPTED, jobs.RUNNING, jobs.FAILED)
+    assert [c["text"] for c in sender.calls] == ["🕓 Check the synthetic build", "⏳ Check the synthetic build",
+                                                  "❌ Check the synthetic build"], sender.calls
+    asked = len(host.asked)
+    for english in (job(number=6, request="check the synthetic build"), job(number=7, request="перевір", title="Check it")):
+        walk(desk, english, jobs.ACCEPTED)
+    assert len(host.asked) == asked, "an English request or a voice TITLE needs no model"
+    secret = "sk-" + "s" * 24
+    redact = lambda t: t.replace(secret, "[redacted]")
+    cases = {"outage": TimeoutError("synthetic outage"), "not English": {"title": "Перевірити збірку"},
+             "too long": {"title": "word " * 12}, "not text": {"title": 7}, "empty": {}}
+    shown = {}
+    for n, (name, answer) in enumerate(cases.items(), start=10):
+        history, sender, host = MemoryHistory(), ScriptedSender(), HostModel(answer)
+        desk = desk_for(history, sender, namer=namer(host), redact=redact)
+        walk(desk, job(number=n, request=f"перевір {name}"), jobs.ACCEPTED)
+        shown[name] = sender.calls[0]["text"]
+        assert shown[name] == f"🕓 перевір {name}", (name, sender.calls)
+    history, sender, host = MemoryHistory(), ScriptedSender(), HostModel({"title": f"Rotate *key* {secret}"})
+    desk = desk_for(history, sender, namer=namer(host), redact=redact)
+    walk(desk, job(number=20, request=f"зміни ключ {secret}"), jobs.ACCEPTED)
+    assert secret not in host.asked[0]["text"] and sender.calls[0]["text"] == "🕓 Rotate key redacted", \
+        (host.asked, sender.calls)
+    return {"named": "Check the synthetic build", "model_calls_per_task": 1, "fallbacks": shown}
+
+
+class GatedHost(HostModel):
+    """Answers only once released, so the job moves on while its title is being named."""
+
+    def __init__(self, *answers):
+        super().__init__(*answers)
+        self.gate = threading.Event()
+
+    def complete_structured(self, **kw):
+        self.gate.wait(5)
+        return super().complete_structured(**kw)
+
+
+def every_status_survives_naming():
+    for states, marks in (((jobs.RUNNING, jobs.SUCCEEDED), "🕓⏳✅"), ((jobs.CANCELLED,), "🕓⏹"),
+                          ((jobs.RUNNING, jobs.FAILED), "🕓⏳❌")):
+        host, history, sender = GatedHost(), MemoryHistory(), ScriptedSender()
+        desk = desk_for(history, sender, namer=namer(host))
+        j = walk(desk, job(number=3, request="перевір синтетичну збірку"), jobs.ACCEPTED, *states, settle_each=False)
+        time.sleep(0.2)
+        assert not sender.calls, "nothing is sent before the title"
+        host.gate.set()
+        report = settle(desk, j.id)
+        deadline = time.time() + 5
+        while (report.needs_edit or desk.passed.get(j.id)) and time.time() < deadline:
+            time.sleep(0.01)
+            report = desk.get(j.id)
+        assert [c["text"] for c in sender.calls] == [f"{m} Check the synthetic build" for m in marks], sender.calls
+        assert sender.kinds() == ["send"] + ["edit"] * (len(marks) - 1), sender.calls
+    host, history, sender = GatedHost(), MemoryHistory(), ScriptedSender()
+    sender.gate = threading.Event()
+    desk = desk_for(history, sender, namer=namer(host))
+    j = walk(desk, job(number=3, request="перевір синтетичну збірку"), jobs.ACCEPTED, jobs.RUNNING, settle_each=False)
+    host.gate.set()
+    deadline = time.time() + 5
+    while not sender.calls and time.time() < deadline:
+        time.sleep(0.01)
+    desk.follow(j.to(jobs.SUCCEEDED))  # while the first send is in flight and "running" still waits its turn
+    sender.gate.set()
+    report = settle(desk, j.id)
+    while (report.needs_edit or desk.passed.get(j.id)) and time.time() < deadline:
+        time.sleep(0.01)
+        report = desk.get(j.id)
+    assert [c["text"][0] for c in sender.calls] == ["🕓", "⏳", "✅"], sender.calls
+    return {"shown_after_naming": ["queued, running, completed", "queued, cancelled", "queued, running, failed"],
+            "status_during_first_send": "queued, running, completed"}
+
+
+def naming_survives_a_restart():
+    ukrainian = "перевір синтетичну збірку"
+    history = MemoryHistory()
+    j = job(number=8, request=ukrainian)
+    title, final = receipts.job_title(j, str)
+    left = receipts.Report(job_id=j.id, scope=SCOPE, destination=PRIVATE, title=title, status="queued",
+                           naming=not final, created=1.0)
+    history.set_meta(receipts.report_key(j.id), json.dumps(asdict(left)))
+    host, sender = HostModel(), ScriptedSender()
+    desk = desk_for(history, sender, namer=namer(host))
+    desk.follow(j)
+    desk.reconcile()
+    settle(desk, j.id)
+    assert [c["text"] for c in sender.calls] == ["🕓 Check the synthetic build"], sender.calls
+    assert [a["text"] for a in host.asked] == [ukrainian], host.asked
+    again = ScriptedSender()
+    desk = desk_for(history, again, namer=namer(HostModel()))
+    desk.reconcile()
+    time.sleep(0.3)
+    assert not again.calls and desk.get(j.id).title == "Check the synthetic build", again.calls
+    return {"named_after_restart": True, "sent": 1}
 
 
 def one_message_lifecycle():
@@ -485,7 +612,7 @@ def real_telegram_edit():
             "request": transport.seen[0], "answers": ["ok", "not modified -> done", "not found -> final"]}
 
 
-CHECKS = (titles, one_message_lifecycle, coalesced_transitions, uncertain_create_never_resent,
+CHECKS = (titles, other_language_named_in_english, every_status_survives_naming, naming_survives_a_restart, one_message_lifecycle, coalesced_transitions, uncertain_create_never_resent,
           refused_create_retries_then_fails, edits_converge, restart_recovery, binding_and_since,
           telegram_sender_contract, no_detail_in_messages)
 

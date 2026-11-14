@@ -4,6 +4,8 @@ It stands in for the profile's inference provider only: Hermes' own AIAgent, too
 execution and SessionDB run unchanged against it. Nothing here is a real model, and no paid or live
 provider is ever called.
 
+Talk's task-title call (receipts.TITLE_INSTRUCTIONS) gets {"title": ...} from TASK_TITLES, a fixed table.
+
 Script, keyed on the newest user message:
   "read <path>"   -> a read_file tool call for <path>, then the tool's own output quoted back
   "recall"        -> the user/assistant turns the agent received, in order
@@ -45,10 +47,22 @@ def is_title_request(messages):
     return isinstance(first, str) and first.startswith("You name chat sessions")
 
 
+TASK_TITLES = {"перевір синтетичну збірку": "Check the synthetic build"}
+
+
+def task_title_request(messages):
+    """Talk's task-title call through the host ctx.llm (instructions, then the request): the request, else None."""
+    content = messages[-1].get("content") if messages else None
+    texts = [p.get("text", "") for p in content if isinstance(p, dict)] if isinstance(content, list) else []
+    return texts[1].strip() if len(texts) == 2 and texts[0].startswith("You name a background task") else None
+
+
 def plan(messages):
     """The scripted reply for a chat request: ("tool", name, args) or ("text", content)."""
     if is_title_request(messages):
         return ("text", "Synthetic voice task")
+    if task_title_request(messages) is not None:
+        return ("text", json.dumps({"title": TASK_TITLES.get(task_title_request(messages), "")}))
     if messages and messages[-1].get("role") == "tool":
         result = messages[-1].get("content") or ""
         if isinstance(result, list):

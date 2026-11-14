@@ -50,6 +50,7 @@ BLACKHOLE = "http://127.0.0.1:9"
 TELEGRAM = None
 TRANSPORT = None  # the product's own transport for this core, decided once in run_inner
 PLUGIN_FILES = ("plugin.yaml", "__init__.py", "server.py", "hermes_talk", "static", "LICENSE")
+PLUGIN_ENABLED = "plugins:\n  enabled:\n    - hermes-telegram-talk\n"
 TERMINAL = ("succeeded", "failed", "cancelled", "interrupted")
 
 
@@ -955,10 +956,27 @@ def stored_claims(e):
     return [{"state": r.state, "title": r.title, "destination": r.destination} for r in reports if r.state == "sending"]
 
 
+def bind_host_model(e):
+    """This Env's Talk runtime gets the plugin's own host ctx.llm, discovered from its home as the voice server does;
+    the process-wide binding is cleared again so no other check gains a model route."""
+    from hermes_talk import pulse_model
+    target = e.home / "plugins" / "hermes-telegram-talk"
+    target.mkdir(parents=True)
+    for name in PLUGIN_FILES:
+        src = ROOT / name
+        (shutil.copytree if src.is_dir() else shutil.copy2)(src, target / name)
+    llm = pulse_model.load_host()
+    pulse_model.bind(None)
+    assert type(llm).__module__ == "agent.plugin_llm" and type(llm).__name__ == "PluginLlm", type(llm)
+    e.talk.model = pulse_model.PulseModel(llm=llm)
+
+
 def telegram_default_receipt(model):
+    from scripted_model import task_title_request
     TELEGRAM.reset()
-    e = Env(model)
+    e = Env(model, profile_extra=PLUGIN_ENABLED)
     try:
+        bind_host_model(e)
         conv, vs = e.call()
         assert '"TITLE: <two to five English words naming the task>"' in e.instructions(), e.instructions()
         voice_only = "VOICE-ONLY-" + secrets.token_hex(6)
@@ -997,11 +1015,13 @@ def telegram_default_receipt(model):
         redacted = settled_report(e, secret_body["job"]["id"])
         assert all(secret not in c["text"] for c in TELEGRAM.calls)
         assert shown_texts(redacted.message_id)[-1] == "✅ secret check redacted"
-        _, other_language = e.task(conv, vs, "проверь синтетическую сборку", "del_tg4")
+        _, other_language = e.task(conv, vs, "перевір синтетичну збірку", "del_tg4")
         e.wait(other_language["job"]["id"], conv, vs)
         untitled = settled_report(e, other_language["job"]["id"])
-        assert shown_texts(untitled.message_id)[-1] == f"✅ Hermes task {other_language['job']['number']}", \
-            "a non-English request without a TITLE line is not translated"
+        named = shown_texts(untitled.message_id)
+        assert named == ["🕓 Check the synthetic build", "⏳ Check the synthetic build", "✅ Check the synthetic build"], \
+            ("a Ukrainian request without a TITLE line gets the host model's English sentence, every status shown", named)
+        assert len([r for r in model.requests if task_title_request(r)]) == 1, "one host title call"
         _, big_body = e.task(conv, vs, "big 5000\nTITLE: Build big synthetic result", "del_tg5")
         e.wait(big_body["job"]["id"], conv, vs)
         big = settled_report(e, big_body["job"]["id"])
@@ -1019,7 +1039,7 @@ def telegram_default_receipt(model):
         return {"chat_id": sends[0]["chat_id"], "bot": "the Talk bot that signed the call's initData",
                 "message_id": report.message_id, "shown": shown, "stored_before_send": claims[0],
                 "voice_receipt": listed["receipt"], "cancelled": shown_texts(cancelled.message_id)[-1],
-                "secret": shown_texts(redacted.message_id)[-1], "non_english": shown_texts(untitled.message_id)[-1],
+                "secret": shown_texts(redacted.message_id)[-1], "non_english": named,
                 "large_result": shown_texts(big.message_id)[-1], "sends": len(TELEGRAM.sent()),
                 "edits": len(TELEGRAM.edits()), "other_bot_refused": [r["error"] for r in refused],
                 "transport": "synthetic (tests/agent/synthetic_telegram.py) behind Hermes _send_to_platform and "
