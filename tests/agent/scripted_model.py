@@ -107,6 +107,7 @@ class ScriptedModel:
     def __init__(self):
         self.requests = []
         self.title_requests = []
+        self.routes = []  # how each scripted tool call reached Hermes: offered directly or through tool_call
         self.lock = threading.Lock()
         handler = self._handler()
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
@@ -155,6 +156,9 @@ class ScriptedModel:
                 if kind == "tool":
                     name, args = rest
                     offered = {t.get("function", {}).get("name") for t in body.get("tools") or () if isinstance(t, dict)}
+                    with model.lock:
+                        model.routes.append({"tool": name, "offered_directly": name in offered,
+                                             "via_tool_search": name not in offered and "tool_call" in offered})
                     if name not in offered and "tool_call" in offered:
                         # Deferred behind Hermes' Tool Search bridge: call it the way a model does, through tool_call.
                         name, args = "tool_call", {"calls": [{"name": name, "arguments": args}]}

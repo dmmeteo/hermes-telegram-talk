@@ -1509,10 +1509,6 @@ def t3_admission_real_hook(model):
     try:
         bind_host_model(e)  # the profile's plugins are discovered as the voice server does: t3_control is registered
         e.talk.board.follow_s = 0.5
-        import toolsets
-        from hermes_talk.gateway_rpc import launch_toolsets
-        live_grant = {"hermes-telegram resolves t3_control": "t3_control" in toolsets.resolve_toolset("hermes-telegram"),
-                      "launch toolsets for [hermes-telegram]": launch_toolsets(["hermes-telegram"])}
         conv, vs = e.call()
         _, body = e.task(conv, vs, "t3start alpha", "del_t3a")
         big = body["job"]["id"]
@@ -1539,7 +1535,7 @@ def t3_admission_real_hook(model):
         assert settled_report(e, big) is not None and e.desk.get(body["job"]["id"]) is None, \
             "default switches: the large task posts, the quick read does not"
         assert store.get("th-alpha")["count"] == 1, "nothing was launched twice"
-        return {"transport": TRANSPORT, "live_toolset_grant": live_grant, "large": big, "thread": "th-alpha",
+        return {"transport": TRANSPORT, "large": big, "thread": "th-alpha",
                 "result": done["result"],
                 "read_job_kind": read["kind"], "posted": [r["state"] for r in [e.desk.get(big).public()]]}
     finally:
@@ -1552,41 +1548,41 @@ UNAVAILABLE = ("does not exist", "not available", "could not be resolved", "unkn
 
 
 def t3_toolset_contract(model):
-    """The live grant question, on the target SDK with the profiles' own t3-bridge code (HERMES_TALK_T3_BRIDGE):
-    a voice task with tasks.toolsets [hermes-telegram] cannot reach t3_control; adding t3_bridge reaches the real
-    bridge handler (a status call; no T3 server is reachable from the check). coding-mode's skill_view is in both."""
+    """The live grant question, on the target SDK with the profiles' own t3-bridge code (HERMES_TALK_T3_BRIDGE): a
+    voice task with the live tasks.toolsets [hermes-telegram] reaches the real t3_control handler, and coding-mode's
+    skill_view. The bridge points at a closed loopback port, so no T3 server is contacted (a status call)."""
     bridge = Path(os.environ.get("HERMES_TALK_T3_BRIDGE", ""))
     assert (bridge / "plugin.yaml").is_file() and (bridge / "control.py").is_file(), \
         "set HERMES_TALK_T3_BRIDGE to a copy of the profiles' t3-bridge plugin"
     from hermes_talk import pulse_model
-    out = {"bridge_control_sha256": hashlib.sha256((bridge / "control.py").read_bytes()).hexdigest()}
-    for label, sets in (("hermes-telegram", ["hermes-telegram"]), ("hermes-telegram+t3_bridge", ["hermes-telegram", "t3_bridge"])):
-        TELEGRAM.reset()
-        root = Path(tempfile.mkdtemp(prefix="talk-agent-grant-"))
-        home = root / "home"
-        fx.write_home(home)
-        (home / "config.yaml").write_text(model_config(model, "plugins:\n  enabled:\n    - hermes-telegram-talk\n"
-                                                             "    - t3-bridge\n"))
-        shutil.copytree(bridge, home / "plugins" / "t3-bridge", ignore=shutil.ignore_patterns(".git", "__pycache__"))
-        e = Env(model, root=root, toolsets=sets)
-        try:
-            bind_host_model(e)
-            conv, vs = e.call()
-            t3 = e.wait(e.task(conv, vs, "t3status", "del_g1")[1]["job"]["id"], conv, vs)
-            skill = e.wait(e.task(conv, vs, "skill coding-mode", "del_g2")[1]["job"]["id"], conv, vs)
-            out[label] = {"t3_control": t3["result"][:400], "skill_view": skill["result"][:200]}
-            reached = '"action": "status"' in t3["result"] or "'action': 'status'" in t3["result"]
-            missing = any(m in t3["result"].lower() for m in UNAVAILABLE)
-            assert not any(m in skill["result"].lower() for m in UNAVAILABLE), ("skill_view is in the bundle", skill)
-            if "t3_bridge" in sets:
-                assert reached and not missing, ("adding t3_bridge reaches the real t3-bridge handler", t3)
-            else:
-                assert missing and not reached, ("[hermes-telegram] alone cannot reach t3_control", t3)
-        finally:
-            e.close()
-            pulse_model.bind(None)
-    out["transport"] = TRANSPORT
-    return out
+    TELEGRAM.reset()
+    root = Path(tempfile.mkdtemp(prefix="talk-agent-grant-"))
+    home = root / "home"
+    fx.write_home(home)
+    (home / "config.yaml").write_text(model_config(model, "plugins:\n  enabled:\n    - hermes-telegram-talk\n"
+                                                         "    - t3-bridge\n  entries:\n    t3-bridge:\n      settings:\n"
+                                                         "        base_url: http://127.0.0.1:9\n"))
+    shutil.copytree(bridge, home / "plugins" / "t3-bridge", ignore=shutil.ignore_patterns(".git", "__pycache__"))
+    e = Env(model, root=root, toolsets=["hermes-telegram"])
+    try:
+        bind_host_model(e)
+        conv, vs = e.call()
+        routes = len(model.routes)
+        t3 = e.wait(e.task(conv, vs, "t3status", "del_g1")[1]["job"]["id"], conv, vs)
+        skill = e.wait(e.task(conv, vs, "skill coding-mode", "del_g2")[1]["job"]["id"], conv, vs)
+        reached = '"action": "status"' in t3["result"]
+        assert reached and not any(m in t3["result"].lower() for m in UNAVAILABLE), \
+            ("[hermes-telegram] reaches the real t3-bridge handler", t3)
+        assert "server_unreachable" in t3["result"] or "t3_unavailable" in t3["result"], \
+            ("no T3 server was contacted", t3["result"][:300])
+        assert not any(m in skill["result"].lower() for m in UNAVAILABLE), ("skill_view is available", skill)
+        return {"transport": TRANSPORT, "tasks_toolsets": ["hermes-telegram"],
+                "bridge_control_sha256": hashlib.sha256((bridge / "control.py").read_bytes()).hexdigest(),
+                "routes": model.routes[routes:], "t3_control_result": t3["result"][:300],
+                "skill_view_result": skill["result"][:160]}
+    finally:
+        e.close()
+        pulse_model.bind(None)
 
 
 DEPLOYED_REVISION = "35f8fa12f5f5f39932718b41b30582c54ca5ad59"
