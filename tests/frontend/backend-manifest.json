@@ -17,7 +17,7 @@
     "hermes_talk/store.py": "4dcb84b9d7a8aec83cb1853cda540c714e10eea38a5eb2ad7caef0576d627f53",
     "hermes_talk/talk.py": "59088dae55c77ba2b4450375eb9928e80ec939acb3ae2e77b72444760a53c59d",
     "server.py": "1e22d0f02a463569c583553b9e481b600b174ee3d43ca07250300d6c27fe288e",
-    "hermes_talk/gateway_rpc.py": "2703852812a6ab8f17ef7dd82d2195bbf23118319df5cf6e85dc88ddd5370bac",
+    "hermes_talk/gateway_rpc.py": "128d41d94bf368d5a12b49108e5752acd04d3bc3088c5f0365432932c279c781",
     "hermes_talk/pulse.py": "72cff697b95247e07a0998dbfab8d487c385eaed1a2484cfb0a46b801ae44af4",
     "hermes_talk/pulse_ledger.py": "c4bcc4ae8fd803ce6f86858b80b856dccbbec6f1de5df890b9a4c47dce5ac3ba",
     "hermes_talk/pulse_engine.py": "e45a6b8287031028f3495d5c46a81968e66eda489c6514b05b56af0881651e4f",

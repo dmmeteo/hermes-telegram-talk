@@ -1605,6 +1605,7 @@ def rpc_lost_admission_ack(model):
             return real()
         _fault(e.talk.agent, inject)
         conv, vs = e.call()
+        earlier = len(requests_with(model, "TASK: slow 4"))  # the model is shared with earlier checks
         _, body = e.task(conv, vs, "slow 4", "del_rpc_lost_ack")
         job_id = body["job"]["id"]
         assert body["created"] and body["job"]["state"] in ("accepted", "running"), body
@@ -1614,7 +1615,7 @@ def rpc_lost_admission_ack(model):
         assert job["state"] == "succeeded" and "SCRIPTED-SLOW-DONE" in job["result"], job
         assert native.admission_id == seen["lost"]["admission_id"], "the same admission was reconciled, not a new one"
         assert seen.get("resubmissions") and set(seen["resubmissions"]) == {job_id}, seen
-        assert len(requests_with(model, "TASK: slow 4")) == 1, "the admitted run ran once"
+        assert len(requests_with(model, "TASK: slow 4")) == earlier + 1, "the admitted run ran once"
         return {"job": job_id, "admission": native.admission_id, "lost_ack_admission": seen["lost"]["admission_id"],
                 "resubmissions": len(seen["resubmissions"]), "native_runs": 1, "state": job["state"]}
     finally:
