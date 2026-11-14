@@ -879,8 +879,19 @@ def stored_report(e, job_id):
 
 def settled_report(e, job_id, timeout=20):
     report = e.talk.desk.wait_settled(job_id, timeout)
-    assert report is not None and report.state in ("sent", "failed", "uncertain"), report
+    assert report is not None and report.state in ("sent", "failed", "uncertain") and not report.needs_edit, report
     return report
+
+
+def shown_texts(message_id):
+    """What one Telegram message showed, in order: its send, then each applied edit."""
+    return [c["text"] for c in TELEGRAM.calls if c["outcome"] == "ok" and c["message_id"] == message_id]
+
+
+def stored_claims(e):
+    from hermes_talk import receipts
+    reports = (receipts.load(raw) for _, raw in e.history.list_meta_prefix(receipts.REPORT_PREFIX))
+    return [{"state": r.state, "title": r.title, "destination": r.destination} for r in reports if r.state == "sending"]
 
 
 def telegram_default_receipt(model):
@@ -888,24 +899,29 @@ def telegram_default_receipt(model):
     e = Env(model)
     try:
         conv, vs = e.call()
+        assert '"TITLE: <two to five English words naming the task>"' in e.instructions(), e.instructions()
         voice_only = "VOICE-ONLY-" + secrets.token_hex(6)
         e.events(conv, vs, ("user", f"private aside {voice_only}"), ("assistant", f"noted {voice_only}"))
         claims = []
-        TELEGRAM.on_call = lambda call: claims.append({k: v for k, v in vars(stored_report(e, call_job[0])).items()
-                                                       if k in ("state", "text", "destination")})
-        call_job = [None]
-        _, body = e.task(conv, vs, "receipt alpha", "del_tg1")
-        call_job[0] = body["job"]["id"]
-        job = e.wait(call_job[0], conv, vs)
+        TELEGRAM.on_call = lambda call: claims.extend(stored_claims(e)) if call["kind"] == "send" else None
+        _, body = e.task(conv, vs, "receipt alpha\nTITLE: Check receipt alpha", "del_tg1")
+        job = e.wait(body["job"]["id"], conv, vs)
         report = settled_report(e, job["id"])
-        sent = TELEGRAM.sent()
-        assert report.state == "sent" and len(sent) == 1 and report.message_id == sent[0]["message_id"], (report, sent)
-        assert claims and claims[0]["state"] == "sending" and claims[0]["text"] == sent[0]["text"], \
-            "the report and its destination were stored before the send"
-        assert sent[0]["chat_id"] == str(fx.USER_ID) and sent[0]["token"] == fx.BOT_TOKEN and sent[0]["thread_id"] is None
-        text = sent[0]["text"]
-        assert text.startswith("✅ Hermes task 1 finished: receipt alpha") and "SCRIPTED-ANSWER: receipt alpha" in text, text
-        assert len(text) <= 700 and voice_only not in text and "TASK:" not in text and "nobody watches" not in text, text
+        sends = TELEGRAM.sent()
+        assert report.state == "sent" and len(sends) == 1 and report.message_id == sends[0]["message_id"], TELEGRAM.calls
+        assert claims and claims[0]["title"] == "Check receipt alpha" and claims[0]["destination"]["chat_id"] == fx.USER_ID, \
+            "the title and destination were stored before the only send"
+        assert (sends[0]["chat_id"], sends[0]["token"], sends[0]["thread_id"], sends[0]["media"]) == \
+            (str(fx.USER_ID), fx.BOT_TOKEN, None, [])
+        shown = shown_texts(report.message_id)
+        assert shown[0] in ("🕓 Check receipt alpha", "⏳ Check receipt alpha") and shown[-1] == "✅ Check receipt alpha", shown
+        edits = [c for c in TELEGRAM.calls if c["kind"] == "edit"]
+        assert edits and all((c["chat_id"], c["token"], c["message_id"]) == (fx.USER_ID, fx.BOT_TOKEN, report.message_id)
+                             for c in edits), edits
+        native = e.native(job["id"])
+        assert native.title == "Check receipt alpha" and "TITLE" not in native.request and not requests_with(model, "TITLE:")
+        assert "SCRIPTED-ANSWER: receipt alpha" in job["result"]
+        assert not any("SCRIPTED" in c["text"] or voice_only in c["text"] for c in TELEGRAM.calls), "no result or turns"
         listed = e.jobs(conv, vs)[0][job["id"]]
         assert listed["receipt"] == "undelivered" and listed["report"] == {"state": "sent", "destination": "this Telegram chat"}
         _, cancel_body = e.task(conv, vs, "slow 90", "del_tg2")
@@ -913,32 +929,40 @@ def telegram_default_receipt(model):
         e.post("task/cancel", {"conversation_id": conv, "job_id": cancel_body["job"]["id"]})
         e.wait(cancel_body["job"]["id"], conv, vs, timeout=40)
         cancelled = settled_report(e, cancel_body["job"]["id"])
-        assert cancelled.state == "sent" and TELEGRAM.sent()[-1]["text"].startswith("⏹ Hermes task 2 was cancelled: slow 90")
+        assert shown_texts(cancelled.message_id)[-1] == "⏹ slow 90", "without a TITLE line the English request names it"
         secret = "sk-" + "s" * 24
         _, secret_body = e.task(conv, vs, f"secret check {secret}", "del_tg3")
         e.wait(secret_body["job"]["id"], conv, vs)
-        settled_report(e, secret_body["job"]["id"])
-        assert secret not in TELEGRAM.sent()[-1]["text"] and "[redacted]" in TELEGRAM.sent()[-1]["text"]
-        _, big_body = e.task(conv, vs, "big 5000", "del_tg4")
+        redacted = settled_report(e, secret_body["job"]["id"])
+        assert all(secret not in c["text"] for c in TELEGRAM.calls)
+        assert shown_texts(redacted.message_id)[-1] == "✅ secret check redacted"
+        _, other_language = e.task(conv, vs, "проверь синтетическую сборку", "del_tg4")
+        e.wait(other_language["job"]["id"], conv, vs)
+        untitled = settled_report(e, other_language["job"]["id"])
+        assert shown_texts(untitled.message_id)[-1] == f"✅ Hermes task {other_language['job']['number']}", \
+            "a non-English request without a TITLE line is not translated"
+        _, big_body = e.task(conv, vs, "big 5000\nTITLE: Build big synthetic result", "del_tg5")
         e.wait(big_body["job"]["id"], conv, vs)
         big = settled_report(e, big_body["job"]["id"])
-        last = TELEGRAM.sent()[-1]
-        attachment = Path(last["media"][0])
-        assert big.state == "sent" and len(last["text"]) <= 700 and "Full result attached" in last["text"], last
-        assert last["force_document"] and attachment.is_file() and attachment.is_relative_to(e.home / "plugin-data")
-        content = attachment.read_text()
-        assert "BIG-START" in content and "BIG-END" in content and len(content) > 5000
+        assert shown_texts(big.message_id)[-1] == "✅ Build big synthetic result"
+        assert not any(c.get("media") for c in TELEGRAM.calls) and max(len(c["text"]) for c in TELEGRAM.calls) <= 64
+        assert not (e.home / "plugin-data" / "hermes-talk" / "reports").exists(), "no result document is written"
+        assert len(TELEGRAM.sent()) == 5, "one message per task"
         from hermes_talk import receipts
-        other_bot = receipts.TelegramSender("654321:" + "x" * 30).send(
-            receipts.Destination(**e.native(job["id"]).report_to), "t", None)
-        assert receipts.classify(other_bot)[0] == "failed" and len(TELEGRAM.calls) == 4, other_bot
-        return {"chat_id": sent[0]["chat_id"], "bot": "the Talk bot that signed the call's initData",
-                "other_bot_refused": other_bot["error"],
-                "message_id": report.message_id, "text": text, "stored_before_send": claims[0]["state"],
-                "voice_receipt": listed["receipt"], "cancelled_report": TELEGRAM.sent()[1]["text"],
-                "secret_redacted": True, "large_cover": last["text"],
-                "attachment": str(attachment.relative_to(e.home)), "attachment_chars": len(content),
-                "transport": "synthetic (tests/agent/synthetic_telegram.py) behind Hermes _send_to_platform"}
+        before = len(TELEGRAM.calls)
+        other = receipts.TelegramSender("654321:" + "x" * 30)
+        bound = receipts.Destination(**e.native(job["id"]).report_to)
+        refused = (other.send(bound, "t"), other.edit(bound, report.message_id, "t"))
+        assert receipts.classify(refused[0])[0] == "failed" and receipts.classify_edit(refused[1]) == receipts.EDIT_FINAL
+        assert len(TELEGRAM.calls) == before, refused
+        return {"chat_id": sends[0]["chat_id"], "bot": "the Talk bot that signed the call's initData",
+                "message_id": report.message_id, "shown": shown, "stored_before_send": claims[0],
+                "voice_receipt": listed["receipt"], "cancelled": shown_texts(cancelled.message_id)[-1],
+                "secret": shown_texts(redacted.message_id)[-1], "non_english": shown_texts(untitled.message_id)[-1],
+                "large_result": shown_texts(big.message_id)[-1], "sends": len(TELEGRAM.sent()),
+                "edits": len(TELEGRAM.edits()), "other_bot_refused": [r["error"] for r in refused],
+                "transport": "synthetic (tests/agent/synthetic_telegram.py) behind Hermes _send_to_platform and "
+                             "_telegram_bot"}
     finally:
         TELEGRAM.on_call = None
         e.close()
@@ -951,14 +975,15 @@ def telegram_alternate_destination(model):
     try:
         conv, vs = e.call()
         assert "REPORT TO: <name>" in e.instructions() and "one of: ops" in e.instructions()
-        _, body = e.task(conv, vs, "alternate alpha\nREPORT TO: ops", "del_alt1")
+        _, body = e.task(conv, vs, "alternate alpha\nTITLE: Alternate alpha\nREPORT TO: ops", "del_alt1")
         job = e.wait(body["job"]["id"], conv, vs)
         assert "REPORT TO" not in e.native(job["id"]).request and "SCRIPTED-ANSWER: alternate alpha" in job["result"]
         report = settled_report(e, job["id"])
         sent = TELEGRAM.sent()
         assert report.state == "sent" and len(sent) == 1, sent
         assert (sent[0]["chat_id"], sent[0]["thread_id"]) == ("-1009876543210", "17"), sent
-        assert not [c for c in TELEGRAM.calls if c["chat_id"] == str(fx.USER_ID)], "no duplicate to the private chat"
+        assert {str(c["chat_id"]) for c in TELEGRAM.calls} == {"-1009876543210"}, "every edit goes to the named chat"
+        assert shown_texts(report.message_id)[-1] == "✅ Alternate alpha"
         _, here = e.task(conv, vs, "alternate beta\nREPORT TO: this chat", "del_alt2")
         e.wait(here["job"]["id"], conv, vs)
         settled_report(e, here["job"]["id"])
@@ -1008,10 +1033,11 @@ def telegram_closed_call_delivery(model):
         report = settled_report(e, body["job"]["id"])
         job = e.native(body["job"]["id"])
         assert report.state == "sent" and TELEGRAM.sent()[0]["chat_id"] == str(fx.USER_ID)
-        assert "SCRIPTED-SLOW-DONE" in TELEGRAM.sent()[0]["text"]
-        assert job.receipt == "undelivered", "the chat report is not a voice receipt"
+        assert shown_texts(report.message_id)[-1] == "✅ slow 3", "the message is updated after the call ended"
+        assert not any("SCRIPTED-SLOW-DONE" in c["text"] for c in TELEGRAM.calls), "the result stays out of the chat"
+        assert job.receipt == "undelivered", "the status message is not a voice receipt"
         return {"call_ended_before_result": True, "report": report.state, "voice_receipt": job.receipt,
-                "message_id": report.message_id}
+                "message_id": report.message_id, "shown": shown_texts(report.message_id)}
     finally:
         e.close()
 
@@ -1027,12 +1053,13 @@ def telegram_ambiguous_send(model):
         uncertain = settled_report(e, a["job"]["id"])
         time.sleep(1.5)
         assert uncertain.state == "uncertain" and len(TELEGRAM.calls) == 1, (uncertain, TELEGRAM.calls)
+        assert stored_report(e, a["job"]["id"]).status == "completed", "the status is kept, never sent a second time"
         e.talk.desk.sender.timeout = 1.0
         TELEGRAM.reset("hang")
         _, b = e.task(conv, vs, "ambiguous beta", "del_amb2")
         e.wait(b["job"]["id"], conv, vs)
         hung = settled_report(e, b["job"]["id"], timeout=15)
-        assert hung.state == "uncertain" and "may still have been delivered" in hung.error, hung
+        assert hung.state == "uncertain" and "may still have been delivered" in hung.error and len(TELEGRAM.calls) == 1, hung
         TELEGRAM.reset("chat_not_found")
         _, c = e.task(conv, vs, "ambiguous gamma", "del_amb3")
         e.wait(c["job"]["id"], conv, vs)
@@ -1044,29 +1071,34 @@ def telegram_ambiguous_send(model):
         _, d = e.task(conv, vs, "ambiguous delta", "del_amb4")
         e.wait(d["job"]["id"], conv, vs)
         retried = settled_report(e, d["job"]["id"])
-        assert retried.state == "sent" and retried.attempts == 2 and len(TELEGRAM.calls) == 2, retried
-        assert TELEGRAM.calls[0]["text"] == TELEGRAM.calls[1]["text"], "the retry resends the stored report"
+        sends = [x for x in TELEGRAM.calls if x["kind"] == "send"]
+        assert retried.state == "sent" and len(sends) == 2 and len(TELEGRAM.sent()) == 1, TELEGRAM.calls
+        assert "not sent: retry 1" in retried.notes and shown_texts(retried.message_id)[-1] == "✅ ambiguous delta"
         assert len(requests_with(model, "TASK: ambiguous delta")) == 1, "the task was not rerun"
         TELEGRAM.reset("refused", "refused", "refused")
         _, f = e.task(conv, vs, "ambiguous epsilon", "del_amb5")
         e.wait(f["job"]["id"], conv, vs)
         exhausted = settled_report(e, f["job"]["id"])
         assert exhausted.state == "failed" and exhausted.attempts == 3 and "gave up" in exhausted.error, exhausted
+        TELEGRAM.reset("ok", "timeout")
+        _, g = e.task(conv, vs, "slow 2\nTITLE: Ambiguous zeta", "del_amb6")
+        e.wait(g["job"]["id"], conv, vs)
+        edited = settled_report(e, g["job"]["id"])
+        assert len(TELEGRAM.sent()) == 1 and shown_texts(edited.message_id)[-1] == "✅ Ambiguous zeta", TELEGRAM.calls
+        assert [x["outcome"] for x in TELEGRAM.calls if x["kind"] == "edit"][0] == "timeout", "a timed-out edit is repeated"
         e.close(keep=True)
         TELEGRAM.reset()
         e = Env(model, root=root)
         time.sleep(1)
         after = stored_report(e, a["job"]["id"])
-        assert after.state == "uncertain" and not TELEGRAM.calls, "a restart never resends an uncertain report"
+        assert after.state == "uncertain" and not TELEGRAM.calls, "a restart never resends an uncertain message"
         from hermes_talk import receipts
-        partial = receipts.classify({"error": "No deliverable text or media remained after processing MEDIA tags",
-                                     "warnings": ["Failed to send media /x/report.md: Timed out"]})
-        assert partial[0] == "uncertain", partial
+        assert receipts.classify_edit({"error": "Telegram edit failed: Message is not modified"}) == receipts.EDIT_DONE
         return {"timeout": uncertain.state, "hang": hung.error, "chat_not_found": failed.state,
-                "attachment_timeout": partial[0],
-                "refused_then_ok": {"state": retried.state, "attempts": retried.attempts},
-                "exhausted": exhausted.error, "after_restart_calls": 0,
-                "policy": "only refused/rate-limited sends retry, at most receipts.attempts times"}
+                "refused_then_ok": {"state": retried.state, "sends": 2, "messages": 1},
+                "exhausted": exhausted.error, "edit_timeout_then_ok": shown_texts(edited.message_id),
+                "after_restart_calls": 0,
+                "policy": "only refused/rate-limited sends retry, at most receipts.attempts times; edits are repeatable"}
     finally:
         e.close()
 
@@ -1083,36 +1115,40 @@ def telegram_restart_dedup(model):
         job_id = body["job"]["id"]
         e.wait(job_id, conv, vs)
         settled_report(e, job_id)
+        calls = len(TELEGRAM.calls)
         job = e.native(job_id)
         e.talk.board._settle(job_id)
-        e.talk.desk.prepare(job, "regenerated text")
-        e.talk.desk.send(job_id)
+        e.talk.desk.follow(job)
+        e.talk.desk.drive(job_id)
         e.talk.board.reconcile()
         time.sleep(0.5)
-        assert len(TELEGRAM.calls) == 1 and stored_report(e, job_id).text == TELEGRAM.calls[0]["text"]
-        crashed = replace(job, id="jb_" + secrets.token_urlsafe(18), number=91, delegation_id="del_dd91",
-                          finished=time.time())
+        assert len(TELEGRAM.calls) == calls and len(TELEGRAM.sent()) == 1, "a finished task's message is not touched again"
+        crashed = replace(job, id="jb_" + secrets.token_urlsafe(18), number=91, delegation_id="del_dd91", title="")
         pending = replace(crashed, id="jb_" + secrets.token_urlsafe(18), number=92, delegation_id="del_dd92")
-        unreported = replace(crashed, id="jb_" + secrets.token_urlsafe(18), number=93, delegation_id="del_dd93")
-        old = replace(crashed, id="jb_" + secrets.token_urlsafe(18), number=94, delegation_id="del_dd94", finished=1.0)
-        for j in (crashed, pending, unreported, old):
+        unreported = replace(crashed, id="jb_" + secrets.token_urlsafe(18), number=93, delegation_id="del_dd93",
+                             title="Unreported task")
+        lagging = replace(crashed, id="jb_" + secrets.token_urlsafe(18), number=95, delegation_id="del_dd95")
+        old = replace(crashed, id="jb_" + secrets.token_urlsafe(18), number=94, delegation_id="del_dd94", created=1.0)
+        for j in (crashed, pending, unreported, lagging, old):
             e.history.set_meta(jobs.job_key(j.id), jobs.dump(j))
-        dest = asdict(receipts.Destination.private(fx.USER_ID))
-        for j, state in ((crashed, "sending"), (pending, "pending")):
-            r = receipts.Report(job_id=j.id, scope=j.scope, destination=dest, text=f"stored report {j.number}",
-                                state=state, attempts=1 if state == "sending" else 0,
-                                owner="1:0:dead" if state == "sending" else None, created=time.time())
+        dest = asdict(receipts.Destination.private(fx.USER_ID, fx.BOT_TOKEN.split(":")[0]))
+        seeded = ((crashed, {"state": "sending", "attempts": 1, "owner": "1:0:dead"}), (pending, {}),
+                  (lagging, {"state": "sent", "message_id": "4999", "shown": "running"}))
+        for j, fields in seeded:
+            r = receipts.Report(job_id=j.id, scope=j.scope, destination=dest, title=f"Stored task {j.number}",
+                                status="completed", created=time.time(), **fields)
             e.history.set_meta(receipts.report_key(j.id), json.dumps(asdict(r)))
         e.close(keep=True)
         TELEGRAM.reset()
         e = Env(model, root=root)
-        for j in (pending, unreported):
+        for j in (pending, unreported, lagging):
             settled_report(e, j.id)
         time.sleep(1)
-        texts = [c["text"] for c in TELEGRAM.calls]
+        texts = sorted((c["kind"], c["text"]) for c in TELEGRAM.calls)
         assert stored_report(e, crashed.id).state == "uncertain", "a claim left by a dead process is not resent"
         assert stored_report(e, job_id).state == "sent" and stored_report(e, old.id) is None
-        assert len(texts) == 2 and "stored report 92" in texts and any("Hermes task 93" in x for x in texts), texts
+        assert texts == [("edit", "✅ Stored task 95"), ("send", "✅ Stored task 92"), ("send", "✅ Unreported task")], texts
+        assert [c["message_id"] for c in TELEGRAM.calls if c["kind"] == "edit"] == ["4999"]
         e.close(keep=True)
         TELEGRAM.reset()
         e = Env(model, root=root)
@@ -1125,9 +1161,10 @@ def telegram_restart_dedup(model):
         e.close(keep=True)
         e = Env(model, root=root)
         assert e.talk.desk.since > since and not TELEGRAM.calls, "re-enabling reports does not report the gap"
-        return {"duplicate_completion_sends": 1, "crash_mid_send": "uncertain, not resent",
-                "pending_after_restart": "sent once", "terminal_without_report": "reported once",
-                "finished_before_reports_existed": "no report", "second_restart_sends": 0}
+        return {"repeated_follow_calls": 0, "crash_mid_send": "uncertain, not resent",
+                "pending_after_restart": "sent once", "task_without_message": "sent once",
+                "lagging_message": "edited once", "accepted_before_reports_existed": "no message",
+                "second_restart_calls": 0}
     finally:
         e.close()
 
@@ -1176,8 +1213,7 @@ def queue_start_failure(model):
         second = e.wait(seeded[1], conv, vs)
         assert agent.starts == 2 and second["state"] == "succeeded" and "SCRIPTED-ANSWER: queued 2" in second["result"]
         failed_report = settled_report(e, seeded[0])
-        assert failed_report.state == "sent" and "⚠️ Hermes task 1 failed: queued 1" in failed_report.text
-        assert "could not start" in failed_report.text
+        assert failed_report.state == "sent" and failed_report.shown == "failed" and failed_report.text == "❌ queued 1"
         always = FlakyAgent(NativeAgent(config.tasks, root / "home"), failures=99)
         e.talk.board.agent = always
         ids = [e.task(conv, vs, f"doomed {n}", f"del_q{n + 2}")[1]["job"]["id"] for n in (1, 2)]
@@ -1329,14 +1365,10 @@ def bounded_native_spool(model):
                 time.sleep(0.05)
             assert not Path(job.output).exists(), "the spool is removed once the job is stored"
             report = settled_report(e, job_id)
-            attached = Path(TELEGRAM.calls[-1]["media"][0]).read_text() if TELEGRAM.calls[-1]["media"] else ""
-            if mode == "wide":
-                assert "ж" * 1000 in attached and "more characters of this result were not kept" in attached, \
-                    "a 1.4 MB non-ASCII result is cut at 1 MiB and marked, not lost"
-            else:
-                assert "NOISY-RESULT-END" in attached, "the large final result is kept whole for the report"
+            assert report.text == f"✅ noisy {mode}" and not any("NOISY" in c["text"] for c in TELEGRAM.calls), \
+                "the status message never carries the result"
             results[mode] = {"spool_peak_bytes": peak, "stdout_bytes": "about 24 MiB" + (" plus a 9 MiB line" if mode == "oversized" else ""),
-                             "artifact_bytes": artifact.stat().st_size, "result_kept": True, "report": report.state}
+                             "artifact_bytes": artifact.stat().st_size, "report": report.text}
         finally:
             e.close()
     return results

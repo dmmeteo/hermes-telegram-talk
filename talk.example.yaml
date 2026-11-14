@@ -54,10 +54,9 @@ tasks:
   # max_turns: 30
   # request_chars: 2000
   # result_chars: 1500
-receipts:                    # with tasks on, each finished task sends a short report to the user's own
-  enabled: true              # private chat with the Talk bot, even after the call ended
-  # max_chars: 700           # longer results go as a cover message plus the full result as a .md document
-  # attempts: 3              # sends that provably did not leave (refused, rate limited) retry at most this often
+receipts:                    # with tasks on, each task keeps one status message (title and state, no result)
+  enabled: true              # in the user's own private chat with the Talk bot, even after the call ended
+  # attempts: 3              # sends that provably did not leave (refused, rate limited) and edits retry this often
   # destinations:            # explicit alternatives the user may name with "REPORT TO: <name>"
   #   ops:
   #     target: "telegram:-1001234567890:17"   # telegram:<chat id>[:<topic id>] the Talk bot can post to

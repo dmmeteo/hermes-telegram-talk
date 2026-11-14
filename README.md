@@ -347,28 +347,41 @@ attended chat is not claimed: anything that needs approval fails and the result 
 
 ### Task reports in Telegram
 
-With tasks on, every finished task also sends a short report to the private chat between the user and the Talk bot
-whose signed initData opened the call, even when the call has ended. The report says what happened, the result or the
-reason and nothing else: no transcript, prompt, tool log or voice turns, and secret-shaped text is redacted. A result
-longer than `receipts.max_chars` goes as a cover message with the full result attached as a Markdown document from
-the profile's `plugin-data/hermes-talk/reports/`. The task prompt asks the agent to answer in the conversation's
-language; the fixed framing words are English.
+With tasks on, every task keeps one status message in the private chat between the user and the Talk bot whose
+signed initData opened the call, even when the call has ended. The message is a status mark and a few English words
+naming the task: 🕓 queued, ⏳ running, ✅ completed, ❌ failed (an interrupted task too) or ⏹ cancelled. It is sent once,
+when the task is accepted, and then edited at each real transition. It never carries the result, a reason, the
+transcript, the prompt or a tool log, and secret-shaped text is redacted. The full result stays in the task's native
+Hermes session and reaches the user by voice.
 
-The user can send a report elsewhere only by naming a destination the operator listed in `receipts.destinations` for
+The title is the voice model's last-line `TITLE:`, which the call instructions ask for in English; a `TITLE:` line
+inside the task stays the user's text. Without a usable one,
+the request names the task, shortened the way Conduit titles a background job (`VoiceBackgroundJobs.title(for:)`:
+whitespace collapsed, at most 60 characters cut at a word), when it is English; otherwise it is "Hermes task N".
+Nothing is translated. Title and message id are stored with the task's report record.
+
+The user can send the status message elsewhere only by naming a destination the operator listed in `receipts.destinations` for
 that user (`REPORT TO: <name>` at the end of the delegation). It then goes only there. The browser cannot pass a chat
 id; any other name, a raw chat id or "home" is refused before the task starts. A bare platform target (a home channel)
 is refused in the config.
 
 Sending uses Hermes' own platform sender, `tools.send_message_tool._send_to_platform`, the call cron delivery makes
-(`cron/scheduler_delivery.py`), with a Telegram platform config holding the Talk bot token the server already has. It
-formats, chunks and attaches files the way `hermes send` does. Talk stores no token.
+(`cron/scheduler_delivery.py`), with a Telegram platform config holding the Talk bot token the server already has.
+Edits use the same module's Bot factory (`tools.send_message_senders._telegram_bot`, which honors `TELEGRAM_PROXY`)
+and `editMessageText`. Talk stores no token.
 
 Report states are pending, sending, sent, failed and uncertain, separate from the job state and the voice receipt.
-The report and its destination are stored before the send. A send is claimed (pending to sending, stored) first; a
-claim found after a restart becomes uncertain and is not resent. Telegram's sendMessage has no idempotency key, so a
-timeout or any unclassified error is uncertain too, never retried. A send whose attachment upload reported a warning is uncertain too. Only errors that show nothing left (connection
-refused, rate limit) go back to pending, at most `receipts.attempts` times, with the same stored text; the task never
-reruns. A sent report records the Bot API message id.
+The record (title, destination, status to show) is stored before the send. The only send is claimed (pending to
+sending, stored) first; a claim found after a restart becomes uncertain and is not resent. Telegram's sendMessage has
+no idempotency key, so a timeout or any unclassified error is uncertain too, never retried, and that task gets no
+further updates. Only errors that show nothing left (connection refused, rate limit) go back to pending, at most
+`receipts.attempts` times; the task never reruns. A sent message records its Bot API message id, and every later
+status edits that id. An edit is idempotent ("message is not modified" counts as done), so a timed-out edit is repeated
+up to `receipts.attempts` times per status (waiting at least as long as Telegram's flood-control answer asks), and a
+restart repeats an edit that had not been confirmed or that gave up on temporary errors. An edit Telegram refuses (the
+message was deleted) is held until the next status; a new message is never sent. A status that changes while a call
+to Telegram is in flight is applied right after it, one call at a time per task. `receipts.max_chars` is no longer
+used.
 
 Limits: `tasks.max_concurrent` (1..2) processes, `tasks.max_open_per_user` open jobs, `tasks.request_chars`,
 `tasks.result_chars`, `tasks.max_turns` and `tasks.run_budget_seconds` (Hermes' own budget, then a stop 60 s later).

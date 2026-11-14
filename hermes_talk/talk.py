@@ -21,7 +21,7 @@ from .jobs import DELEGATION_ID, OPEN, SUCCEEDED, UNDELIVERED, JobBoard
 from .pulse_engine import SELECT_ON_CALL_S, PulseEngine
 from .pulse_ledger import PulseLedger
 from .pulse_model import ModelUnavailable, PulseModel
-from .receipts import DIRECTIVE, SINCE_KEY, Destination, ReportDesk, TelegramSender
+from .receipts import DIRECTIVE, SINCE_KEY, Destination, ReportDesk, TelegramSender, take_title
 from .store import SOURCE, TalkError, TalkStore, VoiceScope, clip
 from .thread_inbox import ThreadInbox, history_text, item_line, receipt
 
@@ -113,7 +113,7 @@ class TalkRuntime:
                 history.set_meta(SINCE_KEY, "")  # turning reports back on later reports nothing from this gap
             if r.enabled:
                 self.desk = ReportDesk(history, sender or TelegramSender(bot_token, r.send_timeout_s), clock,
-                                       home or self.agent.home, r.max_chars, r.attempts, r.backoff_s, redact)
+                                       r.attempts, r.backoff_s, redact)
             self.board = JobBoard(history, self.agent, config.tasks, clock, self._task_prompt,
                                   lambda job, sid: self.store.bind_agent_session(job.conversation_id, sid), redact,
                                   self.desk)
@@ -233,11 +233,12 @@ class TalkRuntime:
         if self.desk is None:
             return ""
         names = ", ".join(d.name for d in self._destinations(user_id))
-        note = (" When a task finishes, Hermes also sends a short report to the user's Telegram chat with this bot, "
-                "even after the call ends.")
+        note = (" Each task also keeps one Telegram status message (its title and state, never its result). End each "
+                "new delegated task with a line \"TITLE: <two to five English words naming the task>\", in English "
+                "even if you speak another language.")
         if names:
-            note += (f" Only if the user explicitly asks for the report to go to one of: {names}, end the delegated "
-                     "task with a line \"REPORT TO: <name>\"; it then goes there instead.")
+            note += (f" Only if the user explicitly asks for that message to go to one of: {names}, also add a line "
+                     "\"REPORT TO: <name>\".")
         return note
 
     def _report_to(self, user_id, request):
@@ -505,6 +506,7 @@ class TalkRuntime:
     def task(self, user_id, conversation_id, voice_session_id, delegation_item_id, request):
         """Start a native task for a delegation of the live call, cancel one ("cancel task N") or repeat
         one's stored result ("result of task N")."""
+        request, title = take_title(request) if isinstance(request, str) else (request, "")
         cancel = CANCEL.match(request) if isinstance(request, str) else None
         recall = RESULT.match(request) if isinstance(request, str) else None
         account = self._board_for(user_id)
@@ -539,7 +541,7 @@ class TalkRuntime:
         if not request:
             raise TalkError(400, "A task request must say what to do.")
         job, created = self.board.submit(account.key, conversation_id, voice_session_id, record.get("generation", 0),
-                                         delegation_item_id, " ".join(request.split()), report_to)
+                                         delegation_item_id, " ".join(request.split()), report_to, title)
         reply = (f"Hermes is working on this as background task {job.number}. Its result will follow on this "
                  "delegation; do not guess it." if created and job.state in OPEN else
                  f"This was already sent to Hermes as task {job.number}; it is {job.state}.")
