@@ -313,8 +313,11 @@ When `tasks.enabled` is true, the voice model's client delegations become Hermes
 3. The job board starts `hermes chat --query-file - --format stream-json --source telegram-voice --max-turns N
    --run-budget S -t <tasks.toolsets> [--resume <session>]` under the profile's `HERMES_HOME`, in `tasks.workdir`. The
    prompt carries the bounded voice turns before the request and then the request once. That is the profile's own
-   agent with its own model, provider, skills, memory and approval policy. Tasks of one conversation run one at a
-   time in one native session (`--resume`), so the agent keeps its own context across tasks, calls and restarts.
+   agent with its own model, provider, skills, memory and approval policy. A conversation's tasks continue its one
+   native session (`--resume`), so the agent keeps its own context across tasks, calls and restarts. That session
+   takes one run at a time: a task that starts while another task of the same conversation holds it runs in a fresh
+   native session of its own (`parallel`, with the same bounded voice turns in its prompt) and never becomes the
+   conversation's session. Tasks still start oldest first.
    The child environment drops the Talk bot token, the allowlist and every Hermes approval bypass variable.
 4. The browser polls `api/tasks`. When the job ends it appends the server's `spoken` text to the original delegation
    on `speakable`, in 500-byte chunks (Conduit framing), once per call, and then acks with `api/task/ack`.
@@ -386,7 +389,8 @@ message was deleted) is held until the next status; a new message is never sent.
 to Telegram is in flight is applied right after it, one call at a time per task. `receipts.max_chars` is no longer
 used.
 
-Limits: `tasks.max_concurrent` (1..2) processes, `tasks.max_open_per_user` open jobs, `tasks.request_chars`,
+Limits: `tasks.max_concurrent` (1..3) native runs at once across the profile, `tasks.max_open_per_user` (1..8) open
+jobs per user, queued and running together (3 and 8: three run while five wait, and a ninth is refused), `tasks.request_chars`,
 `tasks.result_chars`, `tasks.max_turns` and `tasks.run_budget_seconds` (Hermes' own budget, then a stop 60 s later).
 Every task route is rate limited per user and accepts 32 KiB.
 

@@ -9,3 +9,4 @@
 - [0007 Call initialization follows Conduit: initial_items, a background summary, a voice persona and a configured opening](0007-conduit-call-initialization.md)
 - [0008 The call's dialogue follows Conduit: speak-first opening, one idle-gated speakable queue, exactly-once delivery](0008-conduit-dialogue-lifecycle.md)
 - [0009 Telegram task status titles: an English sentence from the host model for other languages](0009-task-status-titles.md)
+- [0010 Three tasks of one call at once: the conversation's session plus parallel fresh sessions](0010-parallel-tasks-of-one-call.md)

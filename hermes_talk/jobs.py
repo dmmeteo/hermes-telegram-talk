@@ -8,7 +8,9 @@ which a restarted Talk adopts from its durable receipt.
 
 States: accepted -> running -> succeeded | failed | cancelled | interrupted. An accepted job has not
 started a process and may still be started after a restart; a running job whose process is gone is
-interrupted and never rerun, because its side effects are unknown. Receipt is separate from state:
+interrupted and never rerun, because its side effects are unknown. A conversation's tasks continue its one
+native session, which takes one turn at a time; a job started while another task of its conversation holds
+that session is `parallel` and runs in a fresh native session of its own. Receipt is separate from state:
 "delivered" means the result was handed to the voice model (a delegation append acknowledged by the
 client, or call instructions the assistant then spoke in). It never means the result was heard.
 The job's Telegram status message is a third, separate state (receipts.py), updated from every stored
@@ -78,6 +80,7 @@ class Job:
     notes: tuple = field(default_factory=tuple)
     report_to: dict = None
     title: str = ""
+    parallel: bool = False
 
     @property
     def terminal(self):
@@ -127,7 +130,10 @@ def new_job(scope, conversation_id, voice_session_id, generation, delegation_id,
 
 
 def dump(job):
-    return json.dumps(asdict(job), sort_keys=True)
+    data = asdict(job)
+    if not data["parallel"]:
+        del data["parallel"]  # absent unless set, so a Talk from before parallel tasks still loads the job (rollback)
+    return json.dumps(data, sort_keys=True)
 
 
 def load(raw):
@@ -240,19 +246,19 @@ class JobBoard:
         return self.jobs[job.id], True
 
     def pump(self):
-        """Start accepted jobs, oldest first, while slots are free; a job that failed to start takes no slot."""
+        """Start accepted jobs, oldest first, while slots are free; a job that failed to start takes no slot.
+        A job whose conversation's native session is held by a running task starts parallel, in its own."""
         with self.lock:
             running = [j for j in self.jobs.values() if j.state == RUNNING]
-            busy = {j.conversation_id for j in running}
+            held = {j.conversation_id for j in running if not j.parallel}
             slots = self.tasks.max_concurrent - len(running)
             for job in sorted((j for j in self.jobs.values() if j.state == ACCEPTED), key=lambda j: (j.created, j.id)):
                 if slots <= 0:
                     break
-                if job.conversation_id in busy:
-                    continue
-                if self._launch(job):
+                parallel = job.conversation_id in held
+                if self._launch(replace(job, parallel=parallel)):
                     slots -= 1
-                    busy.add(job.conversation_id)
+                    held.add(job.conversation_id)
 
     def _adopt_gateway(self, job):
         """A gateway job outlives Talk: follow its admission, or admit it once if Talk stopped before the receipt."""
@@ -276,7 +282,7 @@ class JobBoard:
         if self.gateway:
             return self._launch_gateway(job)
         try:
-            prompt, resume = self.prompt_for(job)
+            prompt, resume = self._prompt(job)
         except Exception as exc:
             self._finish(job.to(FAILED, finished=self.clock(),
                                 error=f"The task could not be prepared ({type(exc).__name__}). Nothing ran."))
@@ -295,10 +301,14 @@ class JobBoard:
         threading.Thread(target=self._watch, args=(job.id, process), daemon=True).start()
         return True
 
+    def _prompt(self, job):
+        prompt, resume = self.prompt_for(job)
+        return prompt, None if job.parallel else resume
+
     def _launch_gateway(self, job):
         """True when the gateway admitted the job; otherwise it has failed and nothing was admitted."""
         try:
-            prompt, resume = self.prompt_for(job)
+            prompt, resume = self._prompt(job)
         except Exception as exc:
             self._finish(job.to(FAILED, finished=self.clock(),
                                 error=f"The task could not be prepared ({type(exc).__name__}). Nothing ran."))
@@ -394,7 +404,8 @@ class JobBoard:
         now = self.clock()
         if outcome is not None and outcome.session_id:
             job = replace(job, native_session_id=outcome.session_id)
-            self.bind(job, outcome.session_id)
+            if not job.parallel:
+                self.bind(job, outcome.session_id)
         limit = self.tasks.result_chars
         if self.gateway and job.admission_id and outcome is None:
             # The gateway no longer knows the admission: neither a stop nor a result is proven.

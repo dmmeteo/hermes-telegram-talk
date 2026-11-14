@@ -668,6 +668,37 @@ def delegation_id_dedup(model):
         e.close()
 
 
+def one_call_three_native_runs(model):
+    """Three tasks of one call run at once in three native sessions; the fourth waits for a slot."""
+    e = Env(model, max_concurrent=3, max_open_per_user=8)
+    try:
+        conv, vs = e.call()
+        warm = e.task(conv, vs, "parallel warm-up", "del_par0")[1]
+        e.wait(warm["job"]["id"], conv, vs)
+        own = e.talk.store.agent_session(conv)
+        assert own, "the first task bound the conversation's native session"
+        ids = [e.task(conv, vs, "slow 8", f"del_par{n}")[1]["job"]["id"] for n in range(1, 5)]
+        deadline = time.time() + 60
+        while sum(e.native(i).state == "running" for i in ids) < 3 and time.time() < deadline:
+            time.sleep(0.1)
+        states = [e.native(i).state for i in ids]
+        assert states == ["running", "running", "running", "accepted"], states
+        for job_id in ids:
+            e.wait(job_id, conv, vs)
+        runs = [e.native(i) for i in ids]
+        assert all(j.state == "succeeded" for j in runs), [(j.state, j.error) for j in runs]
+        first = runs[:3]
+        assert max(j.started for j in first) < min(j.finished for j in first), "the three ran at the same time"
+        assert [j.parallel for j in first] == [False, True, True], [j.parallel for j in first]
+        sessions = [j.native_session_id for j in first]
+        assert len(set(sessions)) == 3 and all(e.history.session_exists(s) for s in sessions), sessions
+        assert own not in sessions[1:], "a parallel task never runs in the conversation's session"
+        assert e.talk.store.agent_session(conv) not in sessions[1:], "nor becomes the conversation's session"
+        return {"running_at_once": 3, "queued": 1, "sessions": len(set(sessions)), "parallel": [j.parallel for j in first]}
+    finally:
+        e.close()
+
+
 def plugin_native_install(model):
     root = Path(tempfile.mkdtemp(prefix="talk-agent-install-"))
     user_home = root / "home"
@@ -1461,7 +1492,7 @@ def bounded_native_spool(model):
 
 COMMON = (native_tool_roundtrip, background_result_delivery, context_update_injection, persistent_two_call_history,
           pulse_visibility_and_cursor, pulse_late_after_fast_start, cross_user_denial, cross_profile_denial, restart_job_reconciliation,
-          voice_disconnect_vs_cancel, delegation_id_dedup, plugin_native_install, unauthenticated_job_denial,
+          voice_disconnect_vs_cancel, delegation_id_dedup, one_call_three_native_runs, plugin_native_install, unauthenticated_job_denial,
           limits_and_approvals, smart_approval_profile, receipt_ack_no_double_speech, telegram_default_receipt,
           telegram_alternate_destination, telegram_closed_call_delivery, telegram_ambiguous_send,
           telegram_restart_dedup, queue_start_failure, large_old_unread_result, ambiguous_task_submission,

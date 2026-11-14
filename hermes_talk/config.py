@@ -250,8 +250,8 @@ def _tasks(data, base_dir):
         raise ConfigError("tasks.workdir must be an existing directory")
     return Tasks(enabled=True, user_ids=tuple(dict.fromkeys(users)), toolsets=tuple(dict.fromkeys(toolsets)),
                  workdir=workdir,
-                 max_concurrent=_int(data.get("max_concurrent", 1), "tasks.max_concurrent", 1, 2),
-                 max_open_per_user=_int(data.get("max_open_per_user", 3), "tasks.max_open_per_user", 1, 5),
+                 max_concurrent=_int(data.get("max_concurrent", 1), "tasks.max_concurrent", 1, 3),
+                 max_open_per_user=_int(data.get("max_open_per_user", 3), "tasks.max_open_per_user", 1, 8),
                  run_budget_s=_int(data.get("run_budget_seconds", 600), "tasks.run_budget_seconds", 20, 3600),
                  max_turns=_int(data.get("max_turns", 30), "tasks.max_turns", 1, 200),
                  request_chars=_int(data.get("request_chars", 2000), "tasks.request_chars", 20, 4000),
