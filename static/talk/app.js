@@ -443,8 +443,9 @@ const DIALOGUE_TICK_MS = 500;
 const OPENING_ASK_MS = 4000;
 const OPENING_HOLD_MS = 10000;
 const MODEL_QUIET_MS = 1000;
-// A prompted model turn that never starts stops holding the queue after this long.
-const MODEL_EXPECTED_MS = 6000;
+// A prompted turn that never starts, or a spoken one whose turn.done never arrives, stops holding the queue after this
+// long without a new output fragment.
+const MODEL_STALE_MS = 6000;
 const USER_QUIET_MS = 2000;
 // An open user turn whose turn.done never arrives stops holding the queue after this long.
 const USER_STALE_MS = 6000;
@@ -454,7 +455,7 @@ const USER_STALE_MS = 6000;
 // model has answered the previous one. close() drops unsent items without settling them: the server keeps every
 // unacknowledged result and offers it to the next call.
 function Dialogue(send, audible) {
-  const speech = {model: "quiet", expectedAt: 0, modelEndedAt: -Infinity, userSpokeAt: -Infinity, userTurnOpen: false,
+  const speech = {model: "quiet", modelAt: 0, modelEndedAt: -Infinity, userSpokeAt: -Infinity, userTurnOpen: false,
     interrupted: false, heard: false};
   let opening = "idle", openingAt = 0, closed = false, tick = null;
   const outbox = new Map();
@@ -485,13 +486,13 @@ function Dialogue(send, audible) {
     try {
       while (queued < messages.length && send(messages[queued])) queued += 1;
     } catch (_) {}
-    return queued === messages.length ? "sent" : queued ? "partial" : "none";
+    return queued && queued === messages.length ? "sent" : queued ? "partial" : "none";
   }
 
-  function expect(now) { speech.model = "expected"; speech.expectedAt = now; }
+  function expect(now) { speech.model = "expected"; speech.modelAt = now; }
 
   function modelQuiet(now) {
-    return speech.model === "quiet" || (speech.model === "expected" && now - speech.expectedAt >= MODEL_EXPECTED_MS);
+    return speech.model === "quiet" || now - speech.modelAt >= MODEL_STALE_MS;
   }
 
   function idle(now) {
@@ -534,7 +535,7 @@ function Dialogue(send, audible) {
       if (event.type === "input_transcript.added") {
         speech.userSpokeAt = now; speech.userTurnOpen = true;
         if (speech.model === "speaking") speech.interrupted = true;
-      } else if (event.type === "output_transcript.added") speech.model = "speaking";
+      } else if (event.type === "output_transcript.added") { speech.model = "speaking"; speech.modelAt = now; }
       else if (role === "user") { speech.userSpokeAt = now; speech.userTurnOpen = false; }
       else if (role === "assistant") { speech.model = "quiet"; speech.modelEndedAt = now; speech.interrupted = false; }
       else return;
@@ -548,7 +549,7 @@ function Dialogue(send, audible) {
     },
     note(text, delegationId = null) { return closed ? "none" : transmit(text, "commentary", delegationId); },
     say(key, text, delegationId = null, settled = null) {
-      if (closed) return;
+      if (closed || !text.trim()) return;
       outbox.set(key, {text, delegationId, settled});
       pump();
     },
@@ -655,11 +656,11 @@ async function poll(current) {
       if (!delegationId || job.delegation_item_id !== delegationId || job.voice_session_id !== current.voiceId
         || !FINISHED.includes(job.state) || current.spoken.has(job.id) || current.cut.has(job.id)) continue;
       // Only a whole append is acknowledged. A cut one stays undelivered for the next call, never repeated here.
-      dialogueOf(current).say(`job:${job.id}`, job.spoken || `Hermes task ${job.number} ${job.state}.`, delegationId,
-        outcome => {
-          if (outcome === "sent") { current.spoken.add(job.id); void acknowledge(current, job.id, 0); }
-          else current.cut.add(job.id);
-        });
+      const text = String(job.spoken || "").trim() || `Hermes task ${job.number} ${job.state}.`;
+      dialogueOf(current).say(`job:${job.id}`, text, delegationId, outcome => {
+        if (outcome === "sent") { current.spoken.add(job.id); void acknowledge(current, job.id, 0); }
+        else current.cut.add(job.id);
+      });
     }
     const n = current.polls++;
     if (data.context_pending || n % 6 === 0 || n < 3) void refresh(current);
@@ -686,16 +687,11 @@ async function refresh(current) {
   current.refreshing = true;
   try {
     const data = await post("context", callFields(current));
-    if (call !== current || !Number.isInteger(data.revision) || typeof data.text !== "string" || !data.text) return;
-    if (data.sources?.jobs) {
-      // One slot: a newer revision replaces an unsent older one, and only the revision appended is acknowledged.
-      dialogueOf(current).say("context", data.text, null, outcome => {
-        if (outcome === "sent") void post("context/ack", {...callFields(current), revision: data.revision}).catch(() => {});
-        else current.contextCut = true;
-      });
-      return;
-    }
-    const outcome = dialogueOf(current).note(data.text);
+    if (call !== current || !Number.isInteger(data.revision) || typeof data.text !== "string" || !data.text.trim()) return;
+    // Job outcomes wait their turn; until they are appended and acked, the server would put them in the next revision too.
+    const outcome = data.sources?.jobs
+      ? await new Promise(resolve => dialogueOf(current).say("context", data.text, null, resolve))
+      : dialogueOf(current).note(data.text);
     if (outcome === "sent") await post("context/ack", {...callFields(current), revision: data.revision});
     else if (outcome === "partial") current.contextCut = true;
   } catch (_) {

@@ -258,18 +258,76 @@ test('Q7 a queued result then stop(): no send, no ack, and the next call starts 
   assert.equal(f.run('sent.length'), 0, 'the stopped call still sends nothing');
 });
 
-test('Q8 context revision 1 queued then revision 2 fetched: only revision 2 is sent and acknowledged (stale revision spoken or acked)', async () => {
+test('Q8 an overlapping refresh while a jobs context slot is queued or its ack is pending posts context once and speaks once (same job outcomes said twice)', async () => {
+  const jobs = `replies.context = [{revision: 1, text: 'Synthetic job outcomes', sources: {jobs: 1, activity: 0}},
+    {revision: 2, text: 'Synthetic job outcomes again', sources: {jobs: 1, activity: 0}}];`;
+  const spoken = f => f.json('sent.filter(m => m.channel === "speakable").map(m => m.content[0].text)');
+
+  const queued = fixture();
+  queued.run(`emit({type: 'input_transcript.added', item: {text: 'Synthetic user'}}); ${jobs}
+    void refresh(current);`);
+  await queued.settle();
+  queued.run('void refresh(current)');
+  await queued.settle();
+  assert.equal(queued.run('routes("context").length'), 1, 'nothing new is fetched while the slot is queued');
+  queued.run(`emit({type: 'turn.done', turn: {id: 'u1', role: 'user', transcript: 'Synthetic user'}});`);
+  await queued.wait(20000);
+  assert.deepEqual(spoken(queued), ['Synthetic job outcomes']);
+  assert.deepEqual(queued.json('routes("context/ack").map(p => p.body.revision)'), [1]);
+
+  const acking = fixture();
+  acking.run(`${jobs} replies['context/ack'] = [() => new Promise(resolve => { globalThis.releaseAck = resolve; })];
+    void refresh(current);`);
+  await acking.settle();
+  assert.deepEqual(spoken(acking), ['Synthetic job outcomes'], 'sent at once when nobody talks');
+  acking.run('void refresh(current)');
+  await acking.wait(20000);
+  assert.equal(acking.run('routes("context").length'), 1, 'nothing new is fetched while the ack is in flight');
+  assert.deepEqual(spoken(acking), ['Synthetic job outcomes']);
+  acking.run(`releaseAck({}); replies.context = [{}];`);
+  await acking.settle();
+  acking.run('void refresh(current)');
+  await acking.settle();
+  assert.equal(acking.run('routes("context").length'), 2, 'the hold ends once the ack settles');
+
+  const failing = fixture();
+  failing.run(`${jobs} replies['context/ack'] = [new Error('Network error.')]; void refresh(current);`);
+  await failing.settle();
+  failing.run('void refresh(current)');
+  await failing.settle();
+  assert.equal(failing.run('routes("context").length'), 2, 'a failed ack lets a later refresh offer the jobs again');
+});
+
+test('Q9 a whitespace-only spoken result uses the fallback text and is acknowledged only after that append (ack with nothing appended)', async () => {
   const f = fixture();
   f.run(`emit({type: 'input_transcript.added', item: {text: 'Synthetic user'}});
-    replies.context = [{revision: 1, text: 'Synthetic context one', sources: {jobs: 1, activity: 0}},
-      {revision: 2, text: 'Synthetic context two', sources: {jobs: 2, activity: 0}}];`);
-  await f.run('refresh(current)');
-  await f.run('refresh(current)');
+    adopt(finished('jb_q9', 'del_q9', '   ')); poll(current);`);
+  await f.settle();
+  assert.equal(f.run('routes("task/ack").length'), 0, 'not acknowledged before anything is appended');
   f.run(`emit({type: 'turn.done', turn: {id: 'u1', role: 'user', transcript: 'Synthetic user'}});`);
-  await f.wait(10000);
-  assert.deepEqual(f.json('sent.map(m => [m.type, m.channel, m.content[0].text])'),
-    [['session.context.append', 'speakable', 'Synthetic context two']]);
-  assert.deepEqual(f.json('routes("context/ack").map(p => p.body.revision)'), [2]);
+  await f.wait(2000);
+  assert.deepEqual(f.json('sent.map(m => [m.type, m.delegation_item_id, m.content[0].text])'),
+    [['delegation.context.append', 'del_q9', 'Hermes task 1 succeeded.']]);
+  assert.deepEqual(f.json('routes("task/ack").map(p => p.body.job_id)'), ['jb_q9']);
+
+  const blank = fixture();
+  assert.equal(blank.run(`dialogueOf(current).note('   ', 'del_blank')`), 'none', 'empty text is never reported sent');
+  blank.run(`dialogueOf(current).say('reply:del_blank', '   ', 'del_blank');
+    dialogueOf(current).say('reply:del_next', 'Synthetic next reply', 'del_next');`);
+  await blank.wait(1000);
+  assert.deepEqual(blank.json('sent.map(m => m.content[0].text)'), ['Synthetic next reply'], 'a blank item never wedges the queue');
+});
+
+test('Q10 a speaking model with no turn.done releases a queued speakable after 6 s without output fragments, not before (results held until the call ends)', async () => {
+  const f = fixture();
+  f.run(`emit({type: 'output_transcript.added', item: {text: 'Synthetic refusal'}});
+    adopt(finished('jb_q10', 'del_q10', 'Synthetic Q10 result')); poll(current);`);
+  await f.wait(3000);
+  f.run(`emit({type: 'output_transcript.added', item: {text: ' still going'}});`);
+  await f.wait(5999);
+  assert.deepEqual(resultSends(f, 'Synthetic Q10 result'), [], 'held while fragments are recent');
+  await f.wait(1);
+  assert.deepEqual(resultSends(f, 'Synthetic Q10 result'), [9000]);
 });
 
 test('D1 a held result is framed on its own delegation after another delegation\'s reply (correlation lost when the queue reorders)', async () => {
