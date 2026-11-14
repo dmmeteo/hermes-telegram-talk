@@ -4,15 +4,29 @@ The check drives each thread's outcome (running, blocked, completed, failed, int
 runner admits starts and sends into it; Talk reads and interrupts it through `dispatch`, the stand-in for the
 profile's t3_control handler. Nothing here talks to a real T3 server.
 """
+import fcntl
 import json
 import os
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 
 class FakeT3:
+    """Every read-modify-write holds one file lock: the check, the runner processes and Talk's follower share it."""
+
     def __init__(self, root):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
+
+    @contextmanager
+    def _locked(self):
+        with open(self.root / ".lock", "a") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
 
     def _path(self, thread_id):
         return self.root / f"{thread_id}.json"
@@ -23,20 +37,29 @@ class FakeT3:
         except (OSError, ValueError):
             return None
 
-    def put(self, thread_id, **changes):
-        data = {**(self.get(thread_id) or {"outcome": "idle", "count": 0, "messages": [], "interrupts": 0, "runs": []}),
-                **changes}
+    def _write(self, thread_id, data):
         runs = list(data.get("runs") or [])
         while len(runs) < data["count"]:  # every counted run has an id, as T3's thread show reports them
             runs.append(f"run-{thread_id}-{len(runs) + 1}")
         data["runs"] = runs
-        tmp = self._path(thread_id).with_suffix(f".{os.getpid()}.tmp")
+        tmp = self._path(thread_id).with_suffix(f".{os.getpid()}.{threading.get_ident()}.tmp")
         tmp.write_text(json.dumps(data))
         os.replace(tmp, self._path(thread_id))
         return data
 
-    def state(self, thread_id):
-        data = self.get(thread_id) or {}
+    def update(self, thread_id, change):
+        """change(current or None) -> new fields, applied under the lock; returns the stored thread."""
+        with self._locked():
+            current = self.get(thread_id)
+            fields = change(current)
+            base = current or {"outcome": "idle", "count": 0, "messages": [], "interrupts": 0, "runs": []}
+            return self._write(thread_id, {**base, **fields})
+
+    def put(self, thread_id, **changes):
+        return self.update(thread_id, lambda current: changes)
+
+    def state(self, thread_id, data=None):
+        data = data or self.get(thread_id) or {}
         runs = data.get("runs") or []
         live = data.get("outcome") in ("running", "blocked")
         run = {"count": data.get("count"), "active_id": runs[-1] if live and runs else None,
@@ -46,40 +69,44 @@ class FakeT3:
         return {"outcome": data.get("outcome"), "run": run}
 
     def start(self, thread_id):
-        if self.get(thread_id) is None:
-            self.put(thread_id, outcome="running", count=1)
-        return {"thread_id": thread_id, "state": self.state(thread_id)}
+        data = self.update(thread_id, lambda cur: {} if cur else {"outcome": "running", "count": 1})
+        return {"thread_id": thread_id, "state": self.state(thread_id, data)}
 
     def send(self, thread_id):
-        data = self.get(thread_id)
-        delivery = "queued" if data and data["outcome"] == "running" else "started"
-        if delivery == "started":
-            self.put(thread_id, outcome="running", count=(data or {}).get("count", 0) + 1)
-        else:
-            self.put(thread_id, waiting=(data.get("waiting") or 0) + 1)
-        return {"thread_id": thread_id, "delivery": delivery, "state": self.state(thread_id)}
+        out = {}
+
+        def change(cur):
+            out["delivery"] = "queued" if cur and cur["outcome"] == "running" else "started"
+            if out["delivery"] == "started":
+                return {"outcome": "running", "count": (cur or {}).get("count", 0) + 1}
+            return {"waiting": (cur.get("waiting") or 0) + 1}
+        data = self.update(thread_id, change)
+        return {"thread_id": thread_id, "delivery": out["delivery"], "state": self.state(thread_id, data)}
 
     def finish(self, thread_id, outcome, text=""):
-        data = self.get(thread_id)
-        messages = data["messages"] + ([{"role": "assistant", "text": text}] if text else [])
-        if data.get("waiting"):  # a queued message starts the next run once this one ends
-            return self.put(thread_id, outcome="running", count=data["count"] + 1, waiting=data["waiting"] - 1,
-                            messages=messages)
-        return self.put(thread_id, outcome=outcome, messages=messages)
+        def change(cur):
+            messages = cur["messages"] + ([{"role": "assistant", "text": text}] if text else [])
+            if cur.get("waiting"):  # a queued message starts the next run once this one ends
+                return {"outcome": "running", "count": cur["count"] + 1, "waiting": cur["waiting"] - 1,
+                        "messages": messages}
+            return {"outcome": outcome, "messages": messages}
+        return self.update(thread_id, change)
 
     def dispatch(self, args):
         thread_id = args.get("thread_id")
-        data = self.get(thread_id)
-        if data is None:
+        if self.get(thread_id) is None:
             return json.dumps({"ok": False, "error": "not_found", "message": "no such thread"})
         if args["action"] == "read":
-            reads = self.put(thread_id, reads=data.get("reads", 0) + 1)
-            return json.dumps({"ok": True, "action": "read", "state": self.state(thread_id),
-                               "messages": reads["messages"][-args.get("messages", 2):]})
+            data = self.update(thread_id, lambda cur: {"reads": (cur or {}).get("reads", 0) + 1})
+            return json.dumps({"ok": True, "action": "read", "state": self.state(thread_id, data),
+                               "messages": data["messages"][-args.get("messages", 2):]})
         if args["action"] == "interrupt":
-            self.put(thread_id, interrupts=data.get("interrupts", 0) + 1)
-            if data["outcome"] in ("running", "blocked"):
-                self.put(thread_id, outcome="interrupted", waiting=0)
-                return json.dumps({"ok": True, "action": "interrupt", "interrupted": True})
-            return json.dumps({"ok": True, "action": "interrupt", "interrupted": False})
+            out = {}
+
+            def change(cur):
+                out["hit"] = cur["outcome"] in ("running", "blocked")
+                fields = {"interrupts": cur.get("interrupts", 0) + 1}
+                return {**fields, "outcome": "interrupted", "waiting": 0} if out["hit"] else fields
+            self.update(thread_id, change)
+            return json.dumps({"ok": True, "action": "interrupt", "interrupted": out["hit"]})
         return json.dumps({"ok": False, "error": "invalid_input"})
