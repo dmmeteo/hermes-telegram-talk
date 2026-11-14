@@ -69,7 +69,7 @@ class FakeT3:
         return {"outcome": data.get("outcome"), "run": run}
 
     def start(self, thread_id):
-        data = self.update(thread_id, lambda cur: {} if cur else {"outcome": "running", "count": 1})
+        data = self.update(thread_id, lambda cur: {} if cur and cur.get("count") else {"outcome": "running", "count": 1})
         return {"thread_id": thread_id, "state": self.state(thread_id, data)}
 
     def send(self, thread_id):

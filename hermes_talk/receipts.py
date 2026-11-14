@@ -37,7 +37,8 @@ HIDDEN = "hidden"  # a task its account does not show; inert for every desk vers
 TRANSITIONS = {PENDING: {SENDING}, SENDING: {SENT, PENDING, FAILED, UNCERTAIN}}
 STATUS = {jobs.ACCEPTED: "queued", jobs.RUNNING: "running", jobs.SUCCEEDED: "completed", jobs.FAILED: "failed",
           jobs.INTERRUPTED: "failed", jobs.CANCELLED: "cancelled"}
-MARKS = {"queued": "🕓", "running": "⏳", "blocked": "❓", "completed": "✅", "failed": "❌", "cancelled": "⏹"}
+MARKS = {"queued": "🕓", "running": "⏳", "blocked": "❓", "completed": "✅", "failed": "❌", "cancelled": "⏹",
+         "unknown": "❔"}
 REPORT_PREFIX = "hermes_talk:report:"
 SINCE_KEY = "hermes_talk:reports_since"
 SEND_TIMEOUT_S = 30.0
@@ -113,7 +114,7 @@ def report_status(job):
     """What the message shows: a running job's T3 work may be queued in T3 or blocked on a question or approval."""
     if job.state == jobs.RUNNING and job.large:
         return job.work_status or "running"
-    return STATUS[job.state]
+    return "unknown" if job.unknown else STATUS[job.state]
 
 
 def job_title(job, redact):

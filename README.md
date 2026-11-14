@@ -402,7 +402,9 @@ A task is large only when Talk observes T3 admit work from its own turn: the plu
 successful `t3_control` start or send (or a lost answer T3 may have committed) for that task. Reads, waits, refusals
 and other sessions record nothing. The large task's turn then holds no slot. When the turn ends, the task stays
 running and Talk follows the thread through the profile's own `t3_control` handler until T3 shows the run completed
-(the result is T3's final message), failed, interrupted, or stopped after a cancel. A blocked thread stays open. A
+(the result is the thread's newest message when it is the assistant's), failed, interrupted, or stopped after a cancel.
+When T3 no longer shows how the run ended (a later run of the thread started first, only `idle`, or the thread is
+gone), the task ends as unknown (❔, no result), never as completed. A blocked thread stays open. A
 restart keeps following; nothing is relaunched or resent. The voice model handles existing tasks with control lines
 (`CONTROL: list`, `CONTROL: status N`, `CONTROL: result N`, `CONTROL: cancel N`), answered at once from server state and
 never queued. See `docs/adr/0011-t3-work-and-task-visibility.md`.

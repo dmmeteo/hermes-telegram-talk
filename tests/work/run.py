@@ -260,9 +260,10 @@ def promotion_is_exact():
         assert link.continues == w.job("s1").number and link.queued and link.status == "queued", link
         assert w.state("s1") == "running" and w.job("s1").work_status == "running"
         w.t3.finish("th-s1", "completed", "First run done.")
-        w.until(lambda: w.state("s1") == "succeeded" and w.job("u1").work_status == "running",
-                "s1's run ends; the queued update run starts")
-        assert w.job("s1").result == "First run done."
+        w.until(lambda: w.state("s1") == "interrupted" and w.job("u1").work_status == "running",
+                "s1's run ends; the queued update run starts at once")
+        assert w.job("s1").unknown and w.job("s1").result == "", \
+            ("T3 never showed s1's run as latest and settled, so its outcome is unknown", w.job("s1"))
         w.t3.finish("th-s1", "completed", "Update applied.")
         w.until(lambda: w.state("u1") == "succeeded", "u1 settles from its own run")
         assert w.job("u1").result == "Update applied."
@@ -275,13 +276,13 @@ def promotion_is_exact():
         assert w.task(conv, vs, "send th-idle a2")[0] == 200
         w.until(lambda: w.job("a2").large and w.job("a2").work_status == "queued", "a2 queued behind a1's run")
         w.t3.finish("th-idle", "completed", "A1 result.")
-        w.until(lambda: w.state("a1") == "succeeded" and w.job("a2").work_status == "running", "a1 ends, a2 runs")
-        assert w.job("a1").result == "A1 result.", w.job("a1").result
+        w.until(lambda: w.state("a1") == "interrupted" and w.job("a2").work_status == "running", "a1 ends, a2 runs")
+        assert w.job("a1").unknown and w.job("a1").result == "", w.job("a1")
         assert w.task(conv, vs, "CONTROL: cancel " + str(w.job("a2").number))[0] == 200
         w.until(lambda: w.state("a2") == "cancelled", "a2 cancelled from T3")
-        assert w.state("a1") == "succeeded" and w.t3.get("th-idle")["interrupts"] == 1, "only a2's own run was stopped"
+        assert w.state("a1") == "interrupted" and w.t3.get("th-idle")["interrupts"] == 1, "only a2's own run was stopped"
         return {"large": ["s1", "u1", "a1", "a2"], "micro": ["r1 (read)", "r2 (refused)", "r3"],
-                "u1_continues": link.continues, "a1_result": w.job("a1").result}
+                "u1_continues": link.continues, "superseded_unknown": ["s1", "a1"]}
     finally:
         w.close()
 
@@ -558,7 +559,9 @@ def rollback_keeps_every_job():
         written = [base, replace(base, parallel=True, state=jobs.RUNNING),
                    replace(base, state=jobs.RUNNING, links=(link,), turn={"state": "succeeded", "at": 1.0}),
                    replace(base, state=jobs.SUCCEEDED, links=(link,), turn={"state": "succeeded", "at": 1.0},
-                           result="x")]
+                           result="x"),
+                   replace(base, state=jobs.INTERRUPTED, links=(link,), turn={"state": "succeeded", "at": 1.0},
+                           unknown=True, error="how it ended is not known")]
         history = MemoryHistory()
         for i, job in enumerate(written):
             job = replace(job, id=f"jb_rollback{i:02d}" + "x" * 10)
@@ -569,7 +572,10 @@ def rollback_keeps_every_job():
             assert old_jobs.load(jobs.dump(job)) is not None, ("the deployed Talk drops", job)
         reloaded = {j.id: j for j in (jobs.load(raw, history.get_meta(jobs.work_key(k[len(jobs.JOB_PREFIX):])))
                                        for k, raw in history.list_meta_prefix(jobs.JOB_PREFIX))}
-        assert [j.large for j in sorted(reloaded.values(), key=lambda j: j.id)] == [False, False, True, True]
+        ordered = sorted(reloaded.values(), key=lambda j: j.id)
+        assert [j.large for j in ordered] == [False, False, True, True, True] and ordered[-1].unknown, ordered
+        old_unknown = old_jobs.load(jobs.dump(written[-1]))
+        assert old_unknown.state == "interrupted" and old_unknown.terminal, "the deployed Talk reads it as finished"
         legacy = json.loads(jobs.dump(base))
         legacy["parallel"] = True  # a record of the undeployed 83cc7dc layout
         assert jobs.load(json.dumps(legacy)).parallel is True
@@ -592,7 +598,6 @@ def runs_are_told_apart():
     mine = work.assess(link, read("running", 2, "run-2", "run-2"), 3)
     assert mine.run_id == "run-2" and mine.status == "running"
     assert work.assess(mine, read("completed", 2, None, "run-2", "Mine."), 4).result == "Mine."
-    assert work.assess(mine, read("running", 3, "run-3", "run-3", "Mine."), 4).status == "completed", "a later run"
     assert work.interruptible(mine, read("running", 2, "run-2", "run-2")) and \
         not work.interruptible(mine, read("running", 3, "run-3", "run-3")), "never interrupt another run"
     started = work.link_from({**rec, "delivery": "started", "active_id": None, "latest_id": "run-1"})
@@ -600,13 +605,59 @@ def runs_are_told_apart():
     assert work.assess(started, read("completed", 2, None, "run-2", "Fast."), 5).status == "completed", \
         "a run that finished before the first read is still recognized"
     plain = work.link_from({**rec, "active_id": None, "latest_id": None})
-    noid = lambda outcome, count: {"ok": True, "state": {"outcome": outcome, "run": {"count": count}}, "messages": []}
+    noid = lambda outcome, count, text="": {"ok": True, "state": {"outcome": outcome, "run": {"count": count}},
+                                            "messages": [{"role": "assistant", "text": text}] if text else []}
     assert work.assess(plain, noid("completed", 1), 2).status == "queued"
-    assert work.assess(work.assess(plain, noid("running", 2), 2), noid("completed", 2), 3).status == "completed"
+    assert work.assess(work.assess(plain, noid("running", 2), 2), noid("completed", 2, "Own."), 3).result == "Own."
     for raw in ({"ok": False, "error": "server_unreachable"}, {"ok": False, "error": "unavailable"}, None):
         assert work.assess(mine, raw, 9) == mine, "an unreadable T3 changes nothing"
-    assert work.assess(mine, {"ok": False, "error": "not_found"}, 9).status == "failed"
-    return {"by_id": "queued, mine, later run, interrupt guard", "by_count": "fallback", "unreadable": "unchanged"}
+    assert work.assess(mine, {"ok": False, "error": "not_found"}, 9).status == work.UNKNOWN
+    return {"by_id": "queued, mine, interrupt guard", "by_count": "fallback", "unreadable": "unchanged"}
+
+
+def a_later_run_is_never_this_runs_outcome():
+    """Pure regressions for exact attribution: an earlier run that failed, was interrupted or was never seen to end,
+    followed by a later run with unrelated text, is unknown: never completed, never that text. Also by count only."""
+    read = lambda outcome, count, active, latest, *msgs: {"ok": True, "state": {"outcome": outcome, "run": {
+        "count": count, "active_id": active, "latest_id": latest}}, "messages": [
+        {"role": r, "text": t} for r, t in msgs]}
+    noid = lambda outcome, count, *msgs: {"ok": True, "state": {"outcome": outcome, "run": {"count": count}},
+                                          "messages": [{"role": r, "text": t} for r, t in msgs]}
+    start = work.link_from({"key": "k", "thread_id": "th", "action": "start", "confirmed": True, "outcome": "running",
+                            "run_count": 1, "active_id": "run-1", "latest_id": "run-1", "at": 1.0})
+    assert start.run_id == "run-1"
+    later = ("assistant", "Unrelated later run text.")
+    seen = {}
+    # run-1 failed, or was interrupted, or ended unseen; then run-2 started (live) or finished with unrelated text
+    for name, state in (("later live", read("running", 2, "run-2", "run-2", ("user", "next"))),
+                        ("later completed", read("completed", 2, None, "run-2", ("user", "next"), later)),
+                        ("later failed", read("failed", 2, None, "run-2", later))):
+        out = work.assess(start, state, 5)
+        seen[name] = out.status
+        assert out.status == work.UNKNOWN and out.result == "" and "Unrelated" not in out.error, (name, out)
+    # a queued link that never saw its own run: two runs since its admission, none identified as its own
+    queued = work.link_from({"key": "q", "thread_id": "th", "action": "send", "confirmed": True, "delivery": "queued",
+                             "outcome": "running", "run_count": 1, "active_id": "run-1", "latest_id": "run-1", "at": 1.0})
+    out = work.assess(queued, read("completed", 3, None, "run-3", later), 5)
+    assert out.status == work.UNKNOWN and out.run_id is None and out.result == "", ("never adopts run-3", out)
+    # the same by count only (T3 shows no run ids)
+    plain = work.link_from({"key": "p", "thread_id": "th", "action": "start", "confirmed": True, "outcome": "running",
+                            "run_count": 1, "active_id": None, "latest_id": None, "at": 1.0})
+    for name, state in (("count later live", noid("running", 2, ("user", "next"))),
+                        ("count later completed", noid("completed", 2, later)),
+                        ("count later failed", noid("failed", 3, later))):
+        out = work.assess(plain, state, 5)
+        seen[name] = out.status
+        assert out.status == work.UNKNOWN and out.result == "", (name, out)
+    # idle alone is not success; a newest message that is not the assistant's is no result of this run
+    out = work.assess(start, read("idle", 1, None, "run-1", later), 5)
+    assert out.status == work.UNKNOWN and out.result == "", ("idle alone", out)
+    out = work.assess(start, read("completed", 1, None, "run-1", ("assistant", "Older reply."), ("user", "x")), 5)
+    assert out.status == "completed" and out.result == "", ("no older assistant text is borrowed", out)
+    for outcome in ("failed", "interrupted"):
+        out = work.assess(start, read(outcome, 1, None, "run-1", ("assistant", "Own words.")), 5)
+        assert out.status == outcome and out.result == "", (outcome, out)
+    return seen
 
 
 def review_regressions():
@@ -626,8 +677,8 @@ def review_regressions():
         assert w.task(conv, vs, "code d1")[0] == 200
         w.until(lambda: w.job("d1").large, "d1 promoted")
         (w.root / "t3" / "th-d1.json").unlink()
-        w.until(lambda: w.state("d1") == "failed", "a deleted thread fails its task instead of hanging")
-        assert "no longer has this thread" in w.job("d1").error
+        w.until(lambda: w.state("d1") == "interrupted", "a deleted thread ends its task as unknown instead of hanging")
+        assert w.job("d1").unknown and "no longer has this thread" in w.job("d1").error
         for key in ("r1", "r2"):
             assert w.task(conv, vs, f"codewait {key}")[0] == 200
             w.until(lambda: w.job(key).large, f"{key} promoted")
@@ -652,7 +703,41 @@ def review_regressions():
         assert not any(t.endswith("hold z1") for t in texts), ("a finished hidden task is never backfilled", texts)
         assert sum(1 for c in w.posts.sends() if c[2].endswith("lostnothread n1")) == 1, texts
         return {"backfill": "none after a switch, a save and a restart", "lost_start": "noted", "deleted_thread":
-                "failed", "live_turn_bound": "oldest large turn stopped"}
+                "unknown", "live_turn_bound": "oldest large turn stopped"}
+    finally:
+        w.close()
+
+
+def superseded_run_reports_unknown():
+    """End to end: the followed run fails (or is interrupted) and a later run finishes with unrelated text before
+    Talk reads the thread again, with run ids and by count only. The task is reported unknown: not completed, no
+    result, never that text, in the API, the voice line and the Telegram message."""
+    w = World(max_concurrent=3).serve()
+    try:
+        conv, vs = w.call()
+        w.t3.put("th-y1", no_ids=True)  # this thread's T3 shows no run ids: Talk falls back to the run count
+        for text in ("code x1", "code y1"):
+            assert w.task(conv, vs, text)[0] == 200
+        w.until(lambda: w.job("x1").large and w.job("y1").large, "both promoted")
+        assert w.job("x1").links[0].run_id and not w.job("y1").links[0].run_id
+        unrelated = [{"role": "user", "text": "someone else's message"},
+                     {"role": "assistant", "text": "Unrelated later run text."}]
+        w.t3.put("th-x1", outcome="completed", count=2, messages=unrelated)  # run-1 ended unseen, run-2 finished
+        w.t3.put("th-y1", outcome="completed", count=2, messages=unrelated)
+        w.until(lambda: w.job("x1").terminal and w.job("y1").terminal, "both settle")
+        listed = {j["delegation_item_id"].split("_")[1]: j for j in w.post("tasks", {"conversation_id": conv,
+                                                                                      "voice_session_id": vs})[1]["jobs"]}
+        for key in ("x1", "y1"):
+            job, public = w.job(key), listed[key]
+            assert job.state == "interrupted" and job.unknown and job.result == "", (key, job)
+            assert public["outcome_unknown"] is True and public["result"] == "", public
+            assert "Unrelated" not in public["spoken"] and "not known" in public["spoken"], public["spoken"]
+        status, recall = w.task(conv, vs, f"CONTROL: result {w.job('x1').number}")
+        assert status == 200 and "Unrelated" not in recall["reply"] and "not known" in recall["reply"], recall
+        w.settle_reports()
+        finals = sorted(texts[-1] for texts in w.posts.shown().values())
+        assert finals == ["❔ code x1", "❔ code y1"], finals
+        return {"x1_by_id": "unknown", "y1_by_count": "unknown", "telegram": finals, "spoken": listed["x1"]["spoken"]}
     finally:
         w.close()
 
@@ -680,7 +765,8 @@ def turn_budget_is_not_a_t3_outcome():
         w.close()
 
 
-CHECKS = (hook_records_only_real_admissions, runs_are_told_apart, turn_budget_is_not_a_t3_outcome, config_contract, rollback_keeps_every_job,
+CHECKS = (hook_records_only_real_admissions, runs_are_told_apart, a_later_run_is_never_this_runs_outcome,
+          superseded_run_reports_unknown, turn_budget_is_not_a_t3_outcome, config_contract, rollback_keeps_every_job,
           slow_t3_keeps_requests_responsive, promotion_is_exact, other_user_no_crossover,
           restart_and_uncertain_admission, cancel_large_and_queued_and_blocked, visibility_flags_and_telegram_control,
           review_regressions)

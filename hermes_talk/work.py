@@ -12,8 +12,10 @@ parent chain (public SessionDB.get_session) back to the marked one.
 Talk then follows each link through the profile's own `t3_control` handler (registry dispatch, which fires no tool
 hooks, so these reads never look like admissions). A link is its own T3 run: identified by the run id T3 shows
 (`active_id`, else the newest `latest_id` that is not the run it was admitted behind), with the thread's run count as
-the fallback when T3 shows no ids. It is done once T3 shows that run settled, or a later run of the thread started
-(T3 starts a queued run only after the earlier one ended). An unreadable T3 changes nothing. A possibly admitted
+the fallback when T3 shows no ids. Its outcome is read only while it is the thread's latest run: completed, failed or
+interrupted, with a result only when the thread's newest message is the assistant's. T3's read is per thread, not per
+run, so when a later run started before Talk saw this one settle, or the run cannot be singled out, or T3 shows only
+`idle`, the outcome is `unknown`: never success, and never the later run's text. An unreadable T3 changes nothing. A possibly admitted
 start or send (T3's answer was lost) is confirmed only by the thread itself and is never resent; a lost start that
 came back without a thread id is kept as a note, since nothing can follow it.
 """
@@ -31,7 +33,9 @@ JOB_ID = re.compile(r"jb_[A-Za-z0-9_-]{16,64}")
 ADMITTING = ("start", "send")
 LIVE = ("running", "blocked")
 LINEAGE_HOPS = 16
-DONE = frozenset({"completed", "failed", "interrupted", "idle"})
+SETTLED = frozenset({"completed", "failed", "interrupted", "idle"})  # thread outcomes of a run that is not live
+UNKNOWN = "unknown"  # the run ended, but T3 no longer shows how: never reported as success or with another run's text
+DONE = frozenset({"completed", "failed", "interrupted", UNKNOWN})
 DROPPED = "unconfirmed"
 LOST_START = ("T3's answer to a start was lost before it named a thread; T3 may run that work unseen by Talk. "
               "Check T3.")
@@ -261,17 +265,28 @@ def merge(link, record):
 
 
 def _final_text(messages):
-    for message in reversed(messages or ()):
-        if isinstance(message, dict) and message.get("role") == "assistant" and (message.get("text") or "").strip():
-            return message["text"].strip()
+    """The run's own reply: the thread's newest message when it is the assistant's. An older assistant message may
+    belong to an earlier run, so a newest message from anyone else means no reply of this run is shown."""
+    newest = next((m for m in reversed(messages or ()) if isinstance(m, dict)), None)
+    if newest is not None and newest.get("role") == "assistant" and (newest.get("text") or "").strip():
+        return newest["text"].strip()
     return ""
 
 
+LATER_RUN = ("A later run of the same T3 thread started before Talk saw this run end, and T3 shows only the thread's "
+             "latest run, so how this run ended is not known. Check the T3 thread.")
+
+
+def _unknown(link, why):
+    return replace(link, status=UNKNOWN, result="", error=why)
+
+
 def _settled(link, outcome, read):
+    """This run's outcome, read while it is the thread's latest run."""
+    if outcome == "idle":
+        return _unknown(link, "T3 shows the thread idle without saying how its run ended. Check the T3 thread.")
     text = _final_text(read.get("messages"))[-RESULT_CHARS:]
-    if outcome not in DONE:  # a later run started, so this one ended; how is no longer shown
-        return replace(link, status="completed", result=text or "Its T3 run ended and a later run continued the thread.")
-    return replace(link, status=outcome, result=text if outcome in ("completed", "idle") else "",
+    return replace(link, status=outcome, result=text if outcome == "completed" else "",
                    error=text[-300:] if outcome == "failed" else "")
 
 
@@ -283,7 +298,7 @@ def assess(link, read, now):
         if read.get("error") == "not_found":
             if not link.confirmed:
                 return replace(link, status=DROPPED, seen=now, error="T3 has no such thread; nothing was admitted.")
-            return replace(link, status="failed", error="T3 no longer has this thread.")
+            return _unknown(link, "T3 no longer has this thread, so how its run ended is not known.")
         return link
     state = read.get("state") if isinstance(read.get("state"), dict) else {}
     outcome = state.get("outcome")
@@ -292,11 +307,13 @@ def assess(link, read, now):
     active, latest = _ident(run.get("active_id")), _ident(run.get("latest_id"))
     live = outcome in LIVE
     run_id = link.run_id
+    beyond = count is not None and link.base_runs is not None and count > link.base_runs + 1
     if run_id is None:
         candidate = active or latest
-        if candidate is not None and candidate != link.prior_run_id and (link.via == "start" or link.prior_run_id
-                                                                          or link.base_runs is None or count is None
-                                                                          or count > link.base_runs):
+        # Only the one run after the admission point can be this link's; past it, which one was is not shown.
+        if candidate is not None and candidate != link.prior_run_id and not beyond and (
+                link.via == "start" or link.prior_run_id or link.base_runs is None or count is None
+                or count > link.base_runs):
             run_id = candidate
     counted = count is not None and link.base_runs is not None and count > link.base_runs
     if not link.confirmed:
@@ -310,22 +327,21 @@ def assess(link, read, now):
         link = replace(link, run_id=run_id, started=True)
         if active == run_id:
             return replace(link, status="blocked" if outcome == "blocked" else "running")
-        if latest not in (None, run_id) or (count is not None and link.base_runs is not None
-                                            and count > link.base_runs + 1):
-            return _settled(link, None, read)
-        return _settled(link, outcome, read) if outcome in DONE else replace(link, status="running")
+        if latest not in (None, run_id) or beyond:
+            return _unknown(link, LATER_RUN)
+        return _settled(link, outcome, read) if outcome in SETTLED else replace(link, status="running")
+    if beyond:  # several runs since the admission and none of them identified as this one
+        return _unknown(replace(link, started=True, confirmed=True), LATER_RUN)
     # T3 shows no run ids: fall back to the run count and the thread's outcome.
     started = link.started or counted or (live and (not link.queued or link.base_runs is None))
     link = replace(link, started=started)
     if not started:
         return replace(link, status="queued")
-    if count is not None and link.base_runs is not None and count > link.base_runs + 1:
-        return _settled(link, None, read)
     if outcome == "blocked":
         return replace(link, status="blocked")
     if live:
         return replace(link, status="running")
-    return _settled(link, outcome, read) if outcome in DONE else link
+    return _settled(link, outcome, read) if outcome in SETTLED else link
 
 
 def interruptible(link, read):

@@ -21,11 +21,15 @@ stopped the turn and reported the task failed while T3 kept working. Telegram po
 - **Talk follows the work.** A large job's turn holds no execution slot. When the turn ends the job stays running;
   `turn` keeps what the turn alone would have settled to. One follower thread reads each linked thread through the
   profile's own `t3_control` handler (registry dispatch, no tool hooks) and settles the job from T3: completed (result
-  is T3's final message), failed, interrupted, or cancelled when a cancel was asked and T3 shows the run stopped.
+  is the thread's newest message when it is the assistant's), failed, interrupted, or cancelled when a cancel was asked
+  and T3 shows the run stopped.
   Blocked stays open (❓). A link is its own T3 run, identified by run id (`active_id`, else the newest `latest_id`
-  that is not the run it was admitted behind), with the run count as fallback when T3 shows no ids; a later run of
-  the thread means the earlier one ended. A cancel interrupts only while the active run is the link's own. A thread
-  T3 no longer has fails the task. A possibly admitted start is confirmed only by the thread existing; a possibly
+  that is not the run it was admitted behind), with the run count as fallback when T3 shows no ids. T3's read is per
+  thread, not per run, so a run's outcome is read only while it is the thread's latest run. When a later run started
+  before Talk saw it end, when its run cannot be singled out, when T3 shows only `idle`, or when T3 no longer has the
+  thread, the outcome is **unknown**: the job is stored as `interrupted` with `unknown` in its sidecar, no result, an
+  explicit reason, spoken as "how it ended is not known" and posted as ❔. It is never reported completed and never
+  carries another run's text. A cancel interrupts only while the active run is the link's own. A possibly admitted start is confirmed only by the thread existing; a possibly
   sent message only by T3 showing its run. A lost start that named no thread is kept as a note on the result.
   Nothing is ever resent.
 - **Execution stays bounded, waiting is not capped.** `tasks.max_concurrent` (1..3) bounds turns of jobs that are not
@@ -49,8 +53,9 @@ stopped the turn and reported the task failed while T3 kept working. Telegram po
 
 - The task prompt asks the agent to end its turn after the admission; a turn that keeps waiting lives until its run
   budget or until it is the oldest beyond the live-turn bound.
-- When a later queued message of the same thread starts, the earlier run counts as completed with the thread's last
-  final message; T3 no longer shows how that earlier run ended.
+- When a later queued message of the same thread starts before Talk's next read (10 s), the earlier task ends as
+  unknown, since no supported read shows how that run ended. Updates queued on a busy thread therefore often leave the
+  earlier task unknown; T3 itself keeps the full history.
 - A start whose answer was lost before T3 named a thread cannot be followed. Killing a turn between T3's commit and
   the hook's write (cancel, budget) loses that admission the same way. Both settle from the turn.
 - If the voice server has no `t3_control` (plugin missing), large work stays running until it can read T3.

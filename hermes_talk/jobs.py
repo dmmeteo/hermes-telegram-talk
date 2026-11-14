@@ -19,7 +19,9 @@ version of the job; report_to and title hold its destination and short name, bou
 A job is large once T3 admitted work from its own turn (work.py): its `links`. Its turn then holds no execution
 slot, and when the turn ends the job stays running on its T3 work: `turn` keeps what the turn alone would have
 settled to, and the job settles only from what T3 shows. Everything newer than the base record (`parallel`, `links`,
-`turn`) is stored under its own key, so a Talk from before these fields still loads every job it wrote.
+`turn`, `unknown`) is stored under its own key, so a Talk from before these fields still loads every job it wrote.
+`unknown` marks a job whose T3 run ended without T3 showing how: its base state is interrupted (a state every reader
+knows), it carries no result, and it is spoken and posted as unknown, never as completed.
 """
 import json
 import logging
@@ -49,7 +51,7 @@ JOB_ID = re.compile(r"jb_[A-Za-z0-9_-]{16,64}")
 DELEGATION_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 JOB_PREFIX = "hermes_talk:job:"
 WORK_PREFIX = "hermes_talk:jobwork:"
-EXTRA = ("parallel", "links", "turn")
+EXTRA = ("parallel", "links", "turn", "unknown")
 FOLLOW_S = 10.0  # how often open T3 work is read
 INTAKE_S = 1.0  # how often a running turn's admissions are picked up
 STOP_RETRY_MIN_S, STOP_RETRY_MAX_S, STOP_RECHECK_S = 1.0, 8.0, 10.0  # gateway stop: retry backoff, re-request
@@ -93,6 +95,7 @@ class Job:
     parallel: bool = False
     links: tuple = ()
     turn: dict = None
+    unknown: bool = False
 
     @property
     def terminal(self):
@@ -137,9 +140,11 @@ class Job:
                 "result": self.result if self.terminal else "", "error": self.error,
                 "spoken": self.spoken() if self.terminal else "",
                 "report": report.public() if report is not None else None,
-                "kind": self.kind, "work": self.work_status}
+                "kind": self.kind, "work": self.work_status, "outcome_unknown": self.unknown}
 
     def spoken_state(self):
+        if self.unknown:
+            return "ended in T3, but how it ended is not known"
         if self.state == RUNNING and self.large:
             return {"blocked": "is waiting for an answer or approval in T3",
                     "queued": "is queued in T3"}.get(self.work_status, "is running as T3 code work")
@@ -150,7 +155,7 @@ class Job:
         head = f"Hermes task {self.number} ({self.request[:80]}) {self.spoken_state()}."
         if self.state == SUCCEEDED and self.result:
             return f"{head} Result: {self.result}"
-        if self.state == FAILED and self.error:
+        if (self.state == FAILED or self.unknown) and self.error:
             return f"{head} Reason: {self.error}"
         return head
 
@@ -172,10 +177,10 @@ def dump(job):
 
 def dump_extra(job):
     """The newer fields, under their own key; None while all of them are unset."""
-    if not (job.parallel or job.links or job.turn):
+    if not (job.parallel or job.links or job.turn or job.unknown):
         return None
-    return json.dumps({"parallel": job.parallel, "links": [work.link_dump(l) for l in job.links], "turn": job.turn},
-                      sort_keys=True)
+    return json.dumps({"parallel": job.parallel, "links": [work.link_dump(l) for l in job.links], "turn": job.turn,
+                       "unknown": job.unknown}, sort_keys=True)
 
 
 def _loads(raw):
@@ -196,6 +201,7 @@ def load(raw, extra=None):
     links = [work.link_load(item) for item in more.get("links") or () if isinstance(item, dict)]
     data["links"] = tuple(link for link in links if link is not None)
     data["turn"] = more.get("turn") if isinstance(more.get("turn"), dict) else None
+    data["unknown"] = more.get("unknown") is True
     try:
         return Job(**data)
     except TypeError:
@@ -601,6 +607,9 @@ class JobBoard:
                 "The T3 work failed." + (f" {reason}" if reason else "")), 300))
         elif "interrupted" in statuses:
             job = job.to(INTERRUPTED, finished=now, error="The T3 run was interrupted before it finished.")
+        elif work.UNKNOWN in statuses:  # no result is claimed, and no other run's text is borrowed
+            reason = next(l.error for l in counted if l.status == work.UNKNOWN)
+            job = job.to(INTERRUPTED, finished=now, unknown=True, error=clip(self.redact(reason), 300))
         else:
             text = next((l.result for l in reversed(counted) if l.result), "") or turn.get("result", "")
             job = job.to(SUCCEEDED, finished=now, result=clip(self.redact(
