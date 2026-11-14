@@ -1548,9 +1548,126 @@ def t3_admission_real_hook(model):
         pulse_model.bind(None)
 
 
+UNAVAILABLE = ("does not exist", "not available", "could not be resolved", "unknown tool", "not in this session")
+
+
+def t3_toolset_contract(model):
+    """The live grant question, on the target SDK with the profiles' own t3-bridge code (HERMES_TALK_T3_BRIDGE):
+    a voice task with tasks.toolsets [hermes-telegram] cannot reach t3_control; adding t3_bridge reaches the real
+    bridge handler (a status call; no T3 server is reachable from the check). coding-mode's skill_view is in both."""
+    bridge = Path(os.environ.get("HERMES_TALK_T3_BRIDGE", ""))
+    assert (bridge / "plugin.yaml").is_file() and (bridge / "control.py").is_file(), \
+        "set HERMES_TALK_T3_BRIDGE to a copy of the profiles' t3-bridge plugin"
+    from hermes_talk import pulse_model
+    out = {"bridge_control_sha256": hashlib.sha256((bridge / "control.py").read_bytes()).hexdigest()}
+    for label, sets in (("hermes-telegram", ["hermes-telegram"]), ("hermes-telegram+t3_bridge", ["hermes-telegram", "t3_bridge"])):
+        TELEGRAM.reset()
+        root = Path(tempfile.mkdtemp(prefix="talk-agent-grant-"))
+        home = root / "home"
+        fx.write_home(home)
+        (home / "config.yaml").write_text(model_config(model, "plugins:\n  enabled:\n    - hermes-telegram-talk\n"
+                                                             "    - t3-bridge\n"))
+        shutil.copytree(bridge, home / "plugins" / "t3-bridge", ignore=shutil.ignore_patterns(".git", "__pycache__"))
+        e = Env(model, root=root, toolsets=sets)
+        try:
+            bind_host_model(e)
+            conv, vs = e.call()
+            t3 = e.wait(e.task(conv, vs, "t3status", "del_g1")[1]["job"]["id"], conv, vs)
+            skill = e.wait(e.task(conv, vs, "skill coding-mode", "del_g2")[1]["job"]["id"], conv, vs)
+            out[label] = {"t3_control": t3["result"][:400], "skill_view": skill["result"][:200]}
+            reached = '"action": "status"' in t3["result"] or "'action': 'status'" in t3["result"]
+            missing = any(m in t3["result"].lower() for m in UNAVAILABLE)
+            assert not any(m in skill["result"].lower() for m in UNAVAILABLE), ("skill_view is in the bundle", skill)
+            if "t3_bridge" in sets:
+                assert reached and not missing, ("adding t3_bridge reaches the real t3-bridge handler", t3)
+            else:
+                assert missing and not reached, ("[hermes-telegram] alone cannot reach t3_control", t3)
+        finally:
+            e.close()
+            pulse_model.bind(None)
+    out["transport"] = TRANSPORT
+    return out
+
+
+DEPLOYED_REVISION = "35f8fa12f5f5f39932718b41b30582c54ca5ad59"
+
+
+def _install_revision(target, revision):
+    """The plugin files of `revision` (git archive), as the live profiles hold them."""
+    target.mkdir(parents=True, exist_ok=True)
+    tar = subprocess.run(["git", "-C", str(ROOT), "archive", revision, *PLUGIN_FILES], capture_output=True, check=True)
+    subprocess.run(["tar", "-x", "-C", str(target)], input=tar.stdout, check=True)
+
+
+def gateway_plugin_reload_same_pid(model):
+    """Activation without a restart: a gateway serving the deployed 35f8fa1 plugin records no T3 admission; after
+    the new files and the control socket's reload-plugins, the SAME gateway PID registers the plugin's
+    post_tool_call hook and promotes a real turn's T3 start. Platform handlers (/talk_notify) are not re-wired by
+    a reload of an already loaded plugin on this core, so they need a gateway restart."""
+    sys.path.insert(0, str(ROOT / "tests" / "agent"))
+    import fake_t3_plugin
+    from gateway.control_socket import query_gateway_control, reload_gateway_plugins
+    from hermes_talk import pulse_model
+    from tests.work.fake_t3 import FakeT3
+    TELEGRAM.reset()
+    root = Path(tempfile.mkdtemp(prefix="talk-agent-reload-"))
+    home = root / "home"
+    fx.write_home(home)
+    (home / "config.yaml").write_text(model_config(model, "plugins:\n  enabled:\n    - hermes-telegram-talk\n"
+                                                         "    - t3-bridge\n"))
+    target = home / "plugins" / "hermes-telegram-talk"
+    _install_revision(target, DEPLOYED_REVISION)
+    store = FakeT3(root / "t3")
+    fake_t3_plugin.install(home, ROOT, root / "t3")
+    e = Env(model, root=root, toolsets=["file", "t3_bridge"], receipts={"micro_tasks": False})
+    try:
+        llm = pulse_model.load_host()  # the voice server's own discovery: t3_control is registered for its reads
+        pulse_model.bind(None)
+        e.talk.model = pulse_model.PulseModel(llm=llm)
+        e.talk.board.follow_s = 0.5
+        conv, vs = e.call()
+        before = e.wait(e.task(conv, vs, "t3start old", "del_r1")[1]["job"]["id"], conv, vs)
+        assert before["kind"] == "micro" and store.get("th-old") is not None, \
+            ("the deployed gateway plugin has no hook: T3 ran, nothing was recorded", before)
+        ident = query_gateway_control(home, "identify")
+        pids = gateway_pids(root)
+        assert ident and ident.get("pid") in pids and len(pids) == 1, (ident, pids)
+        for name in PLUGIN_FILES:
+            src, dst = ROOT / name, target / name
+            if src.is_dir():
+                shutil.copytree(src, dst, dirs_exist_ok=True)
+            else:
+                shutil.copy2(src, dst)
+        answer = reload_gateway_plugins(home)
+        assert answer and answer.get("reloaded"), answer
+        talk = next(a for a in answer["activations"] if a.get("name") == "hermes-telegram-talk")
+        hooks = sorted((talk.get("activated_now") or {}).get("hooks", []) + (talk.get("activated_now") or {}).get(
+            "gateway_transforms", []))
+        assert "post_tool_call" in hooks, ("the reloaded plugin registered its hook in the gateway", talk)
+        after = query_gateway_control(home, "identify")
+        assert after["pid"] == ident["pid"] and after.get("start_time") == ident.get("start_time") and \
+            gateway_pids(root) == pids, ("same gateway process, no restart", ident, after)
+        _, body = e.task(conv, vs, "t3start new", "del_r2")
+        big = body["job"]["id"]
+        deadline = time.time() + 120
+        while time.time() < deadline and not (e.native(big).large and e.native(big).turn):
+            time.sleep(0.3)
+        assert e.native(big).large, ("the same PID now records the admission", e.native(big))
+        store.finish("th-new", "completed", "NEW-DONE")
+        done = e.wait(big, conv, vs)
+        assert done["state"] == "succeeded" and done["result"] == "NEW-DONE", done
+        return {"pid": ident["pid"], "start_time": ident.get("start_time"), "code_identity": {
+                    k: ident.get(k) for k in ident if k.startswith(("code", "git", "source", "version"))},
+                "hooks_after_reload": hooks, "callbacks_after_reload": (talk.get("activated_now") or {}).get("callbacks"),
+                "before": before["kind"], "after": done["kind"], "adapters_rewired": answer.get("adapters_rewired")}
+    finally:
+        e.close()
+        pulse_model.bind(None)
+
+
 COMMON = (native_tool_roundtrip, background_result_delivery, context_update_injection, persistent_two_call_history,
           pulse_visibility_and_cursor, pulse_late_after_fast_start, cross_user_denial, cross_profile_denial, restart_job_reconciliation,
-          voice_disconnect_vs_cancel, delegation_id_dedup, one_call_three_native_runs, t3_admission_real_hook, plugin_native_install, unauthenticated_job_denial,
+          voice_disconnect_vs_cancel, delegation_id_dedup, one_call_three_native_runs, t3_admission_real_hook, t3_toolset_contract, plugin_native_install, unauthenticated_job_denial,
           limits_and_approvals, smart_approval_profile, receipt_ack_no_double_speech, telegram_default_receipt,
           telegram_alternate_destination, telegram_closed_call_delivery, telegram_ambiguous_send,
           telegram_restart_dedup, queue_start_failure, large_old_unread_result, ambiguous_task_submission,
@@ -1830,7 +1947,7 @@ def rpc_composite_toolsets(model):
 
 
 # The gateway transport's own safety properties; every COMMON check also runs on it.
-RPC_ONLY = (rpc_composite_toolsets, rpc_tool_resume_idempotency, rpc_destructive_denial, rpc_cancel_no_late_effect,
+RPC_ONLY = (gateway_plugin_reload_same_pid, rpc_composite_toolsets, rpc_tool_resume_idempotency, rpc_destructive_denial, rpc_cancel_no_late_effect,
             rpc_budget_timeout, rpc_lost_admission_ack, rpc_genuine_refusal, rpc_stop_survives_outage)
 
 

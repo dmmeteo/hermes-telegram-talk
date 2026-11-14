@@ -14,6 +14,7 @@ Script, keyed on the newest user message:
   "slowshell <s> <cmd>" -> wait <s> seconds, then a terminal tool call (no late side effect after a stop)
   "big <n>"       -> a result of about <n> characters between BIG-START and BIG-END markers
   "t3start <name>" / "t3read <name>" -> a t3_control start of thread th-<name> / a read of it
+  "t3status" / "skill <name>" -> a t3_control status call / a skill_view of <name>
 A tool the request does not offer directly but that sits behind Hermes' Tool Search bridge is called via tool_call.
   anything else   -> "SCRIPTED-ANSWER: <request>"
 """
@@ -80,6 +81,10 @@ def plan(messages):
         delay, _, command = rest.partition(" ")
         time.sleep(float(delay))
         return ("tool", "terminal", {"command": command.strip()})
+    if word == "t3status":
+        return ("tool", "t3_control", {"action": "status"})
+    if word == "skill" and rest:
+        return ("tool", "skill_view", {"name": rest.strip()})
     if word in ("t3start", "t3read") and rest:
         name = rest.strip()
         call = {"action": "start", "cwd": "/synthetic", "message": name, "request_id": f"req-start-{name}"} \

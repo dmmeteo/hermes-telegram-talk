@@ -657,7 +657,30 @@ def review_regressions():
         w.close()
 
 
-CHECKS = (hook_records_only_real_admissions, runs_are_told_apart, config_contract, rollback_keeps_every_job,
+def turn_budget_is_not_a_t3_outcome():
+    """A large task's turn that runs past its budget is stopped; the task neither fails nor completes from that."""
+    w = World(max_concurrent=1).serve()
+    try:
+        conv, vs = w.call()
+        assert w.task(conv, vs, "codewait b1")[0] == 200
+        w.until(lambda: w.job("b1").large, "b1 promoted")
+        with w.talk.board.lock:
+            job = w.job("b1")
+            w.talk.board.jobs[job.id] = replace(job, started=job.started - 100_000)  # its run budget is long past
+        w.until(lambda: w.ledger("stop", "b1"), "the turn past its budget is stopped")
+        w.until(lambda: w.job("b1").turn is not None, "the stopped turn is recorded")
+        assert w.state("b1") == "running" and w.job("b1").turn["state"] == "failed", \
+            ("the budget ends only the turn; the T3 work keeps the task open", w.job("b1").turn)
+        assert w.job("b1").work_status == "running"
+        w.t3.finish("th-b1", "completed", "Budget-safe result.")
+        w.until(lambda: w.state("b1") == "succeeded", "b1 settles from T3")
+        assert w.job("b1").result == "Budget-safe result." and not w.job("b1").error
+        return {"turn": "failed (budget)", "task": "succeeded from T3"}
+    finally:
+        w.close()
+
+
+CHECKS = (hook_records_only_real_admissions, runs_are_told_apart, turn_budget_is_not_a_t3_outcome, config_contract, rollback_keeps_every_job,
           slow_t3_keeps_requests_responsive, promotion_is_exact, other_user_no_crossover,
           restart_and_uncertain_admission, cancel_large_and_queued_and_blocked, visibility_flags_and_telegram_control,
           review_regressions)
