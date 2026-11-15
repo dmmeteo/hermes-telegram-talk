@@ -26,11 +26,15 @@ await new Promise((resolve,reject)=>{
 });
 const args=['--disable-gpu','--use-fake-device-for-media-stream','--use-fake-ui-for-media-stream','--allow-loopback-in-peer-connection',
  '--disable-features=WebRtcHideLocalIpsWithMdns','--autoplay-policy=no-user-gesture-required'];
-const browser=await chromium.launch({args});
-let visibilityBrowser,visibilityChrome;
+let mainChrome=spawn(chromium.executablePath(),['--headless=new','--no-sandbox','--disable-dev-shm-usage',
+ '--no-first-run','--no-default-browser-check','--disable-background-networking','--disable-extensions',
+ '--disable-default-apps','--disable-component-update','--disable-sync','--renderer-process-limit=2','--num-raster-threads=1',
+ '--remote-debugging-port=9222','--user-data-dir=/tmp/main-profile',...args,'about:blank'],{stdio:'ignore'});
+await until(async()=>{try{return(await fetch('http://127.0.0.1:9222/json/version')).ok;}catch{return false;}},'native main browser');
+let browser=await chromium.connectOverCDP('http://127.0.0.1:9222',{noDefaults:true});
 let nativePolicyBrowser;
 log('runtime',{browser:browser.version(),display:'headless Chromium; native CDP context for real tab visibility',fixture:'real frozen backend + local Chromium WebRTC peers; all identities/context/media synthetic',network:'none'});
-const provider=await browser.newPage();
+let provider=await browser.contexts()[0].newPage();
 await provider.goto(`${FIX}/provider.html`);
 const {initData,launch}=await(await fetch(`${FIX}/identity`)).json();
 const appUrl=APP+'?launch='+launch+'#tgWebAppData='+encodeURIComponent(initData);
@@ -83,6 +87,21 @@ async function screenshot(page,name){await page.screenshot({path:`${OUT}/${name}
 async function closed(page){return until(async()=>{const s=await state(page);return s.tracks.every(t=>t.state==='ended')&&s.peers.every(p=>p==='closed')&&s.audio.every(a=>a==='closed')&&s;},'all media and contexts closed');}
 let page,index;
 try {
+ await step('real-background-tab-does-not-end-call',async()=>{
+  const context=browser.contexts()[0];
+  const native=await open({context});await ready(native);
+  const before=await state(native);const other=await context.newPage();await other.goto('about:blank');await other.bringToFront();
+  await until(()=>native.evaluate(()=>document.visibilityState==='hidden'),'native hidden tab');
+  const during=await state(native);const visibility=await native.evaluate(()=>document.visibilityState);
+  assert(visibility==='hidden','background tab is actually hidden');
+  assert(during.peers.at(-1)==='connected'&&during.tracks.at(-1).state==='live','current hidden page media preserved');
+  assert(JSON.stringify(during.tracks.map(t=>t.state))===JSON.stringify(before.tracks.map(t=>t.state)),'hiding preserves every prior live and ended track state');
+  await native.bringToFront();await other.close();await ready(native);await native.close();
+  await browser.close();mainChrome.kill('SIGTERM');mainChrome=null;
+  assert((await fetch(`${FIX}/provider/reset`,{method:'POST'})).ok,'old synthetic provider poll fenced');
+  browser=await chromium.launch({args});provider=await browser.newPage();await provider.goto(`${FIX}/provider.html`);
+  return {before:before.peers,after:during.peers,visibility,nativeContext:'CDP noDefaults avoids Playwright forced visible focus emulation'};
+ });
  await step('automatic-entry-authenticated-bootstrap-real-webrtc',async()=>{
   page=await open();const s=await ready(page);index=await lastPeer();
   const bytes=await page.evaluate(async()=>{let n=0;for(const p of window.__pcs)(await p.getStats()).forEach(r=>{if(r.type==='inbound-rtp'&&r.kind==='audio')n+=r.bytesReceived;});return n;});
@@ -196,23 +215,6 @@ try {
   assert((await messages()).filter(m=>m.content==='Synthetic text retained across reconnect.').length===1,'one stored reconnect turn');
   await page.unroute('**/api/events');
  });
- await step('real-background-tab-does-not-end-call',async()=>{
-  visibilityChrome=spawn(chromium.executablePath(),['--headless=new','--no-sandbox','--disable-dev-shm-usage',
-   '--remote-debugging-port=9222','--user-data-dir=/tmp/visibility-profile',...args,'about:blank'],{stdio:'ignore'});
-  await until(async()=>{try{return(await fetch('http://127.0.0.1:9222/json/version')).ok;}catch{return false;}},'native visibility browser');
-  visibilityBrowser=await chromium.connectOverCDP('http://127.0.0.1:9222',{noDefaults:true});
-  const context=visibilityBrowser.contexts()[0];
-  const native=await open({context});await ready(native);
-  const before=await state(native);const other=await context.newPage();await other.goto('about:blank');await other.bringToFront();
-  await until(()=>native.evaluate(()=>document.visibilityState==='hidden'),'native hidden tab');
-  const during=await state(native);const visibility=await native.evaluate(()=>document.visibilityState);
-  assert(visibility==='hidden','background tab is actually hidden');
-  assert(during.peers.at(-1)==='connected'&&during.tracks.at(-1).state==='live','current hidden page media preserved');
-  assert(JSON.stringify(during.tracks.map(t=>t.state))===JSON.stringify(before.tracks.map(t=>t.state)),'hiding preserves every prior live and ended track state');
-  await native.bringToFront();await other.close();await ready(native);await native.close();
-  await visibilityBrowser.close();visibilityBrowser=null;visibilityChrome.kill('SIGTERM');visibilityChrome=null;
-  return {before:before.peers,after:during.peers,visibility,nativeContext:'CDP noDefaults avoids Playwright forced visible focus emulation'};
- });
  await step('visibility-hidden-and-persisted-exit-are-distinct',async()=>{
   await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
   assert((await state(page)).peers.at(-1)==='connected','visibility event never ends');
@@ -269,16 +271,6 @@ try {
   await gain(i,.18);
   await held.waitForTimeout(500);assert((await state(held)).tracks.every(t=>!t.enabled),'settled text alone cannot bypass outgoing audio tail');
   await gain(i,0);await ready(held);await held.context().close();await provider.evaluate(()=>window.behavior={handshake:true,greeting:true});
- });
- await step('native-autoplay-policy-needs-real-user-activation',async()=>{
-  nativePolicyBrowser=await chromium.launch({args:args.filter(a=>!a.startsWith('--autoplay-policy')).concat('--autoplay-policy=document-user-activation-required')});
-  const native=await open({browser:nativePolicyBrowser,init:()=>{
-   const gum=navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
-   navigator.mediaDevices.getUserMedia=async constraints=>{await new Promise(resolve=>{window.__releaseMic=resolve;});return gum(constraints);};
-  }});
-  await until(async()=>{const s=await state(native);return s.phase==='blocked'&&s.audio.at(-1)==='suspended';},'native activation policy fallback before media permission');
-  assert((await state(native)).peers.length===0&&(await state(native)).fallback,'native blocked audio exposes activation before microphone access');
-  await native.click('#start');await native.evaluate(()=>window.__releaseMic());await ready(native);await native.context().close();await nativePolicyBrowser.close();nativePolicyBrowser=null;
  });
  await step('suspended-output-pauses-mic-and-unlocks-same-call',async()=>{
   const paused=await open();await ready(paused);
@@ -367,10 +359,34 @@ try {
   await screenshot(talk,'voice-after-reconnect');
   await talk.context().close();
  });
+ await step('native-autoplay-policy-needs-real-user-activation',async()=>{
+  await browser.close();
+  assert((await fetch(`${FIX}/provider/reset`,{method:'POST'})).ok,'previous synthetic provider poll fenced');
+  nativePolicyBrowser=await chromium.launch({args:args.filter(a=>!a.startsWith('--autoplay-policy')).concat('--autoplay-policy=document-user-activation-required')});
+  provider=await nativePolicyBrowser.newPage();
+  await provider.addInitScript(()=>{
+   const Audio=window.AudioContext;
+   window.AudioContext=new Proxy(Audio,{construct(target,args){const audio=new target(...args);window.__providerAudio=audio;return audio;}});
+  });
+  await provider.goto(`${FIX}/provider.html`);
+  await provider.evaluate(()=>{
+   const button=document.createElement('button');button.id='enable-provider';button.textContent='Start synthetic peer';
+   button.onclick=()=>void window.__providerAudio.resume();document.body.append(button);
+  });
+  await provider.click('#enable-provider');
+  await until(()=>provider.evaluate(()=>window.__providerAudio.state==='running'),'synthetic peer audio enabled by trusted click');
+  const native=await open({browser:nativePolicyBrowser,init:()=>{
+   const gum=navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+   navigator.mediaDevices.getUserMedia=async constraints=>{await new Promise(resolve=>{window.__releaseMic=resolve;});return gum(constraints);};
+  }});
+  await until(async()=>{const s=await state(native);return s.phase==='blocked'&&s.audio.at(-1)==='suspended';},'native activation policy fallback before media permission');
+  assert((await state(native)).peers.length===0&&(await state(native)).fallback,'native blocked audio exposes activation before microphone access');
+  await native.click('#start');await native.evaluate(()=>window.__releaseMic());await ready(native);await native.context().close();await nativePolicyBrowser.close();nativePolicyBrowser=null;
+ });
  await step('no-uncaught-browser-errors',async()=>{assert(errors.length===0,JSON.stringify(errors));});
 } finally {
  for(const context of contexts)await context.close();
- await nativePolicyBrowser?.close();await visibilityBrowser?.close();visibilityChrome?.kill('SIGTERM');await browser.close();fixture.kill('SIGTERM');
+ await nativePolicyBrowser?.close();await browser.close();mainChrome?.kill('SIGTERM');fixture.kill('SIGTERM');
 }
 log('summary',{passes,failures,mandatory:28});
 assert(passes+failures===28,'complete mandatory inventory ran');

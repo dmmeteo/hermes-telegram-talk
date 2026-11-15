@@ -20,7 +20,9 @@ from hermes_talk.history import MemoryHistory
 from hermes_talk.talk import TalkRuntime
 from hermes_talk.thread_inbox import Thread
 
-offers, answers = queue.Queue(), queue.Queue()
+offers, answers = queue.Queue(), {}
+provider_generation = 0
+provider_lock = threading.Lock()
 logs = io.StringIO()
 stats = {'resolves': 0, 'posts': 0}
 home = f.write_home(tempfile.mkdtemp(prefix='synthetic-talk-'))
@@ -46,13 +48,20 @@ def resolve():
 
 def relay(url, headers, body):
     assert url == server.GPT_LIVE_URL
-    stats['posts'] += 1
-    offers.put(body['sdp'])
+    reply = queue.Queue(maxsize=1)
+    with provider_lock:
+        stats['posts'] += 1
+        identity = str(stats['posts'])
+        answers[identity] = reply
+    offers.put({'id': identity, 'sdp': body['sdp']})
     try:
-        answer = answers.get(timeout=20)
+        answer = reply.get(timeout=20)
     except queue.Empty:
         return 504, '', ''
-    return 201, answer, f'/v1/realtime/calls/rtc_fixture{stats["posts"]}'
+    finally:
+        with provider_lock:
+            answers.pop(identity, None)
+    return 201, answer, f'/v1/realtime/calls/rtc_fixture{identity}'
 
 
 app = server.VoiceApp(f.BOT_TOKEN, {f.USER_ID, f.OTHER_USER_ID}, 'http://127.0.0.1:8801',
@@ -81,10 +90,21 @@ class Fixture(BaseHTTPRequestHandler):
         if self.path == '/provider.html':
             return self.send(200, (Path(__file__).parent / 'provider.html').read_bytes(), 'text/html')
         if self.path == '/offer':
-            try:
-                return self.send(200, {'sdp': offers.get(timeout=20)})
-            except queue.Empty:
-                return self.send(204, b'')
+            with provider_lock:
+                generation = provider_generation
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                with provider_lock:
+                    if generation != provider_generation:
+                        return self.send(204, b'')
+                    try:
+                        sdp = offers.get_nowait()
+                    except queue.Empty:
+                        sdp = None
+                if sdp is not None:
+                    return self.send(200, sdp)
+                time.sleep(0.05)
+            return self.send(204, b'')
         if self.path == '/identity':
             return self.send(200, {'initData': f.sign_init_data(f.USER_ID, int(time.time())), 'launch': LAUNCH})
         if self.path == '/other-identity':
@@ -96,8 +116,20 @@ class Fixture(BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))) or b'{}')
+        if self.path == '/provider/reset':
+            global provider_generation
+            with provider_lock:
+                provider_generation += 1
+            return self.send(200, {})
         if self.path == '/answer':
-            answers.put(body['sdp'])
+            with provider_lock:
+                reply = answers.get(body.get('id'))
+                if reply is None:
+                    return self.send(410, {})
+                try:
+                    reply.put_nowait(body['sdp'])
+                except queue.Full:
+                    pass
             return self.send(200, {})
         self.send(404, {})
 

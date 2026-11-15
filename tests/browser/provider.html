@@ -8,7 +8,7 @@ async function serve() {
   for (;;) {
     const response = await fetch('/offer');
     if (response.status !== 200) continue;
-    const {sdp} = await response.json();
+    const {sdp, id} = await response.json();
     const peer = new RTCPeerConnection();
     const entry = {peer, got: [], behavior: {...window.behavior}};
     window.peers.push(entry);
@@ -80,7 +80,7 @@ async function serve() {
       peer.onicegatheringstatechange = () => peer.iceGatheringState === 'complete' && resolve();
       setTimeout(resolve,1500);
     });
-    await fetch('/answer',{method:'POST',body:JSON.stringify({sdp:peer.localDescription.sdp})});
+    await fetch('/answer',{method:'POST',body:JSON.stringify({id,sdp:peer.localDescription.sdp})});
   }
 }
 serve();
