@@ -23,6 +23,7 @@ settled to, and the job settles only from what T3 shows. Everything newer than t
 `unknown` marks a job whose T3 run ended without T3 showing how: its base state is interrupted (a state every reader
 knows), it carries no result, and it is spoken and posted as unknown, never as completed.
 """
+import errno
 import json
 import logging
 import re
@@ -244,6 +245,9 @@ class JobBoard:
         self.revision = 0
         self.jobs = {}
         self.following = False
+        self.coordinating = False
+        self.wake = threading.Event()
+        self.retry_at = 0.0
         self.interrupts = {}  # link key -> monotonic time of the last T3 interrupt asked for a cancelled job
         self.reaped = set()  # large jobs whose still-running turn is being stopped to keep live turns bounded
         extras = dict(history.list_meta_prefix(WORK_PREFIX))
@@ -257,14 +261,14 @@ class JobBoard:
         return getattr(self.agent, "transport", "cli") == "gateway"
 
     def _save(self, job):
-        self.jobs[job.id] = job
-        self.history.set_meta(job_key(job.id), dump(job))
-        extra = dump_extra(job)
-        if extra is not None:
-            self.history.set_meta(work_key(job.id), extra)
-        self.revision += 1
-        self._report(job)
-        return job
+        with self.lock:
+            self.jobs[job.id] = job
+            self.history.set_meta(job_key(job.id), dump(job))
+            extra = dump_extra(job)
+            self.history.set_meta(work_key(job.id), extra or "{}")
+            self.revision += 1
+            self._report(job)
+            return job
 
     def _report(self, job):
         """The job is stored first; its status message follows. A report failure must not strand the queue."""
@@ -317,31 +321,73 @@ class JobBoard:
             if existing is not None and existing.scope == scope and existing.conversation_id == conversation_id:
                 return existing, False
             number = 1 + max((j.number for j in self.jobs.values() if j.conversation_id == conversation_id), default=0)
+            created = max(self.clock(), max((j.created for j in self.jobs.values()), default=0) + 0.000001)
             job = self._save(new_job(scope, conversation_id, voice_session_id, generation, delegation_id, number,
-                                     request, self.clock(), report_to, title))
+                                     request, created, report_to, title))
             self.history.set_meta(key, job.id)
         self.pump()
         return self.jobs[job.id], True
 
     def pump(self):
-        """Start accepted jobs, oldest first, while slots are free; a job that failed to start takes no slot.
-        A job whose conversation's native session is held by a running turn starts parallel, in its own.
-        A large job's turn takes no slot: it waits on T3, which runs the work outside this profile's turns."""
+        """Wake independent dispatch; intake never prepares prompts or waits for a native launch."""
         with self.lock:
-            turns = [j for j in self.jobs.values() if j.turn_open]
-            promoted = sorted((j for j in turns if j.large),
-                              key=lambda j: min(link.admitted for link in j.links if link.counts))
-            for job in promoted[:max(0, len(promoted) - self.tasks.max_concurrent)]:
-                self._reap(job)
-            held = {j.conversation_id for j in turns if not j.parallel}
-            slots = self.tasks.max_concurrent - sum(1 for j in turns if not j.large)
-            for job in sorted((j for j in self.jobs.values() if j.state == ACCEPTED), key=lambda j: (j.created, j.id)):
-                if slots <= 0:
-                    break
-                parallel = job.conversation_id in held
-                if self._launch(replace(job, parallel=parallel)):
-                    slots -= 1
+            self.wake.set()
+            if self.coordinating:
+                return
+            self.coordinating = True
+            try:
+                threading.Thread(target=self._coordinate, name="talk-task-coordinator", daemon=True).start()
+            except RuntimeError:
+                self.coordinating = False
+                logger.warning("task coordinator could not start; accepted requests remain queued")
+
+    def _coordinate(self):
+        while True:
+            self.wake.wait(0.5)
+            self.wake.clear()
+            with self.lock:
+                waiting = sorted((j for j in self.jobs.values() if j.state == ACCEPTED), key=lambda j: (j.created, j.id))
+                turns = [j for j in self.jobs.values() if j.turn_open]
+                promoted = sorted((j for j in turns if j.large),
+                                  key=lambda j: min(link.admitted for link in j.links if link.counts))
+                for job in promoted[:max(0, len(promoted) - self.tasks.max_concurrent)]:
+                    self._reap(job)
+                if not waiting:
+                    self.coordinating = False
+                    return
+                if time.monotonic() < self.retry_at:
+                    continue
+                held = {j.conversation_id for j in turns if not j.parallel}
+                slots = self.tasks.max_concurrent - sum(not j.large for j in turns)
+                for job in waiting[:max(0, slots)]:
+                    running = self._save(job.to(RUNNING, started=self.clock(), parallel=job.conversation_id in held))
+                    try:
+                        threading.Thread(target=self._run, args=(running.id,), name="talk-task", daemon=True).start()
+                    except RuntimeError:
+                        self._save(job)
+                        self.retry_at = time.monotonic() + 1
+                        break
                     held.add(job.conversation_id)
+
+    def _run(self, job_id):
+        try:
+            job = self.jobs[job_id]
+            if self._launch(job):
+                if self.gateway:
+                    self._watch_gateway(job_id)
+                else:
+                    self._watch(job_id, self.handles[job_id])
+        finally:
+            self.pump()
+
+    def _defer(self, job):
+        with self.lock:
+            current = self.jobs[job.id]
+            if current.cancel_requested:
+                self._finish(current.to(CANCELLED, finished=self.clock()))
+            else:
+                self._save(replace(current, state=ACCEPTED, started=None, parallel=False))
+                self.retry_at = time.monotonic() + 1
 
     def _reap(self, job):
         """Stop a large job's turn that is still live; its T3 work is followed as before (the lock is held)."""
@@ -349,8 +395,6 @@ class JobBoard:
             return
         self.reaped.add(job.id)
         logger.info("stopping the turn of a task whose T3 work is followed, to keep live turns bounded")
-        if not self.gateway:  # a gateway job's watcher sends the stop
-            threading.Thread(target=self.agent.stop, args=(job.pid, job.pid_start), daemon=True).start()
 
     def _adopt_gateway(self, job):
         """A gateway job outlives Talk: follow its admission, or admit it once if Talk stopped before the receipt."""
@@ -388,17 +432,28 @@ class JobBoard:
             return False
         # Persisted before the process exists: a crash from here on leaves a running job without a live
         # process, which reconciles to interrupted instead of a second run.
-        job = self._save(job.to(RUNNING, started=self.clock()))
+        if self._cancel_before_launch(job.id):
+            return False
         try:
             process, output = self.agent.start(job.id, prompt, resume)
         except Exception as exc:
+            if isinstance(exc, OSError) and exc.errno in (errno.EAGAIN, errno.ENOMEM, errno.EMFILE, errno.ENFILE):
+                self._defer(job)
+                return False
             self._finish(job.to(FAILED, finished=self.clock(),
                                 error=f"The Hermes agent could not start ({type(exc).__name__}). Nothing ran."))
             return False
         self.handles[job.id] = process
-        self._save(replace(job, pid=process.pid, pid_start=process_start(process.pid), output=output))
-        threading.Thread(target=self._watch, args=(job.id, process), daemon=True).start()
+        self._persist(job.id, pid=process.pid, pid_start=process_start(process.pid), output=output)
         return True
+
+    def _cancel_before_launch(self, job_id):
+        with self.lock:
+            job = self.jobs[job_id]
+            if not job.cancel_requested:
+                return False
+            self._finish(job.to(CANCELLED, finished=self.clock()))
+            return True
 
     def _prompt(self, job):
         prompt, resume = self.prompt_for(job)
@@ -412,7 +467,8 @@ class JobBoard:
             self._finish(job.to(FAILED, finished=self.clock(),
                                 error=f"The task could not be prepared ({type(exc).__name__}). Nothing ran."))
             return False
-        job = self._save(job.to(RUNNING, started=self.clock()))
+        if self._cancel_before_launch(job.id):
+            return False
         try:
             self.agent.start(job.id, prompt, resume, lambda **f: self._persist_gateway(job.id, **f))
         except Exception as exc:
@@ -427,7 +483,6 @@ class JobBoard:
                 # The answer was lost, not refused: the gateway may run it. The watcher resubmits the stored
                 # session, text and submission id, which returns that admission instead of a second run.
                 logger.warning("a task's admission is unknown after %s; reconciling", type(exc).__name__)
-        threading.Thread(target=self._watch_gateway, args=(job.id,), daemon=True).start()
         return True
 
     def _watch_gateway(self, job_id):
@@ -479,6 +534,7 @@ class JobBoard:
 
     def _watch(self, job_id, process):
         timed_out = False
+        stopping = False
         intake_at = 0.0
         while True:
             job = self.jobs[job_id]
@@ -492,7 +548,9 @@ class JobBoard:
                 break
             if not timed_out and self.clock() > (job.started or 0) + self.tasks.run_budget_s + 60:
                 timed_out = True
-                threading.Thread(target=self.agent.stop, args=(job.pid, job.pid_start), daemon=True).start()
+            if not stopping and (timed_out or job.cancel_requested or job_id in self.reaped):
+                stopping = True
+                self.agent.stop(job.pid, job.pid_start, wait=(lambda _: process.poll()) if process is not None else None)
             time.sleep(0.25)
         try:
             with self.lock:
@@ -703,8 +761,6 @@ class JobBoard:
             job = self._save(replace(job, cancel_requested=True))
         # A gateway job's watcher drives the persisted stop intent, with retries; T3 work is interrupted by the
         # follower, and the job is cancelled only once T3 shows its run stopped.
-        if job.turn_open and not self.gateway:
-            threading.Thread(target=self.agent.stop, args=(job.pid, job.pid_start), daemon=True).start()
         self._follow_soon()
         return job
 

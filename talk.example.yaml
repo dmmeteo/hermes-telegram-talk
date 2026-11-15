@@ -48,7 +48,7 @@ tasks:
   # user_ids: [123456789]    # required when enabled: Telegram ids allowed to start tasks
   # toolsets: [file, web, session_search]   # required when enabled: Hermes toolsets a task may use
   # workdir: .               # the task's working directory, relative to this file
-  # max_concurrent: 1        # 1..3 turns at once across the profile; waiting tasks are not capped, and a task
+  # max_concurrent: 3        # any positive integer; turns at once across the profile; waiting tasks are not capped, and a task
   #                          # that handed work to T3 holds no slot (Talk follows the T3 thread)
   # run_budget_seconds: 600  # Hermes' own run budget; Talk stops the run 60 s after it
   # max_turns: 30

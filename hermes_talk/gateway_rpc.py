@@ -152,6 +152,7 @@ class GatewayAgent:
         self._lock = threading.Lock()
         self._loop = None
         self._client = None
+        self._connect_lock = asyncio.Lock()
         self._stack = None
         self._drain = None
         self._attached = set()  # sessions this connection is attached to (a reopened one is attached to none)
@@ -170,24 +171,25 @@ class GatewayAgent:
             return self._loop
 
     async def _open(self):
-        if self._client is not None:
-            return self._client
-        # A daemon that connect starts inherits this process's environment, so Talk's launch secrets
-        # (read once by server.py) leave it first; the core strips only its own names.
-        for name in LAUNCH_SECRETS:
-            os.environ.pop(name, None)
-        connect = self._connect
-        if connect is None:
-            from hermes_cli.gateway_client import connect_gateway as connect
-        stack = contextlib.AsyncExitStack()
-        try:
-            client = await stack.enter_async_context(connect())
-        except BaseException:
-            await stack.aclose()
-            raise
-        self._stack, self._client = stack, client
-        self._drain = asyncio.create_task(self._discard_events(client))
-        return client
+        async with self._connect_lock:
+            if self._client is not None:
+                return self._client
+            # A daemon that connect starts inherits this process's environment, so Talk's launch secrets
+            # (read once by server.py) leave it first; the core strips only its own names.
+            for name in LAUNCH_SECRETS:
+                os.environ.pop(name, None)
+            connect = self._connect
+            if connect is None:
+                from hermes_cli.gateway_client import connect_gateway as connect
+            stack = contextlib.AsyncExitStack()
+            try:
+                client = await stack.enter_async_context(connect())
+            except BaseException:
+                await stack.aclose()
+                raise
+            self._stack, self._client = stack, client
+            self._drain = asyncio.create_task(self._discard_events(client))
+            return client
 
     @staticmethod
     async def _discard_events(client):

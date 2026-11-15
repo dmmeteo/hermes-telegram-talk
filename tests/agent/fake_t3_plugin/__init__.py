@@ -21,7 +21,8 @@ def register(ctx):
     paths = json.loads(CONFIG.read_text())
     if paths["root"] not in sys.path:
         sys.path.insert(0, paths["root"])
-    from tests.work.fake_t3 import FakeT3
+    sys.path.insert(0, str(Path(paths["root"]) / "tests" / "work"))
+    from fake_t3 import FakeT3
     store = FakeT3(paths["store"])
 
     def handle(args, **_):

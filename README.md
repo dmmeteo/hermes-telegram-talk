@@ -409,10 +409,13 @@ restart keeps following; nothing is relaunched or resent. The voice model handle
 (`CONTROL: list`, `CONTROL: status N`, `CONTROL: result N`, `CONTROL: cancel N`), answered at once from server state and
 never queued. See `docs/adr/0011-t3-work-and-task-visibility.md`.
 
-Limits: `tasks.max_concurrent` (1..3) turns at once across the profile, counting only tasks that are not large. Waiting
+Limits: `tasks.max_concurrent` (default 3, any positive integer) turns at once across the profile, counting only tasks that are not large. Waiting
 tasks are not capped (`tasks.max_open_per_user` was removed). `tasks.request_chars`, `tasks.result_chars`,
 `tasks.max_turns` and `tasks.run_budget_seconds` (Hermes' own budget, then a stop 60 s later) bound each turn.
-Every task route is rate limited per user and accepts 32 KiB.
+Every task route is rate limited per user and accepts 32 KiB. A separate coordinator reserves FIFO slots and starts
+independent workers; prompt preparation and native admission run outside the job-state lock. Temporary process or
+worker-thread exhaustion leaves the same accepted request queued for retry. This is a configured pool, not automatic
+host-capacity discovery. See [ADR 0012](docs/adr/0012-configurable-mini-task-pool.md).
 
 ### Decision trail
 

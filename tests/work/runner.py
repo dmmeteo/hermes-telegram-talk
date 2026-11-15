@@ -23,7 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from hermes_talk.work import observe  # noqa: E402
-from tests.work.fake_t3 import FakeT3  # noqa: E402
+from fake_t3 import FakeT3  # noqa: E402
 
 HOLD_MAX_S = 120
 

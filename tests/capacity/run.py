@@ -77,15 +77,15 @@ class Posts:
 
 
 class World:
-    def __init__(self, history=None):
+    def __init__(self, history=None, max_concurrent=None):
         self.root = Path(tempfile.mkdtemp(prefix="talk-capacity-"))
         self.home = fx.write_home(self.root / "home")
         self.work = self.root / "work"
         self.work.mkdir()
         (self.root / "release").mkdir()
-        (self.root / "talk.yaml").write_text(yaml_text(self.work))
+        (self.root / "talk.yaml").write_text(yaml_text(self.work, "" if max_concurrent is None else f"  max_concurrent: {max_concurrent}\n"))
         config = load_config(self.root / "talk.yaml")
-        self.config = replace(config, tasks=replace(config.tasks, **CAPACITY))
+        self.config = config
         self.history = history or MemoryHistory()
         self.agent = BoundedAgent(self.config.tasks, self.home, command=[sys.executable, str(RUNNER)],
                                   env={**os.environ, "TALK_CAPACITY_DIR": str(self.root)})
@@ -165,6 +165,8 @@ class World:
         for key in "k1 k2 k3 k4 k5 k6 k7 k8 k9 r1 r2 r3 q1 q2 q3 q4".split():
             self.release(key)
         if self.talk is not None and self.talk.board is not None:
+            for job in list(self.talk.board.jobs.values()):
+                self.release(job.request.split()[-1])
             self.talk.board.wait_idle(20)
         if self.httpd is not None:
             self.httpd.shutdown()
@@ -181,9 +183,12 @@ def desired_yaml_parses_and_bounds_hold():
         assert {"max_concurrent": tasks.max_concurrent} == CAPACITY, tasks
         path.write_text(yaml_text(root))
         tasks = load_config(path).tasks
-        assert tasks.max_concurrent == 1 and not hasattr(tasks, "max_open_per_user"), "no open cap exists"
+        assert tasks.max_concurrent == 3 and not hasattr(tasks, "max_open_per_user"), "no open cap exists"
+        for value in (1, 3, 10, 101, 1000000):
+            path.write_text(yaml_text(root, f"  max_concurrent: {value}\n"))
+            assert load_config(path).tasks.max_concurrent == value
         refused = {}
-        for extra in ("  max_concurrent: 0\n", "  max_concurrent: 4\n", "  max_concurrent: '3'\n",
+        for extra in ("  max_concurrent: 0\n", "  max_concurrent: -1\n", "  max_concurrent: 1.5\n", "  max_concurrent: '3'\n",
                       "  max_concurrent: true\n", "  max_open_per_user: 8\n"):
             path.write_text(yaml_text(root, extra))
             try:
@@ -336,8 +341,181 @@ def restart_adopts_three_runs_and_keeps_lanes():
         w.close()
 
 
+def ten_workers_and_fifo():
+    w = World(max_concurrent=10).serve()
+    try:
+        conv, vs = w.call()
+        for n in range(1, 13):
+            status, result = w.task(conv, vs, f"t{n}")
+            assert status == 200 and result["created"], result
+        w.quiet_starts(10)
+        starts = w.ledger("start")
+        assert {r["key"] for r in starts} == {f"t{n}" for n in range(1, 11)}
+        assert len({r["pid"] for r in starts}) == len({r["session"] for r in starts}) == 10
+        assert w.states()["t11"] == w.states()["t12"] == "accepted"
+        w.release("t3")
+        w.until(lambda: w.states()["t11"] == "running", "eleventh promoted FIFO")
+        w.started("t11")
+        assert w.states()["t12"] == "accepted"
+        assert peak(w.ledger()) == 10
+        return {"simultaneous_native_workers": 10, "unique_pids": 10, "unique_sessions": 10,
+                "promoted": "t11", "waiting": "t12"}
+    finally:
+        w.close()
+
+
+def slow_launch_does_not_block_intake_or_controls():
+    w = World().serve()
+    release, entered = threading.Event(), threading.Event()
+    original = w.agent.start
+    def slow(job_id, prompt, resume):
+        if prompt.endswith("hold slow"):
+            entered.set()
+            assert release.wait(10), "test released slow launch"
+        return original(job_id, prompt, resume)
+    w.agent.start = slow
+    responses = []
+    try:
+        conv, vs = w.call()
+        first = threading.Thread(target=lambda: responses.append(w.task(conv, vs, "slow")))
+        first.start()
+        assert entered.wait(3), "slow launch entered"
+        first.join(1)
+        assert not first.is_alive(), "task intake must return while native launch is blocked"
+        assert responses[0][0] == 200
+        status, body = w.task(conv, vs, "fast")
+        assert status == 200 and body["created"]
+        w.started("fast")
+        before = time.monotonic()
+        status, listed = w.post("tasks", {"conversation_id": conv, "voice_session_id": vs})
+        assert status == 200 and len(listed["jobs"]) == 2
+        status, _ = w.post("events", {"conversation_id": conv, "voice_session_id": vs,
+            "events": [{"id": "responsive", "sequence": 1, "role": "user", "text": "Synthetic voice input"}]})
+        assert status == 200 and time.monotonic() - before < 1, "voice events and controls remain responsive"
+        return {"blocked_launch": "slow", "independent_worker": "fast", "voice_events": 200, "controls": 200}
+    finally:
+        release.set()
+        w.close()
+
+
+def temporary_resource_failure_keeps_fifo_request():
+    import errno
+    w = World().serve()
+    original = w.agent.start
+    attempts, limited_once = [], threading.Event()
+    def limited(job_id, prompt, resume):
+        if prompt.endswith("hold retry"):
+            attempts.append(job_id)
+            if len(attempts) == 1:
+                limited_once.set()
+                raise OSError(errno.EAGAIN, "synthetic process capacity")
+        return original(job_id, prompt, resume)
+    w.agent.start = limited
+    try:
+        conv, vs = w.call()
+        own = w.history.create_session("Synthetic resource retry session", "cli")
+        w.talk.store.bind_agent_session(conv, own)
+        assert w.task(conv, vs, "primary")[0] == 200
+        w.started("primary")
+        status, body = w.task(conv, vs, "retry")
+        assert status == 200 and body["created"] and limited_once.wait(3)
+        status, duplicate = w.task(conv, vs, "retry")
+        assert status == 200 and not duplicate["created"]
+        w.release("primary")
+        w.until(lambda: w.states()["primary"] == "succeeded", "primary session becomes free before retry")
+        retry = w.started("retry")
+        job = next(j for j in w.talk.board.jobs.values() if j.request == "hold retry")
+        restored = jobs.load(w.history.get_meta(jobs.job_key(job.id)), w.history.get_meta(jobs.work_key(job.id)))
+        assert retry["resume"] == own and not job.parallel and not restored.parallel, "retry's newly primary lane survives restart"
+        assert len(set(attempts)) == 1 and len(w.ledger("start")) == 2
+        w.release("retry")
+        w.until(lambda: w.states()["retry"] == "succeeded", "retried request completes")
+        return {"attempts": len(attempts), "retry_executions": 1, "state": "succeeded", "restored_lane": "conversation"}
+    finally:
+        w.close()
+
+
+def failed_launch_and_cancel_during_preparation():
+    w = World(max_concurrent=1).serve()
+    original = w.talk.board.prompt_for
+    entered, release = threading.Event(), threading.Event()
+    def prepare(job):
+        if job.request.endswith("bad"):
+            raise RuntimeError("synthetic preparation failure")
+        if job.request.endswith("cancel-before-start"):
+            entered.set()
+            assert release.wait(10)
+        return original(job)
+    w.talk.board.prompt_for = prepare
+    try:
+        conv, vs = w.call()
+        _, bad = w.task(conv, vs, "bad")
+        w.until(lambda: w.states()["bad"] == "failed", "preparation failure releases slot")
+        _, cancelled = w.task(conv, vs, "cancel-before-start")
+        assert entered.wait(3)
+        assert w.post("task/cancel", {"conversation_id": conv, "job_id": cancelled["job"]["id"]})[0] == 200
+        release.set()
+        w.until(lambda: w.states()["cancel-before-start"] == "cancelled", "cancel before native admission")
+        _, good = w.task(conv, vs, "good")
+        w.started("good")
+        assert {r["key"] for r in w.ledger("start")} == {"good"}, "failed and cancelled preparations never launch"
+        w.release("good")
+        w.until(lambda: w.states()["good"] == "succeeded", "next request executes")
+        return {"failed": bad["job"]["id"], "cancelled_before_launch": True, "native_starts": 1}
+    finally:
+        release.set()
+        w.close()
+
+
+def worker_thread_exhaustion_recovers():
+    from unittest.mock import patch
+    w = World(max_concurrent=1).serve()
+    start = threading.Thread.start
+    failures = []
+    def limited(thread):
+        if thread.name == "talk-task" and not failures:
+            failures.append(thread.name)
+            raise RuntimeError("synthetic thread capacity")
+        return start(thread)
+    try:
+        conv, vs = w.call()
+        with patch.object(threading.Thread, "start", limited):
+            status, body = w.task(conv, vs, "thread-retry")
+            assert status == 200 and body["created"]
+            w.started("thread-retry")
+            assert len(failures) == len(w.ledger("start")) == 1
+        return {"thread_start_failures": 1, "native_starts": 1, "request_preserved": True}
+    finally:
+        w.close()
+
+
+def gateway_connection_is_single_flight():
+    import asyncio
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+    from hermes_talk.gateway_rpc import GatewayAgent
+    async def check():
+        opened = []
+        @asynccontextmanager
+        async def connect():
+            opened.append(1)
+            await asyncio.sleep(0.01)
+            yield SimpleNamespace(events=asyncio.Queue())
+        agent = GatewayAgent(None, "/tmp/synthetic-gateway-home", connect=connect)
+        try:
+            clients = await asyncio.gather(*(agent._open() for _ in range(10)))
+            assert len(opened) == 1 and all(c is clients[0] for c in clients), "parallel workers share one gateway connection"
+            return {"parallel_openers": 10, "connections": len(opened)}
+        finally:
+            await agent._close()
+    return asyncio.run(check())
+
+
 CHECKS = (desired_yaml_parses_and_bounds_hold, eight_open_three_running_one_call,
-          restart_adopts_three_runs_and_keeps_lanes)
+          restart_adopts_three_runs_and_keeps_lanes, ten_workers_and_fifo,
+          slow_launch_does_not_block_intake_or_controls, temporary_resource_failure_keeps_fifo_request,
+          gateway_connection_is_single_flight, failed_launch_and_cancel_during_preparation,
+          worker_thread_exhaustion_recovers)
 
 
 def main():

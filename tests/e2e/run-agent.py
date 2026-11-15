@@ -1321,6 +1321,7 @@ def queue_start_failure(model):
         config = parse_config(talk_data(root / "work"), root / "home")
         agent = FlakyAgent(task_agent(config.tasks, root / "home"), failures=1)
         e = Env(model, root=root, agent=agent)
+        e.wait(seeded[0], conv, vs)
         first = e.native(seeded[0])
         start_error = {"cli": "could not start (OSError)", "gateway": "did not take the task (OSError)"}[TRANSPORT]
         assert first.state == "failed" and start_error in first.error, first
@@ -1331,7 +1332,7 @@ def queue_start_failure(model):
         always = FlakyAgent(task_agent(config.tasks, root / "home"), failures=99)
         e.talk.board.agent = always
         ids = [e.task(conv, vs, f"doomed {n}", f"del_q{n + 2}")[1]["job"]["id"] for n in (1, 2)]
-        states = [e.native(i).state for i in ids]
+        states = [e.wait(i, conv, vs)["state"] for i in ids]
         assert states == ["failed", "failed"] and always.starts == 2, states
         if TRANSPORT == "gateway":
             agent.close()
@@ -1496,7 +1497,8 @@ def t3_admission_real_hook(model):
     that Talk follows to T3's own outcome; a read makes nothing large. Default switches post only the large one."""
     sys.path.insert(0, str(ROOT / "tests" / "agent"))
     import fake_t3_plugin
-    from tests.work.fake_t3 import FakeT3
+    sys.path.insert(0, str(ROOT / "tests" / "work"))
+    from fake_t3 import FakeT3
     TELEGRAM.reset()
     root = Path(tempfile.mkdtemp(prefix="talk-agent-t3-"))
     home = root / "home"
@@ -1604,7 +1606,8 @@ def gateway_plugin_reload_same_pid(model):
     import fake_t3_plugin
     from gateway.control_socket import query_gateway_control, reload_gateway_plugins
     from hermes_talk import pulse_model
-    from tests.work.fake_t3 import FakeT3
+    sys.path.insert(0, str(ROOT / "tests" / "work"))
+    from fake_t3 import FakeT3
     TELEGRAM.reset()
     root = Path(tempfile.mkdtemp(prefix="talk-agent-reload-"))
     home = root / "home"
@@ -1831,8 +1834,8 @@ def rpc_lost_admission_ack(model):
         _, body = e.task(conv, vs, "slow 4", "del_rpc_lost_ack")
         job_id = body["job"]["id"]
         assert body["created"] and body["job"]["state"] in ("accepted", "running"), body
-        assert seen["lost"].get("admission_id"), "the real gateway admitted the prompt before the loss"
         job = e.wait(job_id, conv, vs, timeout=90)
+        assert seen["lost"].get("admission_id"), "the real gateway admitted the prompt before the loss"
         native = e.native(job_id)
         assert job["state"] == "succeeded" and "SCRIPTED-SLOW-DONE" in job["result"], job
         assert native.admission_id == seen["lost"]["admission_id"], "the same admission was reconciled, not a new one"

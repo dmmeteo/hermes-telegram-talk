@@ -34,7 +34,7 @@ from hermes_talk.agent import NativeAgent, Readiness  # noqa: E402
 from hermes_talk.config import ConfigError, load_config  # noqa: E402
 from hermes_talk.history import MemoryHistory  # noqa: E402
 from hermes_talk.talk import TalkRuntime  # noqa: E402
-from tests.work.fake_t3 import FakeT3  # noqa: E402
+from fake_t3 import FakeT3  # noqa: E402
 
 RUNNER = ROOT / "tests" / "work" / "runner.py"
 TASKS = "tasks:\n  enabled: true\n  user_ids: [{user}, {other}]\n  toolsets: [file]\n  workdir: {work}\n"
@@ -520,11 +520,11 @@ def config_contract():
         path = root / "talk.yaml"
         path.write_text(yaml_text(root))
         config = load_config(path)
-        assert (config.receipts.large_work, config.receipts.micro_tasks, config.tasks.max_concurrent) == (True, False, 1)
+        assert (config.receipts.large_work, config.receipts.micro_tasks, config.tasks.max_concurrent) == (True, False, 3)
         path.write_text(yaml_text(root, receipts="receipts:\n  large_work: false\n  micro_tasks: true\n"))
         assert (load_config(path).receipts.large_work, load_config(path).receipts.micro_tasks) == (False, True)
         refused = {}
-        for tasks_extra, receipts in (("  max_open_per_user: 3\n", ""), ("  max_concurrent: 4\n", ""),
+        for tasks_extra, receipts in (("  max_open_per_user: 3\n", ""), ("  max_concurrent: 0\n", ""),
                                       ("", "receipts:\n  micro_tasks: 'yes'\n")):
             path.write_text(yaml_text(root, tasks_extra, receipts))
             try:

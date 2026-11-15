@@ -45,7 +45,7 @@ class Tasks:
     user_ids: tuple = ()
     toolsets: tuple = ()
     workdir: Path = None
-    max_concurrent: int = 1
+    max_concurrent: int = 3
     run_budget_s: int = 600
     max_turns: int = 30
     request_chars: int = 2000
@@ -156,9 +156,10 @@ def _text(value, what, limit=400):
     return value.strip()
 
 
-def _int(value, what, low, high):
-    if type(value) is not int or not low <= value <= high:
-        raise ConfigError(f"{what} must be an integer in [{low}, {high}]")
+def _int(value, what, low, high=None):
+    if type(value) is not int or value < low or (high is not None and value > high):
+        bound = f"in [{low}, {high}]" if high is not None else f">= {low}"
+        raise ConfigError(f"{what} must be an integer {bound}")
     return value
 
 
@@ -250,7 +251,7 @@ def _tasks(data, base_dir):
         raise ConfigError("tasks.workdir must be an existing directory")
     return Tasks(enabled=True, user_ids=tuple(dict.fromkeys(users)), toolsets=tuple(dict.fromkeys(toolsets)),
                  workdir=workdir,
-                 max_concurrent=_int(data.get("max_concurrent", 1), "tasks.max_concurrent", 1, 3),
+                 max_concurrent=_int(data.get("max_concurrent", 3), "tasks.max_concurrent", 1),
                  run_budget_s=_int(data.get("run_budget_seconds", 600), "tasks.run_budget_seconds", 20, 3600),
                  max_turns=_int(data.get("max_turns", 30), "tasks.max_turns", 1, 200),
                  request_chars=_int(data.get("request_chars", 2000), "tasks.request_chars", 20, 4000),
