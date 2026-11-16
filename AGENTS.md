@@ -33,6 +33,8 @@ answered mention or feedback acknowledges a card (see README "Pulse" and `docs/a
 from one call in independent native sessions, the rest waiting uncapped; see `docs/adr/0010-parallel-tasks-of-one-call.md`).
 For task kinds, T3 work, task controls or status-message visibility, `python3 tests/work/run.py` must print
 `TALK_WORK_OK` (see `docs/adr/0011-t3-work-and-task-visibility.md`).
+For task status titles or what the hook records of T3 admissions, `python3 tests/titles/run.py` must print
+`TALK_TITLES_OK` and `python3 tests/reports/run.py` `TALK_REPORTS_OK` (see `docs/adr/0013-objective-task-titles.md`).
 For task, context or delegation changes, `python3 tests/e2e/run-agent.py --require-hermes` must print `TALK_AGENT_OK` and
 `python3 tests/e2e/run-agent.py --browser <out-dir>` `TALK_AGENT_BROWSER_OK`. Voice tasks run as native Hermes sessions:
 either `hermes chat` single-query processes or (manager-authorized 2026-11-03, for current cores whose CLI rejects

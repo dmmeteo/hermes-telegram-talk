@@ -18,6 +18,10 @@ run, so when a later run started before Talk saw this one settle, or the run can
 `idle`, the outcome is `unknown`: never success, and never the later run's text. An unreadable T3 changes nothing. A possibly admitted
 start or send (T3's answer was lost) is confirmed only by the thread itself and is never resent; a lost start that
 came back without a thread id is kept as a note, since nothing can follow it.
+
+A link also keeps the work's intent as admitted: a start's thread title and message, or a send's message (never the
+thread's earlier title, which belongs to the work it was created for). The status message names the task from it
+(receipts.py).
 """
 import hashlib
 import json
@@ -40,6 +44,8 @@ DROPPED = "unconfirmed"
 LOST_START = ("T3's answer to a start was lost before it named a thread; T3 may run that work unseen by Talk. "
               "Check T3.")
 RESULT_CHARS = 6000
+INTENT_CHARS = 1500  # of an admitted message, for naming the task
+INTENT_TITLE_CHARS = 200
 
 
 @dataclass(frozen=True)
@@ -49,7 +55,8 @@ class Link:
     `run_id` is this run's T3 id once known; `prior_run_id` the run it must differ from (the active run a queued send
     waits behind, or the latest run of an idle thread); `base_runs` the thread's run count before it (None when
     unknown), for a T3 that shows no run ids. `started` marks the run seen live or counted. `confirmed` is False only
-    for an admission whose answer was lost, until the thread shows the run."""
+    for an admission whose answer was lost, until the thread shows the run. `intent` is the admitted message's head and
+    `intent_title` a start's thread title, both as the task's turn wrote them."""
     key: str
     thread_id: str
     via: str
@@ -65,6 +72,8 @@ class Link:
     seen: float = 0.0  # when T3 first confirmed or disproved a possible admission
     run_id: str = None
     prior_run_id: str = None
+    intent: str = ""
+    intent_title: str = ""
 
     @property
     def done(self):
@@ -176,6 +185,10 @@ def _result(result):
     return data if isinstance(data, dict) else None
 
 
+def _head(text, limit):
+    return " ".join(text.split())[:limit] if isinstance(text, str) else ""
+
+
 def observe(tool_name=None, args=None, result=None, session_id=None, home=None, environ=None, clock=time.time,
             parent=_parent, **_):
     """`post_tool_call` body: record a T3 start or send this Talk task's turn made; returns the record or None.
@@ -206,7 +219,8 @@ def observe(tool_name=None, args=None, result=None, session_id=None, home=None, 
               "outcome": state.get("outcome") if ok else None,
               "run_count": count if type(count) is int and ok else None,
               "active_id": run.get("active_id") if ok else None, "latest_id": run.get("latest_id") if ok else None,
-              "at": clock()}
+              "at": clock(), "intent": _head(args.get("message"), INTENT_CHARS),
+              "intent_title": _head(args.get("title"), INTENT_TITLE_CHARS) if args["action"] == "start" else ""}
     record["key"] = _digest(f"{args['action']}:{args.get('request_id')}:{thread_id or args.get('cwd') or ''}")
     path = work_dir(home) / job_id / f"{record['key']}.json"
     earlier = _read(path)
@@ -233,9 +247,11 @@ def _ident(value):
 def link_from(record):
     """The link an observation opens. A start's thread is new, so its run is the first one."""
     via = record.get("action")
+    intent = {"intent": _head(record.get("intent"), INTENT_CHARS),
+              "intent_title": _head(record.get("intent_title"), INTENT_TITLE_CHARS)}
     if not record.get("thread_id"):
         return Link(key=record["key"], thread_id="", via=via, confirmed=False, status=DROPPED,
-                    admitted=float(record.get("at") or 0), error=LOST_START)
+                    admitted=float(record.get("at") or 0), error=LOST_START, **intent)
     confirmed = record.get("confirmed") is True
     queued = via == "send" and record.get("delivery") == "queued"
     count = record.get("run_count") if type(record.get("run_count")) is int else None
@@ -253,7 +269,7 @@ def link_from(record):
     unknown = confirmed and via == "send" and count is None and active is None and latest is None
     return Link(key=record["key"], thread_id=record["thread_id"], via=via, confirmed=confirmed, base_runs=base,
                 queued=queued, started=started or unknown, status="running" if started and live else "queued",
-                admitted=float(record.get("at") or 0), run_id=run_id, prior_run_id=prior)
+                admitted=float(record.get("at") or 0), run_id=run_id, prior_run_id=prior, **intent)
 
 
 def merge(link, record):

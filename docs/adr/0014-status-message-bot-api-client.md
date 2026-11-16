@@ -1,4 +1,4 @@
-# 0013 Status messages use Talk's own Bot API client, not Hermes' sender internals
+# 0014 Status messages use Talk's own Bot API client, not Hermes' sender internals
 
 Status: decided for fix/talk-sender-1116 (2026-11-16).
 

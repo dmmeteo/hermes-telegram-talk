@@ -357,14 +357,17 @@ when the task is accepted, and then edited at each real transition. It never car
 transcript, the prompt or a tool log, and secret-shaped text is redacted. The full result stays in the task's native
 Hermes session and reaches the user by voice.
 
-The title is the voice model's last-line `TITLE:`, which the call instructions ask for in English; a `TITLE:` line
-inside the task stays the user's text. Without a usable one,
-the request names the task, shortened the way Conduit titles a background job (`VoiceBackgroundJobs.title(for:)`:
-whitespace collapsed, at most 60 characters cut at a word), when it is English. A request in another language is named
-by the plugin's own host model (`ctx.llm`, the Pulse route, no override): once, before the only send, with the redacted
-request, asking for one plain English sentence of at most eight words. If there is no model route yet, the call fails,
-or the answer is not a few plain English words, the request's own words stay the title. The title never changes after
-the first send. Title and message id are stored with the task's report record (see `docs/adr/0009-task-status-titles.md`).
+The title is one short English sentence naming the task's objective. It is the voice model's last-line `TITLE:` when
+that line is usable (the call instructions ask for one in English; a `TITLE:` line inside the task stays the user's
+text), or the request itself when the request is already a short plain English sentence. Otherwise the plugin's own
+host model (`ctx.llm`, the Pulse route, no override) names it. It is given the work the task's turn admitted to T3
+(the `t3_control` start's title and message, or a send's message, never a reused thread's old title, as the hook
+recorded them) and the redacted request, which is a speech transcript and often opens with filler. The first attempt
+runs before the only send. If it gives nothing usable (for example, the route is not bound yet after a Talk start),
+the message goes out with the admitted start's own title, else "Hermes task N", and naming is retried up to five
+times with backoff, across restarts. A later answer renames the message with one edit. The speech's own words are
+never the title. The title, its naming input and attempts, and the message id are stored with the task's report
+record (see `docs/adr/0013-objective-task-titles.md`, which supersedes parts of 0009).
 
 The user can send the status message elsewhere only by naming a destination the operator listed in `receipts.destinations` for
 that user (`REPORT TO: <name>` at the end of the delegation). It then goes only there. The browser cannot pass a chat
@@ -373,7 +376,7 @@ is refused in the config.
 
 Talk makes the two Bot API calls itself (`sendMessage`, then `editMessageText`), as plain text over `urllib`, with
 the Talk bot token the server already has. It imports nothing from Hermes for them, so a core update cannot break
-status messages (see `docs/adr/0013-status-message-bot-api-client.md`). An HTTP(S) proxy in `TELEGRAM_PROXY` is used. Talk
+status messages (see `docs/adr/0014-status-message-bot-api-client.md`). An HTTP(S) proxy in `TELEGRAM_PROXY` is used. Talk
 stores no token, and a sender error never contains the request URL.
 
 Report states are pending, sending, sent, failed and uncertain, separate from the job state and the voice receipt.
