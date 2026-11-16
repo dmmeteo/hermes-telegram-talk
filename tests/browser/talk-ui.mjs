@@ -83,6 +83,83 @@ try {
   log('avatar-replacement');
   await context.close();
 
+  const panelContext = await browser.newContext({viewport: {width: 390, height: 844}, hasTouch: true});
+  await panelContext.addInitScript(() => { navigator.mediaDevices.getUserMedia = () => new Promise(() => {}); });
+  const panel = await open(panelContext);
+  await panel.waitForFunction(() => !document.getElementById('voice-box').hidden);
+  const inPanel = () => panel.evaluate(() => document.getElementById('call-menu').contains(document.activeElement));
+  const closedWithFocusOn = id => panel.evaluate(id => document.getElementById('call-menu').hidden
+    && document.getElementById('menu-toggle').getAttribute('aria-expanded') === 'false'
+    && (id === null ? !document.getElementById('call-menu').contains(document.activeElement) : document.activeElement?.id === id), id);
+  const states = {
+    connecting: () => {},
+    blocked: () => { call.phase = 'blocked'; render(); },
+    stopped: () => stop('Voice did not become ready. Tap Retry to reconnect.'),
+  };
+  for (const [state, enter] of Object.entries(states)) {
+    await panel.evaluate(enter);
+    for (const [width, height] of [[390, 844], [360, 640], [320, 568], [844, 390], [1280, 800]]) {
+      await panel.setViewportSize({width, height});
+      await panel.click('#menu-toggle');
+      const g = await panel.evaluate(() => {
+        const box = element => element.getBoundingClientRect().toJSON();
+        const menu = document.getElementById('call-menu');
+        const targets = [...menu.querySelectorAll('button, select, label:has(input)')].filter(element => element.getClientRects().length)
+          .map(element => { const r = element.getBoundingClientRect();
+            return {id: element.id || element.textContent.trim(), width: r.width, height: r.height,
+              hit: element.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2))}; });
+        return {panel: box(menu), heading: box(document.getElementById('menu-title') || menu), row: box(document.querySelector('.control-row')),
+          order: ['menu-toggle', 'orb', 'mute'].map(id => box(document.getElementById(id)).x), targets,
+          overflow: document.documentElement.scrollWidth > innerWidth, status: !document.getElementById('call-status').hidden,
+          lines: ['error', 'start'].filter(id => !document.getElementById(id).hidden)};
+      });
+      const where = `${state} ${width}x${height}`;
+      assert(g.panel.top >= 0 && g.panel.bottom <= height && g.panel.left >= 0 && g.panel.right <= width && !g.overflow, `panel fits the viewport (${where})`);
+      assert(g.heading.top >= g.panel.top && g.heading.top >= 0, `panel heading is not clipped (${where})`);
+      assert(g.panel.bottom <= g.row.top, `panel sits above the control row (${where})`);
+      assert(g.order[0] < g.order[1] && g.order[1] < g.order[2], `menu left, avatar center, microphone right (${where})`);
+      assert(g.targets.every(t => t.width >= 44 && t.height >= 44 && t.hit), `panel controls are reachable 44 px targets (${where}): ${JSON.stringify(g.targets)}`);
+      assert(await inPanel(), `opening moves focus into the panel (${where})`);
+      await panel.screenshot({path: `${out}/menu-${state}-${width}x${height}.png`});
+      log('panel-geometry', {state, width, height, panel: g.panel, row: g.row.top, lines: g.lines});
+      await panel.keyboard.press('Escape');
+      assert(await closedWithFocusOn('menu-toggle'), `Escape closes and restores focus (${where})`);
+    }
+  }
+  await panel.setViewportSize({width: 390, height: 844});
+  await panel.evaluate(() => { stop(); void start(); });
+  await panel.waitForFunction(() => call && !document.getElementById('end').disabled);
+  await panel.focus('#menu-toggle'); await panel.keyboard.press('Enter');
+  assert(await inPanel(), 'keyboard opening moves focus into the panel');
+  await panel.click('#menu-close');
+  assert(await closedWithFocusOn('menu-toggle'), 'Close closes and restores focus');
+  await panel.click('#menu-toggle'); await panel.click('#menu-toggle');
+  assert(await closedWithFocusOn('menu-toggle'), 'the toggle closes an open panel');
+  await panel.click('#menu-toggle'); await panel.mouse.click(20, 20);
+  assert(await closedWithFocusOn(null), 'an outside pointer dismisses');
+  await panel.click('#menu-toggle');
+  await panel.focus('#end'); await panel.keyboard.press('Tab');
+  assert(await closedWithFocusOn(null), 'Tab from the last control leaves the panel and closes it');
+  await panel.evaluate(() => { call.phase = 'ready'; render(); });
+  await panel.click('#menu-toggle');
+  await panel.focus('#end'); await panel.keyboard.press('Tab');
+  assert(await closedWithFocusOn('mute'), 'Tab from the last control moves to the microphone and closes the panel');
+  await panel.click('#menu-toggle');
+  const other = await panel.evaluate(() => [...document.querySelectorAll('#voice option')].map(o => o.value).find(v => v !== voiceState.current));
+  await panel.focus('#voice'); await panel.selectOption('#voice', other);
+  await panel.locator('#reconnect').waitFor({state: 'visible', timeout: 10000}).catch(() => {});
+  assert(await panel.evaluate(() => !document.getElementById('call-menu').hidden) && await panel.locator('#reconnect').isVisible(),
+    'choosing a voice keeps the panel open and shows Reconnect');
+  await panel.keyboard.press('Escape');
+  await panel.click('#menu-toggle');
+  await panel.focus('#menu-close'); await panel.keyboard.press('Shift+Tab');
+  assert(await panel.evaluate(() => !document.getElementById('call-menu').hidden && document.activeElement?.id === 'menu-toggle'),
+    'Shift+Tab from the first control returns to the toggle, which still controls the open panel');
+  await panel.keyboard.press('Enter');
+  assert(await closedWithFocusOn('menu-toggle'), 'the toggle then closes the panel');
+  log('panel-keyboard');
+  await panelContext.close();
+
   assert(errors.length === 0, `no uncaught browser errors: ${errors.join('; ')}`);
   log('summary', {failures: 0});
   console.log('TALK_UI_BROWSER_OK');

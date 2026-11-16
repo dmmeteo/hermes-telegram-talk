@@ -375,11 +375,13 @@ async function loadVoice(current) {
   renderVoice(call);
 }
 
+// The selector stays enabled while saving: disabling it would drop its focus and close the settings panel.
+let choosingVoice = false;
 async function chooseVoice() {
   const current = call;
   const auth = current?.auth || initData();
-  if (!auth || !voiceSelect.value || voiceSelect.value === voiceState?.current) return;
-  voiceSelect.disabled = true;
+  if (!auth || choosingVoice || !voiceSelect.value || voiceSelect.value === voiceState?.current) return;
+  choosingVoice = true;
   try {
     const data = await post("voice", {initData: auth, voice: voiceSelect.value});
     voiceState = data.voice;
@@ -387,7 +389,7 @@ async function chooseVoice() {
   } catch (error) {
     showError(error.status === 400 ? "That voice is not available." : error.message);
   } finally {
-    voiceSelect.disabled = false;
+    choosingVoice = false;
     renderVoice(call);
   }
 }
@@ -396,6 +398,7 @@ function reconnectVoice() {
   if (!call || reconnectButton.hidden) return;
   if (callMenu) callMenu.hidden = true;
   menuButton?.setAttribute("aria-expanded", "false");
+  menuButton?.focus();
   stop();
   void start();
 }
@@ -948,7 +951,10 @@ function onPageHide(event) {
   if (conversation) clearTimeout(conversation.retryTimer);
   menuButton?.removeEventListener("click", toggleMenu);
   endButton?.removeEventListener("click", endCall);
+  document.getElementById("menu-close").removeEventListener("click", toggleMenu);
   document.removeEventListener?.("keydown", closeMenu);
+  document.removeEventListener?.("pointerdown", closeMenu);
+  callMenu?.removeEventListener("focusout", closeMenu);
   transcriptList?.removeEventListener("scroll", trackTranscriptScroll);
   startButton.removeEventListener("click", start);
   muteButton.removeEventListener("click", toggleMute);
@@ -979,19 +985,32 @@ if (webApp) { webApp.ready(); webApp.expand(); }
 function toggleMenu() {
   callMenu.hidden = !callMenu.hidden;
   menuButton.setAttribute("aria-expanded", String(!callMenu.hidden));
-  if (!callMenu.hidden) voiceSelect?.focus?.();
+  if (!callMenu.hidden) callMenu.focus();
+  else menuButton.focus();
 }
+// Escape, a pointer outside, or focus moving out closes the panel; the toggle counts as inside so it can close it itself.
 function closeMenu(event) {
-  if (event.key === "Escape" && !callMenu.hidden) { toggleMenu(); menuButton.focus(); }
+  if (callMenu.hidden) return;
+  if (event.type === "keydown") {
+    if (event.key === "Escape") { event.preventDefault(); toggleMenu(); }
+    return;
+  }
+  const target = event.type === "focusout" ? event.relatedTarget : event.target;
+  if (callMenu.contains(target) || menuButton.contains(target)) return;
+  callMenu.hidden = true;
+  menuButton.setAttribute("aria-expanded", "false");
 }
-function endCall() { stop(); callMenu.hidden = true; menuButton.setAttribute("aria-expanded", "false"); }
+function endCall() { stop(); callMenu.hidden = true; menuButton.setAttribute("aria-expanded", "false"); menuButton.focus(); }
 function trackTranscriptScroll() {
   followingTranscript = transcriptList.scrollTop + transcriptList.clientHeight >= transcriptList.scrollHeight - 24;
 }
 function bindControls() {
   menuButton?.addEventListener("click", toggleMenu);
   endButton?.addEventListener("click", endCall);
+  document.getElementById("menu-close").addEventListener("click", toggleMenu);
   document.addEventListener?.("keydown", closeMenu);
+  document.addEventListener?.("pointerdown", closeMenu);
+  callMenu?.addEventListener("focusout", closeMenu);
   transcriptList?.addEventListener("scroll", trackTranscriptScroll);
   startButton.addEventListener("click", start);
   muteButton.addEventListener("click", toggleMute);
