@@ -237,9 +237,12 @@ class GatewayAgent:
 
     @staticmethod
     def disconnected(exc):
-        """Whether exc is the client's lost connection or answer, as opposed to the gateway's own refusal."""
-        from hermes_cli.gateway_client import GatewayClientError, GatewayRPCError
-        return isinstance(exc, GatewayClientError) and not isinstance(exc, GatewayRPCError)
+        """Whether exc is the core client's report of a connection that dropped (DISCONNECTED: a request or its
+        answer may be lost; NOT_SENT: the socket was already closed). Not the gateway's own refusal, and not a
+        verdict that a new launch would only meet again: no ready owner (GatewayUnavailableError), a protocol
+        mismatch, an invalid explicit URL or a failed bootstrap."""
+        from hermes_cli.gateway_client import DISCONNECTED, NOT_SENT, GatewayClientError
+        return type(exc) is GatewayClientError and exc.args[:1] in ((DISCONNECTED,), (NOT_SENT,))
 
     def call(self, method, timeout=RPC_TIMEOUT_S, **params):
         future = asyncio.run_coroutine_threadsafe(self._rpc(method, timeout, params), self._ensure_loop())
