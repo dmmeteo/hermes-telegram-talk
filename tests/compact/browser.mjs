@@ -62,7 +62,7 @@ try {
     const index = await provider.evaluate(() => window.peers.length - 1);
     const energy = () => provider.evaluate(i => window.peers[i].energy?.() || 0, index);
     assert(await page.locator('header').count() === 0, 'no app heading');
-    assert(await page.locator('#thread-note').isHidden(), 'linked call has no unlinked warning');
+    assert(!(await page.locator('body').innerText()).includes('/talk'), 'linked call shows no chat-link note');
     await shot('linked-silent'); checks++;
     await page.evaluate(() => { window.__mic.gain.gain.value = .15; });
     try {
@@ -146,8 +146,8 @@ try {
     assert(await page.evaluate(() => window.__streams.every(s => s.getTracks().every(t => t.readyState === 'ended'))), 'end stops real microphone tracks');
     await shot('disconnected'); checks++;
     await page.goto(`${base}#tgWebAppData=${encodeURIComponent(identity.initData)}`);
-    await until(() => page.locator('#thread-note').isVisible(), 'menu launch has no guessed binding');
-    assert((await page.locator('#thread-note').innerText()).includes('Not linked to a chat'), 'truthful unlinked note');
+    await until(async () => await phase() === 'silent', 'menu launch without a link still connects');
+    assert(!(await page.locator('body').innerText()).includes('/talk'), 'unlinked launch shows no chat-link note');
     await shot('unlinked'); checks++;
     await context.close();
     fixture.kill('SIGTERM'); await new Promise(resolve => fixture.once('exit', resolve)); fixture = null;

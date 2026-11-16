@@ -254,8 +254,8 @@ minimize the Mini App, send a text, a file or a photo, come back. Decisions and 
   user, chat, topic). `api/session` binds the call to that thread only through the handle: it must name this
   profile, bot and signed user, be opened within 10 minutes, and it is claimed by one Telegram launch (a reconnect
   of the same page keeps it; another launch gets "already used"). A Main Mini App link may carry the same handle
-  as `startapp`. A menu launch without a handle, a group, a channel or another account's handle binds nothing and
-  the Mini App says so ("Not linked to a chat. Send /talk there to link it."). There is no fallback to the main
+  as `startapp`. A menu launch without a handle, a group, a channel or another account's handle binds nothing.
+  The Mini App shows no note about it (owner decision, 2026-11-15). There is no fallback to the main
   chat or a last active chat, and the browser cannot name one. Nothing is sent or registered with Telegram until
   an operator restarts the profile's gateway with this plugin.
 - **How it arrives.** `register(ctx)` adds a `pre_gateway_dispatch` hook. In the profile's gateway it sees each inbound

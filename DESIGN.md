@@ -2,7 +2,9 @@
 
 A dark English Telegram Mini App for a single authenticated voice conversation. The dialogue fills the screen above a compact persistent bottom row. Three dots open the call menu on the left, a larger round profile avatar sits in the center, and a round microphone control sits on the right. The app has no heading of its own. Telegram's outer container chrome stays outside the page.
 
-The menu contains Reply voice and End call. Connect, Retry saving, Retry and Enable audio remain discoverable when needed. An unlinked launch shows "Not linked to a chat. Send /talk there to link it." A voice change during a call offers an explicit Reconnect. The catalogue qualification is visible in the menu.
+The menu contains Reply voice and End call. Connect, Retry saving, Retry and Enable audio remain discoverable when needed. A launch without a chat link shows no note; the server still binds nothing without a valid `/talk` handle. A voice change during a call offers an explicit Reconnect. The menu qualifies the voice catalogue with one line, "Availability varies by account."
+
+Blocked output shows one short status line, "Audio and microphone paused.", and the Enable audio button. No error line repeats it.
 
 The transcript shows interim text, final corrections, Interrupted and Cut off labels as before. It keeps at most 100 lines and scrolls through the remaining height. It follows new text while the reader is at the end and preserves older reading positions on updates and rotation. It is display only. Final turns retain their existing persistence path.
 
@@ -50,4 +52,4 @@ The frontend slice's [task report](/home/me/.hermes/run/coding/prime-tgv2-front-
 
 The user-provided phone screenshot was inspected. Its oversized avatar, repeated heading and always-visible selector are deliberately replaced by the requested dialogue-first hierarchy. The existing dark palette, system font and restrained circular ring remain. See [ADR 0005](docs/adr/0005-compact-talk-media-and-avatar.md) for media, catalogue and avatar ownership.
 
-The separate `tests/compact/run.py OUT` gate exercises both synthetic profiles, actual outbound WebRTC receiver energy, mute and reconnect, blocked output, long-dialogue geometry, reading position, menu, End call and unlinked launch. The canonical mobile gate continues to exercise Chromium and WebKit. Exact final revision screenshot paths and review dispositions are recorded in the delivery report under `/home/me/.hermes/profiles/prime/run/coding/prime-talk-compact-qa-1107/report.md`.
+The separate `tests/compact/run.py OUT` gate exercises both synthetic profiles, actual outbound WebRTC receiver energy, mute and reconnect, blocked output, long-dialogue geometry, reading position, menu, End call and an unlinked launch that shows no note. The canonical mobile gate continues to exercise Chromium and WebKit. Exact final revision screenshot paths and review dispositions are recorded in the delivery report under `/home/me/.hermes/profiles/prime/run/coding/prime-talk-compact-qa-1107/report.md`.

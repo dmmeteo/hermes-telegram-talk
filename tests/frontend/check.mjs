@@ -29,7 +29,7 @@ function fixture(options = {}) {
   };
   function element(id) {
     if (!nodes.has(id)) nodes.set(id,{hidden:false,textContent:'',disabled:false,dataset:{},style:{setProperty(){}},
-      setAttribute(name,value){this[name]=value;},removeAttribute(name){delete this[name];},querySelector(){return this;},addEventListener(){},removeEventListener(){},
+      setAttribute(name,value){this[name]=value;},getAttribute(name){return this[name];},removeAttribute(name){delete this[name];},querySelector(){return this;},addEventListener(){},removeEventListener(){},
       getContext(){return new Proxy({}, {get:()=>()=>{}});},pause(){},srcObject:null});
     return nodes.get(id);
   }
@@ -273,6 +273,23 @@ test('avatar at a custom deployment base becomes visible once decoded, and other
   profile(url);
   assert.equal(avatar.src,undefined,`${url} is not loaded`);
   assert.equal(avatar.hidden,true,`${url} leaves the neutral face`);
+ }
+});
+test('blocked output shows one short status line and Enable audio, never a repeated error',async()=>{
+ const f=fixture();f.run(`current.audio={state:'suspended',resume:async()=>{},close:async()=>{}};`);
+ await f.run('enableAudio(current)');
+ assert.equal(f.run('current.phase'),'blocked');
+ assert.equal(f.nodes.get('call-status').textContent,'Audio and microphone paused.');
+ assert.equal(f.nodes.get('error').hidden,true,'no error line repeats the blocked state');
+ assert.equal(f.nodes.get('start').hidden,false);assert.equal(f.nodes.get('start').textContent,'Enable audio');
+});
+test('an unbound or refused chat link shows no note',async()=>{
+ for(const status of ['unbound','expired','used','invalid','foreign','not_private','unavailable']){
+  const f=fixture();
+  f.run(`post=async()=>({voice:{current:'cove',default:'cove',choices:[{id:'cove',label:'Cove'},{id:'sol',label:'Sol'}],applies:'next_connection'},thread:{status:'${status}'}});`);
+  await f.run('loadVoice(current)');
+  const shown=[...f.nodes.values()].filter(node=>!node.hidden&&/\/talk|\blink|chat input/i.test(node.textContent));
+  assert.deepEqual(shown.map(node=>node.textContent),[],`${status} shows nothing`);
  }
 });
 test('synthetic provider waits for native channel readiness and sends one handshake',async()=>{

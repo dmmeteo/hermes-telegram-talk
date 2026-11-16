@@ -8,14 +8,13 @@
 <title>Hermes Telegram Talk</title>
 <link rel="stylesheet" href="app.css?v=3cd726a238f5b99f">
 <script src="https://telegram.org/js/telegram-web-app.js" defer></script>
-<script src="app.js?v=0a380ac6327d2744" defer></script>
+<script src="app.js?v=968b741e94c086eb" defer></script>
 </head>
 <body>
 <main>
   <ol id="transcript" aria-label="Transcript" aria-live="polite" tabindex="0" hidden></ol>
   <div class="actions">
     <p id="call-status" role="status">Connecting</p>
-    <p id="thread-note" role="status" hidden></p>
     <p id="error" role="alert" hidden></p>
     <button id="start" type="button" hidden>Tap to start</button>
     <div class="control-row">
@@ -36,7 +35,7 @@
     <section id="call-menu" aria-label="Call menu" hidden>
       <div id="voice-box" hidden><label for="voice">Reply voice</label><select id="voice"></select><button id="reconnect" type="button" hidden>Reconnect</button></div>
       <p id="voice-note" hidden>The new voice starts after Reconnect.</p>
-      <p class="catalogue-note">Native subscription voice catalogue. Availability can vary by account.</p>
+      <p class="catalogue-note">Availability varies by account.</p>
       <button id="end" type="button">End call</button>
     </section>
   </div>
