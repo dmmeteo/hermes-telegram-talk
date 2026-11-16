@@ -1726,7 +1726,7 @@ def gateway_plugin_reload_same_pid(model):
 
 COMMON = (native_tool_roundtrip, background_result_delivery, context_update_injection, persistent_two_call_history,
           pulse_visibility_and_cursor, pulse_late_after_fast_start, cross_user_denial, cross_profile_denial, restart_job_reconciliation,
-          voice_disconnect_vs_cancel, delegation_id_dedup, one_call_three_native_runs, t3_admission_real_hook, t3_cut_call_real_core, t3_toolset_contract, plugin_native_install, unauthenticated_job_denial,
+          voice_disconnect_vs_cancel, delegation_id_dedup, one_call_three_native_runs, t3_admission_real_hook, t3_toolset_contract, plugin_native_install, unauthenticated_job_denial,
           limits_and_approvals, smart_approval_profile, receipt_ack_no_double_speech, telegram_default_receipt,
           telegram_alternate_destination, telegram_closed_call_delivery, telegram_ambiguous_send,
           telegram_restart_dedup, queue_start_failure, large_old_unread_result, ambiguous_task_submission,
@@ -2010,6 +2010,11 @@ RPC_ONLY = (gateway_plugin_reload_same_pid, rpc_composite_toolsets, rpc_tool_res
             rpc_budget_timeout, rpc_lost_admission_ack, rpc_genuine_refusal, rpc_stop_survives_outage)
 
 
+# Runs on every transport, after everything else: each check leaves a few threads behind in this process, and a new
+# check in the middle pushes later ones past a capped gate's task limit (TasksMax=128: "can't start new thread").
+LAST = (t3_cut_call_real_core,)
+
+
 def run_inner(receipts, only, rpc_target=None):
     global TELEGRAM, TRANSPORT
     from hermes_talk import gateway_rpc
@@ -2025,7 +2030,7 @@ def run_inner(receipts, only, rpc_target=None):
         import hermes_cli
         assert Path(hermes_cli.__file__).resolve().is_relative_to(Path(rpc_target).resolve()), hermes_cli.__file__
         assert TRANSPORT == "gateway", "the pinned core's public gateway client selects the RPC transport"
-    checks = COMMON + (RPC_ONLY if TRANSPORT == "gateway" else ())
+    checks = COMMON + (RPC_ONLY if TRANSPORT == "gateway" else ()) + LAST
     unknown = set(only) - {fn.__name__ for fn in checks}
     assert not unknown, f"not run on the {TRANSPORT} transport: {sorted(unknown)}"
     selected = [fn for fn in checks if not only or fn.__name__ in only]
