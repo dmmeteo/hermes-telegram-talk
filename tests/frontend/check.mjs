@@ -29,12 +29,12 @@ function fixture(options = {}) {
   };
   function element(id) {
     if (!nodes.has(id)) nodes.set(id,{hidden:false,textContent:'',disabled:false,dataset:{},style:{setProperty(){}},
-      setAttribute(name,value){this[name]=value;},querySelector(){return this;},addEventListener(){},removeEventListener(){},
+      setAttribute(name,value){this[name]=value;},removeAttribute(name){delete this[name];},querySelector(){return this;},addEventListener(){},removeEventListener(){},
       getContext(){return new Proxy({}, {get:()=>()=>{}});},pause(){},srcObject:null});
     return nodes.get(id);
   }
   const context = vm.createContext({document:{getElementById:element,documentElement:element('html')},
-    window:{addEventListener(){},removeEventListener(){}}, location:{hash:'',href:'http://localhost/tg-voice/',origin:'http://localhost'},
+    window:{addEventListener(){},removeEventListener(){}}, location:{hash:'',href:`http://localhost${options.base||'/tg-voice/'}`,origin:'http://localhost'},
     URL, URLSearchParams, AbortController, DOMException, TextEncoder, crypto:globalThis.crypto,
     matchMedia:()=>({matches:false}), getComputedStyle:()=>({color:'#ffffff'}),
     ...clock, cancelAnimationFrame(){}, requestAnimationFrame:()=>1,
@@ -255,6 +255,25 @@ test('an avatar body completed after call replacement cannot overwrite the new a
  await f.run('refresh');
  assert.equal(f.nodes.get('avatar').src,'blob:new-call');
  assert.equal(f.run('current.avatarObject'),undefined);
+});
+test('avatar at a custom deployment base becomes visible once decoded, and other paths are refused',()=>{
+ const f=fixture({base:'/tg-voice-michael/'});
+ const profile=url=>f.run(`applyProfile({profile:{display_name:'Synthetic',avatar_url:'${url}'},appearance:{listen_color:'#4fc3f7',speak_color:'#ffb74d'}})`);
+ profile('/tg-voice-michael/avatar');
+ const avatar=f.nodes.get('avatar');
+ assert.equal(avatar.src,'http://localhost/tg-voice-michael/avatar','the fallback at this base loads');
+ assert.equal(avatar.hidden,true,'hidden until decoded');
+ avatar.onload();
+ assert.equal(avatar.hidden,false,'a decoded avatar at a custom base is shown');
+ avatar.src='blob:synthetic';avatar.hidden=true;avatar.onload();
+ assert.equal(avatar.hidden,false,'the authenticated blob is shown at a custom base');
+ avatar.onerror();
+ assert.equal(avatar.hidden,true,'a decode failure falls back to the neutral face');
+ for(const url of ['/tg-voice/avatar','/tg-voice-michael/avatar?x=1','https://example.invalid/tg-voice-michael/avatar']){
+  profile(url);
+  assert.equal(avatar.src,undefined,`${url} is not loaded`);
+  assert.equal(avatar.hidden,true,`${url} leaves the neutral face`);
+ }
 });
 test('synthetic provider waits for native channel readiness and sends one handshake',async()=>{
  const html=readFileSync('tests/browser/provider.html','utf8');

@@ -765,17 +765,28 @@ async function waitForIce(current) {
   });
 }
 
+function resetAvatar() {
+  const avatar = document.getElementById("avatar");
+  avatar.onload = avatar.onerror = null;
+  avatar.removeAttribute("src");
+  avatar.hidden = true;
+  document.getElementById("face").removeAttribute("hidden");
+}
+
 function applyProfile(data) {
   if (typeof data.profile?.display_name !== "string" || !/^#[0-9a-f]{6}$/i.test(data.appearance?.listen_color)
     || !/^#[0-9a-f]{6}$/i.test(data.appearance?.speak_color)) throw new Error("Voice configuration is unavailable. Tap Retry.");
   document.getElementById("name").textContent = data.profile.display_name;
   document.documentElement.style.setProperty("--listen", "#4FC3F7");
   document.documentElement.style.setProperty("--speak", "#FFB74D");
+  resetAvatar();
+  // The authenticated blob from refreshAvatar needs these handlers too, whichever fallback URL was accepted.
   const avatar = document.getElementById("avatar");
+  avatar.onload = () => { avatar.hidden = false; document.getElementById("face").setAttribute("hidden", ""); };
+  avatar.onerror = () => { avatar.hidden = true; document.getElementById("face").removeAttribute("hidden"); };
   const path = new URL(data.profile.avatar_url || "", location.href);
-  if (path.origin === location.origin && path.pathname === "/tg-voice/avatar" && !path.search && !path.hash && !path.username && !path.password) {
-    avatar.onload = () => { avatar.hidden = false; document.getElementById("face").setAttribute("hidden", ""); };
-    avatar.onerror = () => { avatar.hidden = true; document.getElementById("face").removeAttribute("hidden"); };
+  const fallback = new URL("avatar", location.href);
+  if (path.origin === location.origin && path.pathname === fallback.pathname && !path.search && !path.hash && !path.username && !path.password) {
     avatar.src = path.href;
   }
 }
@@ -812,6 +823,7 @@ async function start() {
     }
     return;
   }
+  resetAvatar();
   const auth = initData();
   if (!auth) { stop("Open Hermes Telegram Talk from Telegram to sign in."); return; }
   const current = { auth, phase: "connecting", abort: new AbortController(), nodes: [], began: performance.now(), stages: {},

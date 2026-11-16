@@ -2,7 +2,8 @@
 """Talk frontend checks against the backend in this checkout. Synthetic identities and media only.
 
   python3 tests/e2e/run-frontend.py --offline            legacy offline suite, frontend unit checks, real-backend HTTP contract
-  python3 tests/e2e/run-frontend.py --browser OUT_DIR    the same, then the Talk Chromium inventory in a capped offline container
+  python3 tests/e2e/run-frontend.py --browser OUT_DIR    the same, then the Talk Chromium inventory and the avatar/settings/theme
+                                                         checks (tests/browser/talk-ui.mjs), each in a capped offline container
   python3 tests/e2e/run-frontend.py --mobile OUT_DIR     the same, then cold/warm upgrade and audio unlock in Chromium and WebKit
 
 Node runs from PATH, else from TALK_NODE_IMAGE in a network-less container. The browser job runs in
@@ -59,9 +60,10 @@ def main():
         if backend.resolve() != ROOT:
             print('FAIL the browser job serves this checkout; unset TALK_BACKEND_SOURCE')
             return 1
-        commands.append(capped(BROWSER_IMAGE, ['node', '/app/talk-job.mjs', '/output'],
-                               f'type=bind,src={ROOT / "tests/browser/run.mjs"},dst=/app/talk-job.mjs,readonly',
-                               f'type=bind,src={out},dst=/output', memory='2g', cpus='2'))
+        for source, job in (('run.mjs', 'talk-job.mjs'), ('talk-ui.mjs', 'talk-ui.mjs')):
+            commands.append(capped(BROWSER_IMAGE, ['node', f'/app/{job}', '/output'],
+                                   f'type=bind,src={ROOT / "tests/browser" / source},dst=/app/{job},readonly',
+                                   f'type=bind,src={out},dst=/output', memory='2g', cpus='2'))
     if args.mobile:
         if backend.resolve() != ROOT:
             print('FAIL the mobile job serves this checkout; unset TALK_BACKEND_SOURCE')

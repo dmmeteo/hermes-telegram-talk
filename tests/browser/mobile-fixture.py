@@ -15,6 +15,8 @@ from hermes_talk.history import MemoryHistory
 from hermes_talk.talk import TalkRuntime
 import tempfile
 
+BASE = os.environ.get("TALK_TEST_BASE", "/tg-voice/")
+
 home = f.write_home(tempfile.mkdtemp(prefix="mobile-synthetic-"))
 data = f.config_data(greeting={"enabled": False, "text": "Synthetic greeting."})
 if os.environ.get("TALK_TEST_AVATAR"):
@@ -23,7 +25,7 @@ runtime = TalkRuntime(parse_config(data, home), f.BOT_TOKEN, MemoryHistory(),
                       soul=f.file_soul(home), skill=f.file_skill(home))
 upstream = f.FakeUpstream()
 app = server.VoiceApp(f.BOT_TOKEN, {f.USER_ID}, "http://127.0.0.1:8801",
-                      resolve=upstream.resolve, post=upstream.post, talk=runtime, avatar_fetch=lambda *_: None)
+                      base_path=BASE, resolve=upstream.resolve, post=upstream.post, talk=runtime, avatar_fetch=lambda *_: None)
 app.limiter.limit = 1000
 for limiter in app.talk_limiters.values():
     limiter.limit = 1000
@@ -39,13 +41,13 @@ class Handler(Base):
         if path == "/fixture/state":
             return self._json(200, {"requests": requests, "mode": mode,
                                     "initData": f.sign_init_data(f.USER_ID, int(time.time()))})
-        if path == "/tg-voice/telegram.js":
+        if path == BASE + "telegram.js":
             return self._send(200, b"window.Telegram={WebApp:{ready(){},expand(){}}};", "text/javascript")
-        if path == "/tg-voice/":
+        if path == BASE:
             folder = ROOT / "static" if mode == "legacy" else ROOT / "static/talk"
             html = (folder / "index.html").read_text().replace("https://telegram.org/js/telegram-web-app.js", "telegram.js")
             return self._send(200, html.encode(), "text/html", {"Cache-Control": "no-store"})
-        if path in ("/tg-voice/app.js", "/tg-voice/app.css"):
+        if path in (BASE + "app.js", BASE + "app.css"):
             folder = ROOT / "static" if mode == "legacy" else ROOT / "static/talk"
             kind = "text/javascript" if path.endswith(".js") else "text/css"
             return self._send(200, (folder / Path(path).name).read_bytes(), kind,

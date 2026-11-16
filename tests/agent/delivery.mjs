@@ -12,7 +12,7 @@ function fixture(options = {}) {
   const clock = {now: 0};
   const element = id => {
     if (!nodes.has(id)) nodes.set(id, {hidden: false, textContent: '', disabled: false, dataset: {}, style: {setProperty() {}},
-      setAttribute(name, value) { this[name] = value; }, querySelector() { return this; }, addEventListener() {},
+      setAttribute(name, value) { this[name] = value; }, removeAttribute(name) { delete this[name]; }, querySelector() { return this; }, addEventListener() {},
       removeEventListener() {}, getContext() { return new Proxy({}, {get: () => () => {}}); }, pause() {}, srcObject: null});
     return nodes.get(id);
   };
