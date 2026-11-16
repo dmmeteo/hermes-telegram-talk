@@ -63,8 +63,8 @@ class Harness:
             self.talk = TalkRuntime(self.config, fx.BOT_TOKEN, self.history, clock=self.clock)
         else:
             self.history = MemoryHistory()
-            self.talk = TalkRuntime(self.config, fx.BOT_TOKEN, self.history, skill=fx.file_skill(self.home),
-                                    clock=self.clock)
+            self.talk = TalkRuntime(self.config, fx.BOT_TOKEN, self.history, soul=fx.file_soul(self.home),
+                                    skill=fx.file_skill(self.home), clock=self.clock)
         self.app = server.VoiceApp(fx.BOT_TOKEN, {fx.USER_ID, fx.OTHER_USER_ID}, fx.ORIGIN, "/tg-voice/",
                                    resolve=self.fake.resolve, post=self.fake.post, clock=self.clock,
                                    talk=self.talk)
@@ -243,9 +243,13 @@ def session_composes_voice_persona_allowlisted_skills_and_opening(h):
     assert set(data) == {"sdp", "type", "voice_session_id", "conversation_id"} and data["type"] == "answer"
     assert data["sdp"] == fx.ANSWER and data["voice_session_id"].startswith("vs_")
     assert data["conversation_id"] == h.ok("bootstrap", {})["conversation_id"]
-    assert fx.SOUL_MARKER not in instructions and fx.SECRET_IN_SOUL not in instructions, "SOUL is not imported"
     persona = instructions.split("<hermes_persona>\n", 1)[1].split("\n</hermes_persona>", 1)[0]
-    assert "calm and friendly voice" in persona and len(persona) <= 1200, persona
+    assert fx.SOUL_MARKER in persona and fx.SOUL_VOICE_MARKER in persona, "the profile's SOUL identity is the persona"
+    assert fx.SOUL_WORK_MARKER not in instructions, "SOUL's operational sections stay out of the voice"
+    assert fx.SECRET_IN_SOUL not in instructions and "[redacted]" in persona, "SOUL secrets are redacted"
+    assert "calm and friendly voice" not in persona and len(persona) <= 1200, persona
+    assert 'Your name is "Synthetic Talk"' in instructions.split("## Persona", 1)[0], "the frame names the voice"
+    assert "never introduce yourself as ChatGPT" in instructions
     assert fx.SKILL_MARKER in instructions, "allowlisted skill included"
     assert fx.OTHER_SKILL_MARKER not in instructions, "non-allowlisted skill excluded"
     assert "nothing was executed" in instructions
@@ -717,6 +721,7 @@ def a_configured_voice_persona_replaces_the_default(h):
         _, instructions = custom.call()
         persona = instructions.split("<hermes_persona>\n", 1)[1].split("\n</hermes_persona>", 1)[0]
         assert persona == "Synthetic voice persona: warm, dry humour.", persona
+        assert fx.SOUL_MARKER not in instructions, "a configured persona replaces the SOUL identity"
     finally:
         custom.close()
     assert parse_config(fx.config_data(context={"budgets": {"soul_chars": 4000}}), h.home), "retired key still loads"
@@ -726,6 +731,41 @@ def a_configured_voice_persona_replaces_the_default(h):
         except ConfigError:
             continue
         raise AssertionError(f"accepted bad config {bad}")
+
+
+@check
+def each_profile_speaks_its_own_soul_and_a_missing_soul_is_reported(h):
+    other = Harness(h.native, fx.config_data(profile={"id": "other", "display_name": "Other Talk"}))
+    bare = Harness(h.native)
+    long = Harness(h.native)
+    try:
+        (other.home / "SOUL.md").write_text("# Other\nSYNTHETIC-OTHER-SOUL. Dry and quick.\n")
+        (bare.home / "SOUL.md").unlink()
+        (long.home / "SOUL.md").write_text("# Long\n" + "SYNTHETIC-LONG-SOUL words. " * 200 + "\n## Voice\nloud\n")
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        logging.getLogger("hermes_talk.talk").addHandler(handler)
+        logging.getLogger("hermes_talk.talk").setLevel(logging.INFO)
+        try:
+            _, mine = h.call()
+            _, theirs = other.call()
+            _, none = bare.call()
+            _, clipped = long.call()
+        finally:
+            logging.getLogger("hermes_talk.talk").removeHandler(handler)
+        persona = lambda text: text.split("<hermes_persona>\n", 1)[1].split("\n</hermes_persona>", 1)[0]
+        assert fx.SOUL_MARKER in persona(mine) and "SYNTHETIC-OTHER-SOUL" not in mine, "profile isolation"
+        assert "SYNTHETIC-OTHER-SOUL" in persona(theirs) and fx.SOUL_MARKER not in theirs, "profile isolation"
+        assert 'Your name is "Other Talk"' in theirs
+        assert "calm and friendly voice" in persona(none), "no SOUL: the short default, said so in the report"
+        assert persona(clipped).endswith("[clipped]") and len(persona(clipped)) <= 1200 and "loud" not in clipped
+        sources = re.findall(r'"persona_source": "(\w+)"', stream.getvalue())
+        assert sources == ["soul", "soul", "default", "soul"], stream.getvalue()
+        assert fx.SOUL_MARKER not in stream.getvalue() and "SYNTHETIC-OTHER-SOUL" not in stream.getvalue()
+    finally:
+        other.close()
+        bare.close()
+        long.close()
 
 
 @check
