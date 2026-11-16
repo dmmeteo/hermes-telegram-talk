@@ -216,6 +216,19 @@ def main():
         check_no_token("embedded url", [("sender result", json.dumps(tracker)), ("stored report", stored),
                                         ("redact()", redact(tracker[0]["error"]))], stderr, api)
 
+    @check
+    def any_logger_message_or_traceback_is_scrubbed():
+        """Hermes' sender, python-telegram-bot or Talk may log an exception whose message is the request URL."""
+        api.mode = "server_error"
+        try:
+            httpx.post(f"{api.base}{TOKEN}/getMe").raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            for name in ("tools.send_message_senders", "telegram.ext", "tg-voice", "some.other.library"):
+                logging.getLogger(name).warning("send failed (%s)", exc)
+                logging.getLogger(name).error("with traceback", exc_info=True)
+        check_no_token("other loggers", [], stderr, api)
+        assert "[bot token]" in stderr.getvalue()[MARK[0]:], "the scrubbed lines are still logged"
+
     ptb.Bot = LocalBot
     failures = 0
     try:

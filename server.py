@@ -100,6 +100,29 @@ PERSONA = (
 )
 
 
+BOT_TOKEN_SHAPE = re.compile(r"\d{6,12}:[A-Za-z0-9_-]{30,}")
+
+
+class _TokenScrubbingFormatter(logging.Formatter):
+    """Bot API URLs carry the bot token, and any library may put one in a message or traceback."""
+
+    def __init__(self, token, fmt):
+        super().__init__(fmt)
+        self._token = token
+
+    def format(self, record):
+        return BOT_TOKEN_SHAPE.sub("[bot token]", super().format(record).replace(self._token, "[bot token]"))
+
+
+def configure_logging(token):
+    handler = logging.StreamHandler()
+    handler.setFormatter(_TokenScrubbingFormatter(token, "%(asctime)s %(levelname)s %(message)s"))
+    logging.basicConfig(level=logging.INFO, handlers=[handler])
+    # httpx logs every request line at INFO, URL included; python-telegram-bot sends through it.
+    for name in ("httpx", "httpcore"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
 class ApiError(Exception):
     def __init__(self, status, message):
         super().__init__(message)
@@ -504,10 +527,10 @@ def main(argv=None):
     parser.add_argument("--base-path", default="/tg-voice/")
     parser.add_argument("--config", help="Hermes Telegram Talk YAML; without it the server stays the original voice test")
     args = parser.parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     token = os.environ.get("TG_VOICE_BOT_TOKEN", "").strip()
     if not token:
         parser.error("TG_VOICE_BOT_TOKEN is not set")
+    configure_logging(token)
     try:
         allowed = allowed_ids_from(os.environ.get("TG_VOICE_ALLOWED_USER_IDS"))
     except ValueError as exc:

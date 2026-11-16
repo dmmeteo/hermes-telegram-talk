@@ -290,7 +290,7 @@ class TelegramSender:
         except TimeoutError:
             return {"error": f"edit timed out after {self.timeout:.0f}s"}
         except Exception as exc:
-            return {"error": f"Telegram edit failed: {exc}"}
+            return {"error": f"Telegram edit failed: {str(exc).replace(self.token, '[bot token]')}"}  # a URL error names it
 
 
 class ReportDesk:
