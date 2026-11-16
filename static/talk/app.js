@@ -82,6 +82,38 @@ function updateMic(current) {
   render();
 }
 
+// Raw orb state -> status text, and how long (ms) the state must hold before its text replaces a different one.
+// Listening and speaking alternate at every short pause, so a change between them waits; any other change shows at once.
+const STATUS = {
+  idle: {label: "Call stopped.", hold: 0},
+  connecting: {label: "Connecting. Microphone paused.", hold: 0},
+  blocked: {label: "Audio and microphone paused.", hold: 0},
+  muted: {label: "Microphone muted.", hold: 0},
+  silent: {label: "Listening.", hold: 1000},
+  listening: {label: "Listening.", hold: 1000},
+  speaking: {label: "Speaking.", hold: 1000},
+};
+const statusLine = {shown: null, next: null, timer: 0};
+
+function showStatus(state) {
+  const {label, hold} = STATUS[state];
+  if (statusLine.next && STATUS[statusLine.next].label === label) return;
+  clearTimeout(statusLine.timer);
+  statusLine.next = null;
+  if (statusLine.shown && STATUS[statusLine.shown].label === label) return;
+  const wait = Math.min(hold, STATUS[statusLine.shown]?.hold ?? 0);
+  if (!wait) { applyStatus(state); return; }
+  statusLine.next = state;
+  statusLine.timer = setTimeout(() => applyStatus(state), wait);
+}
+
+function applyStatus(state) {
+  statusLine.shown = state;
+  statusLine.next = null;
+  orb.setAttribute("aria-label", STATUS[state].label);
+  document.getElementById("call-status").textContent = STATUS[state].label;
+}
+
 function render() {
   const current = call;
   const mediaReady = current && current.phase === "ready" && current.playing && current.audio?.state === "running"
@@ -91,12 +123,8 @@ function render() {
       ? "speaking" : current.muted ? "muted" : current.inputLevel > .005 && current.stream?.getAudioTracks().some(track => track.enabled && track.readyState !== "ended")
       ? "listening" : "silent";
   orb.dataset.state = state;
-  orb.setAttribute("aria-label", ({idle: "Call stopped.", blocked: "Audio and microphone paused.",
-    connecting: "Connecting. Microphone paused.", listening: "Listening.", speaking: "Speaking.",
-    silent: "Connected. Quiet.", muted: "Microphone muted."})[state]);
-  const status = document.getElementById("call-status");
-  const label = orb.getAttribute?.("aria-label") || state;
-  if (status.textContent !== label) status.textContent = label;
+  // While muted, the text keeps saying so; the ring still turns orange for assistant output.
+  showStatus(state === "speaking" && current.muted ? "muted" : state);
   if (endButton) endButton.disabled = !current;
   muteButton.setAttribute("aria-label", current?.muted ? "Unmute microphone" : "Mute microphone");
   muteButton.disabled = !current || current.phase !== "ready";

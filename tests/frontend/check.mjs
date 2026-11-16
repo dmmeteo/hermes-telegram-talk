@@ -292,6 +292,37 @@ test('an unbound or refused chat link shows no note',async()=>{
   assert.deepEqual(shown.map(node=>node.textContent),[],`${status} shows nothing`);
  }
 });
+test('status text follows a raw state only after it holds, while the ring follows every frame',()=>{
+ const f=fixture({clock:true});
+ const text=()=>f.nodes.get('call-status').textContent;
+ const seen=new Set(), states=new Set();
+ const frame=(input,output)=>{f.run(`current.inputLevel=${input};current.outputLevel=${output};render();`);
+  seen.add(text());states.add(f.nodes.get('orb').dataset.state);f.wait(20);};
+ f.run(`current.phase='ready';current.handshake=true;updateMic(current);`);
+ assert.equal(text(),'Listening.','a ready call shows Listening at once');
+ for(let burst=0;burst<6;burst++){
+  for(let t=0;t<700;t+=20)frame(0,.2);
+  for(let t=0;t<100;t+=20)frame(0,0);
+  for(let t=0;t<300;t+=20)frame(.1,0);
+ }
+ assert.deepEqual([...seen],['Listening.'],'speech shorter than the hold, with short pauses, never changes the text');
+ assert.deepEqual([...states].sort(),['listening','silent','speaking'],'the ring state follows every frame');
+ for(let t=0;t<980;t+=20)frame(0,.2);
+ assert.equal(text(),'Listening.','no change before the hold');
+ for(let t=0;t<60;t+=20)frame(0,.2);
+ assert.equal(text(),'Speaking.','speech held for about 1 s changes the text');
+ assert.equal(f.nodes.get('orb')['aria-label'],'Speaking.','the orb label follows the text');
+ for(let t=0;t<120;t+=20)frame(0,0);
+ assert.equal(text(),'Speaking.','a short silence changes nothing');
+ frame(0,0);f.run(`current.muted=true;updateMic(current);`);
+ assert.equal(text(),'Microphone muted.','mute shows at once');
+ frame(0,.2);frame(0,.2);f.wait(2000);frame(0,.2);
+ assert.equal(f.nodes.get('orb').dataset.state,'speaking');assert.equal(text(),'Microphone muted.','assistant output keeps the muted text');
+ f.run(`current.muted=false;updateMic(current);current.outputLevel=0;current.phase='blocked';render();`);
+ assert.equal(text(),'Audio and microphone paused.','blocked shows at once');
+ f.run(`current.phase='connecting';render();`);assert.equal(text(),'Connecting. Microphone paused.','connecting shows at once');
+ f.run(`call=null;render();`);assert.equal(text(),'Call stopped.','idle shows at once');
+});
 test('synthetic provider waits for native channel readiness and sends one handshake',async()=>{
  const html=readFileSync('tests/browser/provider.html','utf8');
  const sent=[],timers=[];let peer,releaseStats;
