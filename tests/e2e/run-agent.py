@@ -1866,6 +1866,55 @@ def rpc_genuine_refusal(model):
         e.close()
 
 
+def rpc_disconnect_before_session(model):
+    """The connection drops while the gateway still creates the task's session (default profile, 2026-11-15): no
+    prompt was submitted, so the accepted request is launched again and runs once. An outage that lasts fails it."""
+    from hermes_cli.gateway_client import DISCONNECTED, GatewayClientError
+    from hermes_talk import jobs
+    e = gateway_env(model)
+    try:
+        seen = {"creates": 0, "submits": [], "outage": 0}
+
+        def inject(method, params, real):
+            if method in ("session.create", "session.resume") and seen.get("down"):
+                seen["outage"] += 1
+                raise GatewayClientError(DISCONNECTED)
+            if method == "session.create":
+                seen["creates"] += 1
+                if seen["creates"] == 1:
+                    seen["orphan"] = real()["session_id"]  # the gateway really creates it; its answer is lost
+                    e.talk.agent.close()
+                    raise GatewayClientError(DISCONNECTED)
+            if method == "prompt.submit":
+                seen["submits"].append((params["submission_id"], params["session_id"]))
+            return real()
+        _fault(e.talk.agent, inject)
+        conv, vs = e.call()
+        earlier = len(requests_with(model, "TASK: slow 1.25"))
+        _, body = e.task(conv, vs, "slow 1.25", "del_rpc_dropped")
+        job_id = body["job"]["id"]
+        job = e.wait(job_id, conv, vs, timeout=90)
+        assert job["state"] == "succeeded" and "SCRIPTED-SLOW-DONE" in job["result"], job
+        native = e.native(job_id)
+        assert seen["creates"] == 2 and seen["submits"] == [(job_id, native.native_session_id)], seen
+        assert native.native_session_id != seen["orphan"], "the session whose answer was lost got no prompt"
+        assert len(requests_with(model, "TASK: slow 1.25")) == earlier + 1, "the request ran once"
+        seen["down"], delays = True, jobs.RELAUNCH_DELAYS_S
+        jobs.RELAUNCH_DELAYS_S = (0.1, 0.1)
+        try:
+            _, body = e.task(conv, vs, "slow 1.75", "del_rpc_outage")
+            lost = e.wait(body["job"]["id"], conv, vs, timeout=60)
+        finally:
+            jobs.RELAUNCH_DELAYS_S = delays
+        assert lost["state"] == "failed" and "did not take the task (GatewayClientError)" in lost["error"], lost
+        assert seen["outage"] == 3 and len(seen["submits"]) == 1, seen
+        assert not requests_with(model, "TASK: slow 1.75"), "nothing ran"
+        return {"job": job_id, "state": job["state"], "session_creates": seen["creates"], "submissions": 1,
+                "native_runs": 1, "outage": {"state": lost["state"], "launches": seen["outage"]}}
+    finally:
+        e.close()
+
+
 def rpc_stop_survives_outage(model):
     """A cancel whose stop requests hit a transport outage is retried; the run stops with no late effect."""
     e = gateway_env(model)
@@ -1947,7 +1996,8 @@ def rpc_composite_toolsets(model):
 
 # The gateway transport's own safety properties; every COMMON check also runs on it.
 RPC_ONLY = (gateway_plugin_reload_same_pid, rpc_composite_toolsets, rpc_tool_resume_idempotency, rpc_destructive_denial, rpc_cancel_no_late_effect,
-            rpc_budget_timeout, rpc_lost_admission_ack, rpc_genuine_refusal, rpc_stop_survives_outage)
+            rpc_budget_timeout, rpc_lost_admission_ack, rpc_disconnect_before_session, rpc_genuine_refusal,
+            rpc_stop_survives_outage)
 
 
 def run_inner(receipts, only, rpc_target=None):

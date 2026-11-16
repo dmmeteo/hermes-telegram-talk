@@ -56,6 +56,7 @@ EXTRA = ("parallel", "links", "turn", "unknown")
 FOLLOW_S = 10.0  # how often open T3 work is read
 INTAKE_S = 1.0  # how often a running turn's admissions are picked up
 STOP_RETRY_MIN_S, STOP_RETRY_MAX_S, STOP_RECHECK_S = 1.0, 8.0, 10.0  # gateway stop: retry backoff, re-request
+RELAUNCH_DELAYS_S = (1.0, 2.0, 4.0, 8.0)  # waits before each new launch of a job whose gateway connection dropped
 SPOKEN_STATE = {SUCCEEDED: "finished", FAILED: "failed", CANCELLED: "was cancelled",
                 INTERRUPTED: "was interrupted when Talk restarted; it was not rerun"}
 
@@ -250,6 +251,7 @@ class JobBoard:
         self.retry_at = 0.0
         self.interrupts = {}  # link key -> monotonic time of the last T3 interrupt asked for a cancelled job
         self.reaped = set()  # large jobs whose still-running turn is being stopped to keep live turns bounded
+        self.relaunches = {}  # job id -> launches repeated after the gateway connection dropped before a session
         extras = dict(history.list_meta_prefix(WORK_PREFIX))
         for key, raw in history.list_meta_prefix(JOB_PREFIX):
             job = load(raw, extras.get(WORK_PREFIX + key[len(JOB_PREFIX):]))
@@ -281,6 +283,7 @@ class JobBoard:
 
     def _finish(self, job):
         self.handles.pop(job.id, None)
+        self.relaunches.pop(job.id, None)
         return self._save(job)
 
     def reconcile(self):
@@ -380,14 +383,27 @@ class JobBoard:
         finally:
             self.pump()
 
-    def _defer(self, job):
+    def _defer(self, job, delay=1.0):
         with self.lock:
             current = self.jobs[job.id]
             if current.cancel_requested:
                 self._finish(current.to(CANCELLED, finished=self.clock()))
             else:
                 self._save(replace(current, state=ACCEPTED, started=None, parallel=False))
-                self.retry_at = time.monotonic() + 1
+                self.retry_at = time.monotonic() + delay
+
+    def _relaunch(self, job, exc):
+        """True when the job went back to waiting because the gateway connection dropped before its session was
+        stored. No prompt was submitted under its id then, so a new launch cannot admit it twice; a session the
+        gateway created without its answer arriving stays empty. Bounded, so a lasting outage still fails it."""
+        lost = getattr(self.agent, "disconnected", None)
+        tries = self.relaunches.get(job.id, 0)
+        if lost is None or not lost(exc) or tries >= len(RELAUNCH_DELAYS_S):
+            return False
+        self.relaunches[job.id] = tries + 1
+        logger.warning("the gateway connection dropped before a task's session existed; launching it again")
+        self._defer(job, RELAUNCH_DELAYS_S[tries])
+        return True
 
     def _reap(self, job):
         """Stop a large job's turn that is still live; its T3 work is followed as before (the lock is held)."""
@@ -460,7 +476,7 @@ class JobBoard:
         return prompt, None if job.parallel else resume
 
     def _launch_gateway(self, job):
-        """True when the gateway admitted the job; otherwise it has failed and nothing was admitted."""
+        """True when the gateway admitted the job; otherwise nothing was admitted and it failed or waits again."""
         try:
             prompt, resume = self._prompt(job)
         except Exception as exc:
@@ -474,6 +490,8 @@ class JobBoard:
         except Exception as exc:
             job = self.jobs[job.id]
             submitted = job.native_session_id and job.submission_text
+            if job.admission_id is None and not submitted and self._relaunch(job, exc):
+                return False
             if job.admission_id is None and (getattr(exc, "refused", False) or not submitted):
                 # The gateway refused it, or nothing was submitted (no session stored): nothing ran.
                 self._finish(job.to(FAILED, finished=self.clock(),
