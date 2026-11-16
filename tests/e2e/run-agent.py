@@ -1814,24 +1814,27 @@ def _fault(agent, inject):
     return real
 
 
-def rpc_lost_admission_ack(model):
-    """The real gateway admits the prompt, then the acknowledgement is lost: Talk reconciles the same admission."""
+def _lost_admission_ack(model, lost, delegation):
+    """The real gateway admits the prompt, then lost() is raised in place of its answer: one session, one run."""
     e = gateway_env(model)
     try:
-        seen = {}
+        seen = {"creates": 0}
 
         def inject(method, params, real):
+            if method == "session.create":
+                seen["creates"] += 1
             if method == "prompt.submit" and "lost" not in seen:
                 seen["lost"] = real()  # the pinned gateway really admits it
                 e.talk.agent.close()  # the connection drops before the answer arrives
-                raise ConnectionResetError("synthetic: acknowledgement lost after admission")
+                raise lost()
             if method == "prompt.submit":
                 seen.setdefault("resubmissions", []).append(params["submission_id"])
+                seen.setdefault("sessions", set()).add(params["session_id"])
             return real()
         _fault(e.talk.agent, inject)
         conv, vs = e.call()
         earlier = len(requests_with(model, "TASK: slow 4"))  # the model is shared with earlier checks
-        _, body = e.task(conv, vs, "slow 4", "del_rpc_lost_ack")
+        _, body = e.task(conv, vs, "slow 4", delegation)
         job_id = body["job"]["id"]
         assert body["created"] and body["job"]["state"] in ("accepted", "running"), body
         job = e.wait(job_id, conv, vs, timeout=90)
@@ -1840,11 +1843,27 @@ def rpc_lost_admission_ack(model):
         assert job["state"] == "succeeded" and "SCRIPTED-SLOW-DONE" in job["result"], job
         assert native.admission_id == seen["lost"]["admission_id"], "the same admission was reconciled, not a new one"
         assert seen.get("resubmissions") and set(seen["resubmissions"]) == {job_id}, seen
+        assert seen["creates"] == 1 and seen["sessions"] == {native.native_session_id}, \
+            f"the job kept its one session: {seen['creates']} created, {len(seen['sessions'])} resubmitted to"
         assert len(requests_with(model, "TASK: slow 4")) == earlier + 1, "the admitted run ran once"
         return {"job": job_id, "admission": native.admission_id, "lost_ack_admission": seen["lost"]["admission_id"],
-                "resubmissions": len(seen["resubmissions"]), "native_runs": 1, "state": job["state"]}
+                "resubmissions": len(seen["resubmissions"]), "session_creates": seen["creates"], "native_runs": 1,
+                "state": job["state"]}
     finally:
         e.close()
+
+
+def rpc_lost_admission_ack(model):
+    """The real gateway admits the prompt, then the acknowledgement is lost: Talk reconciles the same admission."""
+    return _lost_admission_ack(model, lambda: ConnectionResetError("synthetic: acknowledgement lost after admission"),
+                               "del_rpc_lost_ack")
+
+
+def rpc_lost_admission_ack_disconnected(model):
+    """The same loss as the core client reports it, GatewayClientError(DISCONNECTED), which `disconnected` accepts:
+    the session is stored, so the job is never launched again; the same admission is reconciled and runs once."""
+    from hermes_cli.gateway_client import DISCONNECTED, GatewayClientError
+    return _lost_admission_ack(model, lambda: GatewayClientError(DISCONNECTED), "del_rpc_lost_ack_disconnected")
 
 
 def rpc_genuine_refusal(model):
@@ -1911,6 +1930,41 @@ def rpc_disconnect_before_session(model):
         assert not requests_with(model, "TASK: slow 1.75"), "nothing ran"
         return {"job": job_id, "state": job["state"], "session_creates": seen["creates"], "submissions": 1,
                 "native_runs": 1, "outage": {"state": lost["state"], "launches": seen["outage"]}}
+    finally:
+        e.close()
+
+
+def rpc_start_verdict_fails_at_once(model):
+    """Only the core client's dropped-connection reports launch a job again. A verdict a new launch would meet
+    again (no ready owner, protocol mismatch, invalid URL) fails the task at its first launch, as before."""
+    from hermes_cli.gateway_client import (DISCONNECTED, NOT_SENT, GatewayClientError, GatewayRPCError,
+                                           GatewayUnavailableError)
+    from hermes_talk.gateway_rpc import GatewayAgent
+    unavailable = GatewayUnavailableError("Gateway could not start: synthetic", "inaccessible", "runtime_exited")
+    verdicts = (unavailable, GatewayClientError("Gateway protocol mismatch; update/restart required"),
+                GatewayClientError("Invalid explicit gateway WebSocket URL; no local fallback"),
+                GatewayClientError("Gateway bootstrap timed out"), GatewayRPCError("synthetic refusal", 4001, None),
+                ConnectionResetError("synthetic"))
+    relaunched = [str(v) for v in verdicts if GatewayAgent.disconnected(v)]
+    assert not relaunched, f"launched again on a verdict, not a dropped connection: {relaunched}"
+    assert all(GatewayAgent.disconnected(GatewayClientError(text)) for text in (DISCONNECTED, NOT_SENT))
+    e = gateway_env(model)
+    try:
+        seen = {"creates": 0}
+
+        def inject(method, params, real):
+            if method == "session.create":
+                seen["creates"] += 1
+                raise unavailable
+            return real()
+        _fault(e.talk.agent, inject)
+        conv, vs = e.call()
+        _, body = e.task(conv, vs, "slow 1 unavailable", "del_rpc_unavailable")
+        job = e.wait(body["job"]["id"], conv, vs, timeout=60)
+        assert job["state"] == "failed" and "did not take the task (GatewayUnavailableError)" in job["error"], job
+        assert seen["creates"] == 1, f"one launch, no relaunch: {seen['creates']}"
+        assert not requests_with(model, "TASK: slow 1 unavailable"), "nothing ran"
+        return {"job": job["id"], "state": job["state"], "launches": seen["creates"], "verdicts_not_relaunched": len(verdicts)}
     finally:
         e.close()
 
@@ -1996,7 +2050,8 @@ def rpc_composite_toolsets(model):
 
 # The gateway transport's own safety properties; every COMMON check also runs on it.
 RPC_ONLY = (gateway_plugin_reload_same_pid, rpc_composite_toolsets, rpc_tool_resume_idempotency, rpc_destructive_denial, rpc_cancel_no_late_effect,
-            rpc_budget_timeout, rpc_lost_admission_ack, rpc_disconnect_before_session, rpc_genuine_refusal,
+            rpc_budget_timeout, rpc_lost_admission_ack, rpc_lost_admission_ack_disconnected,
+            rpc_disconnect_before_session, rpc_start_verdict_fails_at_once, rpc_genuine_refusal,
             rpc_stop_survives_outage)
 
 

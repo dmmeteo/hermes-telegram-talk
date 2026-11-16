@@ -18,6 +18,7 @@ import threading
 import time
 import traceback
 from dataclasses import replace
+from types import SimpleNamespace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -26,7 +27,7 @@ sys.path.insert(0, str(ROOT))
 import server  # noqa: E402
 from hermes_talk import fixtures as fx  # noqa: E402
 from hermes_talk import jobs  # noqa: E402
-from hermes_talk.agent import NativeAgent, Readiness, process_start  # noqa: E402
+from hermes_talk.agent import NativeAgent, Outcome, Readiness, process_start  # noqa: E402
 from hermes_talk.config import ConfigError, load_config  # noqa: E402
 from hermes_talk.history import MemoryHistory  # noqa: E402
 from hermes_talk.talk import TalkRuntime  # noqa: E402
@@ -492,7 +493,6 @@ def worker_thread_exhaustion_recovers():
 def gateway_connection_is_single_flight():
     import asyncio
     from contextlib import asynccontextmanager
-    from types import SimpleNamespace
     from hermes_talk.gateway_rpc import GatewayAgent
     async def check():
         opened = []
@@ -511,11 +511,139 @@ def gateway_connection_is_single_flight():
     return asyncio.run(check())
 
 
+class DroppingGateway:
+    """A synthetic gateway-transport agent: a launch of a named request drops before its session exists, as often
+    as scripted (and, when gated, only once the check lets it); every other launch is admitted and completes."""
+    transport = "gateway"
+
+    class Drop(Exception):
+        pass
+
+    def __init__(self, drops, gates=None):
+        self.drops, self.gates = dict(drops), gates or {}
+        self.launches, self.dropped = {}, {}  # request -> monotonic times
+
+    @staticmethod
+    def disconnected(exc):
+        return isinstance(exc, DroppingGateway.Drop)
+
+    def start(self, job_id, prompt, resume, persist):
+        self.launches.setdefault(prompt, []).append(time.monotonic())
+        if self.drops.get(prompt, 0) > 0:
+            self.drops[prompt] -= 1
+            if prompt in self.gates:
+                assert self.gates[prompt].wait(20)
+            self.dropped.setdefault(prompt, []).append(time.monotonic())
+            raise self.Drop()
+        persist(native_session_id="synthetic-" + job_id, submission_text=prompt)
+        persist(admission_id="admission-" + job_id, submission_text=None)
+
+    def settled(self, job):
+        return True
+
+    def outcome(self, job):
+        return Outcome(0, "synthetic done", "", job.native_session_id)
+
+    def stop(self, job):
+        return True
+
+
+def dropping_board(agent, max_concurrent=3):
+    tasks = SimpleNamespace(max_concurrent=max_concurrent, run_budget_s=600, result_chars=2000)
+    return jobs.JobBoard(MemoryHistory(), agent, tasks, time.time, lambda job: (job.request, None),
+                         lambda job, session_id: None, lambda text: text)
+
+
+def until(predicate, what, timeout=30):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.02)
+    raise AssertionError("timed out: " + what)
+
+
+def dropped_launch_waits_alone():
+    """ADR 0012 independent dispatch: a job waiting to be launched again after a gateway drop holds no slot and
+    delays no other job, even with one worker."""
+    from unittest.mock import patch
+    agent = DroppingGateway({"dropping": 99})
+    board = dropping_board(agent, max_concurrent=1)
+    with patch.object(jobs, "RELAUNCH_DELAYS_S", (0.2, 6.0)):
+        dropping, _ = board.submit("synthetic", "conv-a", "vs-a", 1, "del-a", "dropping")
+        until(lambda: len(agent.dropped.get("dropping", ())) == 2, "second drop starts the long wait")
+        asked = time.monotonic()
+        other, _ = board.submit("synthetic", "conv-b", "vs-b", 1, "del-b", "unrelated")
+        until(lambda: board.jobs[other.id].state != "accepted" or time.monotonic() > asked + 8, "unrelated launch")
+        waited = agent.launches.get("unrelated", [time.monotonic()])[0] - asked
+        assert waited < 1.5, f"an unrelated queued job waited {waited:.1f}s behind another job's 6s relaunch wait"
+        until(lambda: board.jobs[other.id].state == "succeeded", "unrelated job completes")
+        assert board.jobs[dropping.id].state == "accepted" and len(agent.launches["dropping"]) == 2, \
+            "the dropped job still waits, holding no slot"
+        until(lambda: board.jobs[dropping.id].state == "failed", "lasting outage fails the job")
+        gap = agent.launches["dropping"][2] - agent.dropped["dropping"][1]
+        assert len(agent.launches["dropping"]) == 3 and gap >= 6.0, (agent.launches, gap)
+        assert not board.relaunch, "a finished job leaves no relaunch state"
+    return {"workers": 1, "unrelated_waited_s": round(waited, 2), "dropping_launches": 3,
+            "last_wait_s": round(gap, 2), "dropping_state": "failed"}
+
+
+def later_drop_keeps_earlier_wait():
+    """Another job's later, shorter relaunch wait never cuts a job's own wait short."""
+    from unittest.mock import patch
+    gate = threading.Event()
+    agent = DroppingGateway({"early": 2, "late": 1}, gates={"late": gate})
+    board = dropping_board(agent)
+    try:
+        with patch.object(jobs, "RELAUNCH_DELAYS_S", (0.2, 4.0)):
+            late, _ = board.submit("synthetic", "conv-late", "vs-late", 1, "del-late", "late")
+            until(lambda: agent.launches.get("late"), "the late job's launch is in flight")
+            early, _ = board.submit("synthetic", "conv-early", "vs-early", 1, "del-early", "early")
+            until(lambda: len(agent.dropped.get("early", ())) == 2, "early job starts its 4s wait")
+            gate.set()  # the other job drops now: its own wait is 0.2s
+            until(lambda: board.jobs[late.id].state == "succeeded", "late job is launched again after 0.2s")
+            until(lambda: board.jobs[early.id].state == "succeeded", "early job is launched again")
+            gap = agent.launches["early"][2] - agent.dropped["early"][1]
+            late_gap = agent.launches["late"][1] - agent.dropped["late"][0]
+            assert gap >= 4.0, f"the 4s wait ended after {gap:.2f}s, cut short by another job's 0.2s wait"
+            assert late_gap < 1.5, f"the late job's own 0.2s wait took {late_gap:.2f}s"
+            assert [len(agent.launches[k]) for k in ("early", "late")] == [3, 2], agent.launches
+        return {"early_wait_s": round(gap, 2), "late_wait_s": round(late_gap, 2), "early_launches": 3,
+                "late_launches": 2}
+    finally:
+        gate.set()
+
+
+def host_capacity_holds_every_launch():
+    """Process capacity is the host's, not a job's: while it is exhausted the one-second hold stays board-wide, so
+    launch attempts are bounded by the pool per second however long the line is, and the oldest jobs keep their turn."""
+    import errno
+
+    class NoRoom:
+        attempts = []
+
+        def start(self, job_id, prompt, resume):
+            self.attempts.append(prompt)
+            raise OSError(errno.EAGAIN, "synthetic process capacity")
+    agent = NoRoom()
+    board = dropping_board(agent)
+    queued = [board.submit("synthetic", f"conv-{n}", f"vs-{n}", 1, f"del-{n}", f"request-{n:02d}")[0] for n in range(12)]
+    time.sleep(2.5)
+    attempts = list(agent.attempts)
+    for job in queued:
+        board.cancel("synthetic", job.conversation_id, job.id)
+    until(lambda: all(board.jobs[j.id].state == "cancelled" for j in queued), "queued jobs cancel while held")
+    assert set(attempts) == {"request-00", "request-01", "request-02"}, f"only the head of the line is tried: {sorted(set(attempts))}"
+    assert 6 <= len(attempts) <= 9, f"three workers, one pass a second for 2.5s: {len(attempts)} attempts"
+    return {"queued": 12, "workers": 3, "seconds": 2.5, "attempts": len(attempts), "jobs_tried": 3}
+
+
 CHECKS = (desired_yaml_parses_and_bounds_hold, eight_open_three_running_one_call,
           restart_adopts_three_runs_and_keeps_lanes, ten_workers_and_fifo,
           slow_launch_does_not_block_intake_or_controls, temporary_resource_failure_keeps_fifo_request,
           gateway_connection_is_single_flight, failed_launch_and_cancel_during_preparation,
-          worker_thread_exhaustion_recovers)
+          worker_thread_exhaustion_recovers, dropped_launch_waits_alone,
+          later_drop_keeps_earlier_wait, host_capacity_holds_every_launch)
 
 
 def main():
