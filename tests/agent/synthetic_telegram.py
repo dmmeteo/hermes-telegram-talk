@@ -1,26 +1,31 @@
-"""Synthetic stand-in for Hermes' Telegram Bot API calls, for offline report checks. Never contacts Telegram.
+"""Synthetic stand-in for the Bot API behind Talk's status messages, for offline report checks. Never contacts Telegram.
 
-Installed over tools.send_message_tool._send_telegram, the function Hermes' platform sender
-(_send_to_platform) calls for Telegram, and over tools.send_message_senders._telegram_bot, the Bot factory
-Talk edits a status message with. Talk's sender, Hermes' platform routing and its result contract run
-unchanged. A send returns the dicts Hermes' own _send_telegram returns: success with the Bot API message
-id, or "Telegram send failed: <python-telegram-bot error text>". An edit raises python-telegram-bot's error
-text, as Bot.edit_message_text does.
+Installed over hermes_talk.receipts._open, so Talk's own sender builds the real request and maps the real
+answer: a success is the Bot API's message object, a refusal is urllib's HTTPError carrying Telegram's JSON
+error, and a lost connection or a timeout is the exception urllib raises for it. Each call is recorded from
+the request itself (method and token from the URL, fields from the JSON body); a request with any field but
+the text and its address (a parse mode, media, markup) is refused.
 """
-import asyncio
+import io
+import json
 import threading
+import time
+import urllib.error
 
-OUTCOMES = {
-    "timeout": {"error": "Telegram send failed: Timed out"},
-    "refused": {"error": "Telegram send failed: httpx.ConnectError: [Errno 111] Connection refused"},
-    "chat_not_found": {"error": "Telegram send failed: Chat not found"},
-    "bad_gateway": {"error": "Telegram send failed: Bad Gateway"},
-}
-EDIT_ERRORS = {
-    "timeout": "Timed out",
-    "not_modified": "Message is not modified: specified new message content and reply markup are exactly the same",
-    "gone": "Message to edit not found",
-}
+from hermes_talk import receipts
+
+REFUSALS = {"chat_not_found": (400, "Bad Request: chat not found")}
+KINDS = {"sendMessage": "send", "editMessageText": "edit"}
+FIELDS = {"sendMessage": {"chat_id", "text", "message_thread_id"},
+          "editMessageText": {"chat_id", "message_id", "text"}}
+
+
+class Reply(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
 
 
 class SyntheticTelegram:
@@ -35,10 +40,7 @@ class SyntheticTelegram:
             self.calls, self.script = [], list(script)
 
     def install(self):
-        import tools.send_message_senders as senders
-        import tools.send_message_tool as native
-        native._send_telegram = self.send
-        senders._telegram_bot = lambda token: SyntheticBot(self, token)
+        receipts._open = self.open
 
     def sent(self):
         return [c for c in self.calls if c["kind"] == "send" and c["outcome"] == "ok"]
@@ -46,35 +48,32 @@ class SyntheticTelegram:
     def edits(self):
         return [c for c in self.calls if c["kind"] == "edit" and c["outcome"] == "ok"]
 
-    def record(self, call):
+    def open(self, request, timeout):
+        assert request.full_url.startswith(receipts.BOT_API + "/bot"), "only the Bot API is called"
+        token, method = request.full_url[len(receipts.BOT_API) + 4:].rsplit("/", 1)
+        fields = json.loads(request.data)
+        assert set(fields) <= FIELDS[method], f"a status message is plain text only: {sorted(fields)}"
+        call = {"kind": KINDS[method], "token": token, "text": fields.pop("text"), **fields}
+        if call["kind"] == "send":
+            call.update(chat_id=str(call["chat_id"]), thread_id=call.pop("message_thread_id", None), message_id=None)
+        else:
+            call["message_id"] = str(call["message_id"])
         with self.lock:
-            call["outcome"] = self.script.pop(0) if self.script else "ok"
+            call["outcome"] = outcome = self.script.pop(0) if self.script else "ok"
             self.calls.append(call)
+            number = len(self.calls)
         if self.on_call:
             self.on_call(call)
-        return call
-
-    async def send(self, token, chat_id, message, media_files=None, thread_id=None, disable_link_previews=False,
-                   force_document=False):
-        call = self.record({"kind": "send", "token": token, "chat_id": chat_id, "thread_id": thread_id,
-                            "text": message, "media": [path for path, _ in media_files or []], "message_id": None})
-        if call["outcome"] == "hang":
-            await asyncio.sleep(3600)
-        if call["outcome"] in OUTCOMES:
-            return dict(OUTCOMES[call["outcome"]])
-        call["message_id"] = str(4000 + len(self.calls))
-        return {"success": True, "platform": "telegram", "chat_id": chat_id, "message_id": call["message_id"]}
-
-
-class SyntheticBot:
-    def __init__(self, telegram, token):
-        self.telegram, self.token = telegram, token
-
-    async def edit_message_text(self, chat_id, message_id, text):
-        call = self.telegram.record({"kind": "edit", "token": self.token, "chat_id": chat_id,
-                                     "message_id": str(message_id), "text": text})
-        if call["outcome"] == "hang":
-            await asyncio.sleep(3600)
-        if call["outcome"] in EDIT_ERRORS:
-            raise RuntimeError(EDIT_ERRORS[call["outcome"]])
-        return True
+        if outcome == "hang":
+            time.sleep(timeout)
+        if outcome in ("hang", "timeout"):
+            raise TimeoutError("timed out")
+        if outcome == "refused":
+            raise urllib.error.URLError(ConnectionRefusedError(111, "Connection refused"))
+        if outcome in REFUSALS:
+            status, description = REFUSALS[outcome]
+            body = json.dumps({"ok": False, "error_code": status, "description": description}).encode()
+            raise urllib.error.HTTPError(request.full_url, status, "refused", {}, io.BytesIO(body))
+        if call["kind"] == "send":
+            call["message_id"] = str(4000 + number)
+        return Reply(json.dumps({"ok": True, "result": {"message_id": int(call["message_id"])}}).encode())

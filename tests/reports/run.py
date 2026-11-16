@@ -2,17 +2,14 @@
 """Focused regression for Telegram task status messages (hermes_talk/receipts.py), offline and without Hermes.
 
   python3 tests/reports/run.py               prints TALK_REPORTS_OK
-  HERMES_PYTHON tests/reports/run.py --host  also edits through Hermes' real Bot factory and python-telegram-bot
 
 One message per task, created once and then edited: its text is a status mark and a short English title,
-never the result. The real ReportDesk and TelegramSender run against an in-memory SessionDB stand-in, a
-scripted sender, and a synthetic Hermes sender module (tools.send_message_tool / tools.send_message_senders)
-that never contacts Telegram. With --host, under a Hermes runtime that has python-telegram-bot, the real
-tools.send_message_senders._telegram_bot Bot serializes editMessageText into a recording transport and maps
-Telegram's answers to its own errors; nothing leaves the process.
+never the result. The real ReportDesk runs against an in-memory SessionDB stand-in and a scripted sender, and
+the real TelegramSender against a local fake Bot API over real sockets. Nothing contacts Telegram.
 """
-import asyncio
+import http.server
 import json
+import os
 import sys
 import threading
 import time
@@ -465,91 +462,113 @@ def binding_and_since():
             "unbound": "the scope's own private chat"}
 
 
-def install_synthetic_hermes(record, edit_error=None):
-    """Synthetic tools.send_message_tool / tools.send_message_senders / gateway.config modules."""
-    tools = types.ModuleType("tools")
-    tool = types.ModuleType("tools.send_message_tool")
-    senders = types.ModuleType("tools.send_message_senders")
-    gateway = types.ModuleType("gateway")
-    config = types.ModuleType("gateway.config")
+class FakeBotApi:
+    """A local stand-in for api.telegram.org: answers each request from `replies` (default: the sent message),
+    records what it was asked."""
 
-    class Platform:
-        TELEGRAM = "telegram"
+    def __init__(self):
+        outer = self
+        self.replies, self.seen = [], []
 
-    class PlatformConfig:
-        def __init__(self, enabled, token):
-            self.enabled, self.token = enabled, token
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
+                outer.seen.append((self.path, body))
+                reply = outer.replies.pop(0) if outer.replies else (200, {"ok": True, "result": {"message_id": 8001}})
+                if reply == "hang":
+                    time.sleep(3)
+                    return
+                raw = reply[1] if isinstance(reply[1], bytes) else json.dumps(reply[1]).encode()
+                self.send_response(reply[0])
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
 
-    async def send_to_platform(platform, pconfig, chat_id, message, thread_id=None, media_files=None,
-                               force_document=False):
-        record.append({"kind": "send", "token": pconfig.token, "chat_id": chat_id, "thread_id": thread_id,
-                       "text": message, "media": media_files})
-        return {"success": True, "message_id": "8001"}
+            def log_message(self, *args):
+                pass
 
-    class Bot:
-        def __init__(self, token):
-            self.token = token
+        self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
 
-        async def edit_message_text(self, chat_id, message_id, text):
-            record.append({"kind": "edit", "token": self.token, "chat_id": chat_id, "message_id": message_id,
-                           "text": text})
-            if edit_error == "hang":
-                await asyncio.sleep(3600)
-            if edit_error:
-                raise RuntimeError(edit_error)
-
-    tool._send_to_platform = send_to_platform
-    senders._telegram_bot = Bot
-    config.Platform, config.PlatformConfig = Platform, PlatformConfig
-    sys.modules.update({"tools": tools, "tools.send_message_tool": tool, "tools.send_message_senders": senders,
-                        "gateway": gateway, "gateway.config": config})
+    def close(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
 
 
-SYNTHETIC_MODULES = ("tools", "tools.send_message_tool", "tools.send_message_senders", "gateway", "gateway.config")
+def refusal(status, description, **more):
+    return status, {"ok": False, "error_code": status, "description": description, **more}
 
 
 def telegram_sender_contract():
-    saved = {name: sys.modules.get(name) for name in SYNTHETIC_MODULES}
+    """The real TelegramSender over real sockets against a local fake Bot API; nothing from Hermes is imported."""
+    api, real_api = FakeBotApi(), receipts.BOT_API
+    receipts.BOT_API = api.base
+    os.environ.pop("TELEGRAM_PROXY", None)
+    hermes = {name for name in sys.modules if name.split(".")[0] in ("tools", "gateway", "plugins", "telegram")}
     try:
-        return sender_contract_offline()
+        sender = receipts.TelegramSender(TOKEN, timeout=1.0)
+        dest = receipts.Destination.private(USER, BOT)
+        sent = sender.send(dest, "🕓 Check *build*")
+        edited = sender.edit(dest, "8001", "✅ Check *build*")
+        assert sent == edited == {"success": True, "message_id": "8001"}, (sent, edited)
+        assert api.seen == [(f"/bot{TOKEN}/sendMessage", {"chat_id": USER, "text": "🕓 Check *build*"}),
+                            (f"/bot{TOKEN}/editMessageText", {"chat_id": USER, "message_id": 8001,
+                                                               "text": "✅ Check *build*"})], api.seen
+        foreign = receipts.Destination.private(USER, "654321")
+        refusals = (sender.send(foreign, "x"), sender.edit(foreign, "8001", "x"))
+        assert len(api.seen) == 2 and all(receipts.classify(r)[0] == "failed" for r in refusals), refusals
+        assert receipts.classify_edit(refusals[1]) == receipts.EDIT_FINAL
+
+        def topic(thread_id, *replies):
+            del api.seen[:]
+            api.replies[:] = replies
+            result = sender.send(receipts.Destination("named", -1009876543210, thread_id, "ops", BOT), "x")
+            return result, [body.get("message_thread_id") for _, body in api.seen]
+        assert topic(17)[1] == [17] and topic(1)[1] == [None], "a topic is addressed; General (1) is the chat itself"
+        fallback = topic(17, refusal(400, "Bad Request: message thread not found"))
+        assert fallback[0].get("success") and fallback[1] == [17, None], fallback
+
+        def first_send(*reply):
+            api.replies[:] = [reply if len(reply) > 1 else reply[0]]
+            result = sender.send(dest, "x")
+            return receipts.classify(result)[0], receipts.retry_after(result.get("error")), result
+        flood = refusal(429, "Too Many Requests: retry after 7", parameters={"retry_after": 7})
+        assert first_send(*flood)[:2] == (receipts.PENDING, 7.0)
+        for description in ("Bad Request: chat not found", "Forbidden: bot was blocked by the user",
+                            "Bad Request: message is too long"):
+            assert first_send(*refusal(description.startswith("F") and 403 or 400, description))[0] == receipts.FAILED
+        for lost in ((502, b"<html>Bad Gateway</html>"), (200, b"not json"), refusal(401, "Unauthorized"), "hang"):
+            state, _, result = first_send(*lost) if lost != "hang" else first_send(lost)
+            assert state == receipts.UNCERTAIN and TOKEN not in json.dumps(result), (lost, result)
+        assert "timed out after 1s; it may still have been delivered" in result["error"], result
+
+        def edit(*reply):
+            api.replies[:] = [reply if len(reply) > 1 else reply[0]]
+            return receipts.classify_edit(sender.edit(dest, "8001", "x"))
+        assert edit(*refusal(400, "Bad Request: message is not modified: same content")) == receipts.EDIT_DONE
+        assert edit(*refusal(400, "Bad Request: message to edit not found")) == receipts.EDIT_FINAL
+        assert edit(*refusal(400, "Bad Request: message can't be edited")) == receipts.EDIT_FINAL
+        assert edit(*flood) == edit(502, b"x") == edit("hang") == receipts.EDIT_RETRY
+
+        os.environ["TELEGRAM_PROXY"] = "http://127.0.0.1:9"  # nothing listens there
+        del api.seen[:]
+        blocked = sender.send(dest, "x")
+        del os.environ["TELEGRAM_PROXY"]
+        assert not api.seen and receipts.classify(blocked)[0] == receipts.PENDING, "no request goes around the proxy"
+
+        api.close()  # nothing listens now: a refused connection proves nothing was sent
+        gone = sender.send(dest, "x")
+        assert receipts.classify(gone)[0] == receipts.PENDING and TOKEN not in json.dumps(gone), gone
+        assert receipts.classify_edit(sender.edit(dest, "8001", "x")) == receipts.EDIT_RETRY
+        loaded = {name for name in sys.modules if name.split(".")[0] in ("tools", "gateway", "plugins", "telegram")}
+        assert loaded == hermes, f"the sender imported Hermes or python-telegram-bot modules: {sorted(loaded - hermes)}"
     finally:
-        for name, module in saved.items():
-            if module is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = module
-
-
-def sender_contract_offline():
-    """The real TelegramSender over synthetic Hermes modules; a Hermes runtime's own modules are never reached."""
-    record = []
-    install_synthetic_hermes(record)
-    sender = receipts.TelegramSender(TOKEN, timeout=1.0)
-    dest = receipts.Destination.private(USER, BOT)
-    sent = sender.send(dest, "🕓 Check build")
-    edited = sender.edit(dest, "8001", "✅ Check build")
-    assert sent == {"success": True, "message_id": "8001"} and edited["success"], (sent, edited)
-    assert record[0]["media"] in (None, []) and record[0]["token"] == TOKEN and record[0]["chat_id"] == str(USER)
-    assert record[1] == {"kind": "edit", "token": TOKEN, "chat_id": USER, "message_id": 8001,
-                         "text": "✅ Check build"}, record[1]
-    foreign = receipts.Destination.private(USER, "654321")
-    refusals = (sender.send(foreign, "x"), sender.edit(foreign, "8001", "x"))
-    assert len(record) == 2 and all(receipts.classify(r)[0] == "failed" for r in refusals), refusals
-    assert receipts.classify_edit(refusals[1]) == receipts.EDIT_FINAL
-    for error, expected in (("Message is not modified: same content", receipts.EDIT_DONE),
-                            ("Message to edit not found", receipts.EDIT_FINAL),
-                            ("Timed out", receipts.EDIT_RETRY)):
-        install_synthetic_hermes(record, error)
-        assert receipts.classify_edit(sender.edit(dest, "8001", "x")) == expected, error
-    install_synthetic_hermes(record, "hang")
-    started = time.monotonic()
-    hung = sender.edit(dest, "8001", "x")
-    assert receipts.classify_edit(hung) == receipts.EDIT_RETRY and time.monotonic() - started < 3, hung
-    sys.modules["tools.send_message_senders"] = None  # import fails as if Hermes were absent
-    missing = sender.edit(dest, "8001", "x")
-    assert "not installed" in missing["error"] and receipts.classify_edit(missing) == receipts.EDIT_FINAL
-    return {"send": "Hermes _send_to_platform, no media", "edit": "Hermes _telegram_bot().edit_message_text",
-            "foreign_bot": "refused before any call", "edit_timeout": "retry"}
+        receipts.BOT_API = real_api
+        api.close()
+    return {"send": "Bot API sendMessage, plain text, no media", "edit": "Bot API editMessageText, plain text",
+            "foreign_bot": "refused before any call", "deleted_topic": "sent to the chat itself",
+            "refused_connection": "retried", "telegram_proxy": "honored", "lost_reply_or_timeout": "uncertain, never resent", "hermes_imports": 0}
 
 
 def no_detail_in_messages():
@@ -564,54 +583,6 @@ def no_detail_in_messages():
     return {"max_text_chars": max(len(c["text"]) for c in sender.calls), "attachments": 0}
 
 
-def real_telegram_edit():
-    from telegram.request import BaseRequest
-    import tools.send_message_senders as senders
-
-    class Recording(BaseRequest):
-        def __init__(self, replies):
-            self.replies, self.seen = list(replies), []
-
-        @property
-        def read_timeout(self):
-            return 1.0
-
-        async def initialize(self):
-            pass
-
-        async def shutdown(self):
-            pass
-
-        async def do_request(self, url, method, request_data=None, read_timeout=None, write_timeout=None,
-                             connect_timeout=None, pool_timeout=None):
-            self.seen.append((url.rsplit("/", 1)[-1], dict(request_data.parameters) if request_data else {}))
-            status, body = self.replies.pop(0)
-            return status, json.dumps(body).encode()
-
-    message = {"message_id": 8001, "date": 0, "chat": {"id": USER, "type": "private"}, "text": "✅ Check build"}
-    refusal = lambda text: (400, {"ok": False, "error_code": 400, "description": "Bad Request: " + text})
-    transport = Recording([(200, {"ok": True, "result": message}),
-                           refusal("message is not modified: specified new message content and reply markup are "
-                                   "exactly the same as a current content and reply markup of the message"),
-                           refusal("message to edit not found")])
-    real_factory = senders._telegram_bot
-    bot = real_factory(TOKEN)
-    bot._request = (transport, transport)
-    senders._telegram_bot = lambda token: bot
-    try:
-        sender = receipts.TelegramSender(TOKEN, timeout=5.0)
-        dest = receipts.Destination.private(USER, BOT)
-        outcomes = [receipts.classify_edit(sender.edit(dest, "8001", "✅ Check build")) for _ in range(3)]
-    finally:
-        senders._telegram_bot = real_factory
-    assert transport.seen[0] == ("editMessageText", {"chat_id": USER, "message_id": 8001, "text": "✅ Check build"}), \
-        transport.seen
-    assert outcomes == [receipts.EDIT_DONE, receipts.EDIT_DONE, receipts.EDIT_FINAL], outcomes
-    import telegram
-    return {"python_telegram_bot": telegram.__version__, "factory": real_factory.__module__ + "._telegram_bot",
-            "request": transport.seen[0], "answers": ["ok", "not modified -> done", "not found -> final"]}
-
-
 CHECKS = (titles, other_language_named_in_english, every_status_survives_naming, naming_survives_a_restart, one_message_lifecycle, coalesced_transitions, uncertain_create_never_resent,
           refused_create_retries_then_fails, edits_converge, restart_recovery, binding_and_since,
           telegram_sender_contract, no_detail_in_messages)
@@ -619,8 +590,7 @@ CHECKS = (titles, other_language_named_in_english, every_status_survives_naming,
 
 def main():
     failures, evidence = 0, {}
-    checks = ((real_telegram_edit,) if "--host" in sys.argv[1:] else ()) + CHECKS
-    for check in checks:
+    for check in CHECKS:
         try:
             evidence[check.__name__] = check()
             print(f"PASS [reports] {check.__name__}", flush=True)
@@ -630,7 +600,7 @@ def main():
             print(f"FAIL [reports] {check.__name__}: {type(exc).__name__}: {exc}\n{traceback.format_exc()[-1500:]}",
                   flush=True)
     print(json.dumps(evidence, indent=1, default=str, ensure_ascii=False))
-    print(f"{len(checks) - failures}/{len(checks)} report checks passed")
+    print(f"{len(CHECKS) - failures}/{len(CHECKS)} report checks passed")
     print("TALK_REPORTS_" + ("FAILED" if failures else "OK"))
     return 1 if failures else 0
 

@@ -1,4 +1,4 @@
-"""One live Telegram status message per Hermes task, sent once and then edited through Hermes' own sender.
+"""One live Telegram status message per Hermes task, sent once and then edited through the Bot API.
 
 The message is a status mark and a few English words naming the task: queued, running, completed, failed
 or cancelled. It never carries the result, which stays in the native task session and reaches the user by
@@ -20,13 +20,15 @@ that kept failing for a temporary reason is held too, and a restart tries it aga
 The default destination is the private chat between the authenticated user and the bot whose signed
 initData opened the call. A configured named destination replaces it when the user asked for it explicitly.
 """
-import asyncio
 import json
 import os
 import re
 import secrets
+import socket
 import threading
 import time
+import urllib.error
+import urllib.request
 from dataclasses import asdict, dataclass, field, fields, replace
 
 from . import jobs
@@ -42,13 +44,14 @@ MARKS = {"queued": "🕓", "running": "⏳", "blocked": "❓", "completed": "✅
 REPORT_PREFIX = "hermes_talk:report:"
 SINCE_KEY = "hermes_talk:reports_since"
 SEND_TIMEOUT_S = 30.0
+BOT_API = "https://api.telegram.org"
+MAX_REPLY_BYTES = 65536
 NOT_SENT_RETRYABLE = ("connecterror", "connection refused", "too many requests", "retry after", "flood control")
 NOT_SENT_FINAL = ("chat not found", "bot was blocked", "forbidden", "user is deactivated", "bad request",
-                  "can't initiate conversation", "not installed", "not configured", "no deliverable",
-                  "unknown platform", "message is too long")
+                  "can't initiate conversation", "not configured", "message is too long")
 EDIT_DONE, EDIT_RETRY, EDIT_FINAL = "done", "retry", "final"
 EDIT_REFUSED = ("message to edit not found", "message can't be edited", "chat not found", "bot was blocked",
-                "forbidden", "user is deactivated", "bad request", "not installed", "not configured")
+                "forbidden", "user is deactivated", "bad request", "not configured")
 
 TITLE_LINE = re.compile(r"TITLE\s*:\s*(.*)")
 TITLE_CHARS = 60  # Conduit VoiceBackgroundJobs.maximumTitleCharacters
@@ -59,7 +62,7 @@ TITLE_INSTRUCTIONS = (
     "You name a background task for its one-line status message. The request below is what the user asked an "
     "assistant to do, possibly in another language. Reply with a JSON object {\"title\": \"...\"}: one short plain "
     f"English sentence of at most {TITLE_WORDS} words saying what the task does. No quotes, markup, emoji or numbers.")
-# Markup that Hermes' formatter (first send) and a plain-text edit would render differently.
+# Markup characters stay out of a title: the message is plain text, sent and edited without a parse mode.
 MARKUP = re.compile(r"[*_`\[\]~|<>#\\]")
 DIRECTIVE = re.compile(r"(?im)^\s*report\s+to\s*:\s*(.+?)\s*$")
 RETRY_AFTER = re.compile(r"(?i)retry (?:in|after) (\d+(?:\.\d+)?)")
@@ -209,7 +212,7 @@ def load(raw):
 
 
 def classify(result):
-    """(state, message id, error) of a first send, from Hermes' sender result dict."""
+    """(state, message id, error) of a first send, from the sender's result dict."""
     if isinstance(result, dict) and result.get("success"):
         return SENT, str(result.get("message_id") or ""), "; ".join(result.get("warnings") or [])[:300]
     error = str((result or {}).get("error") if isinstance(result, dict) else result or "no result")[:300]
@@ -236,10 +239,24 @@ def classify_edit(result):
     return EDIT_FINAL if any(m in lowered for m in EDIT_REFUSED) else EDIT_RETRY
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    # The token is part of the URL; a redirect must not carry the request anywhere else.
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def _open(request, timeout):
+    """One Bot API request. TELEGRAM_PROXY, when set, is its HTTP(S) proxy, as for Hermes' own Telegram calls."""
+    proxy = os.environ.get("TELEGRAM_PROXY")
+    handlers = [urllib.request.ProxyHandler({"http": proxy, "https": proxy})] if proxy else []
+    return urllib.request.build_opener(_NoRedirect, *handlers).open(request, timeout=timeout)
+
+
 class TelegramSender:
-    """Hermes' native Telegram calls with this Talk server's bot token, which Talk already holds and never
-    stores: the platform sender cron delivery uses (tools.send_message_tool._send_to_platform) to create the
-    message, and the same module's Bot factory (tools.send_message_senders._telegram_bot) to edit it."""
+    """The two Bot API calls a status message needs, sendMessage and editMessageText, as plain text with this
+    Talk server's bot token, which Talk already holds and never stores. Talk makes them itself and imports
+    nothing from Hermes, so a core update cannot break them (docs/adr/0013-status-message-bot-api-client.md).
+    An error names Telegram's own description or the exception's type, never the request URL."""
 
     def __init__(self, bot_token, timeout=SEND_TIMEOUT_S):
         self.token = bot_token
@@ -250,47 +267,48 @@ class TelegramSender:
             return {"error": "not configured: the report is bound to another bot than this server's"}
         return None
 
+    def _call(self, method, fields):
+        request = urllib.request.Request(f"{BOT_API}/bot{self.token}/{method}", data=json.dumps(fields).encode(),
+                                         headers={"Content-Type": "application/json"})
+        try:
+            try:
+                with _open(request, self.timeout) as response:
+                    reply = json.loads(response.read(MAX_REPLY_BYTES))
+            except urllib.error.HTTPError as refusal:
+                with refusal:
+                    try:
+                        description = json.loads(refusal.read(MAX_REPLY_BYTES))["description"]
+                    except Exception:
+                        description = f"HTTP {refusal.code}"
+                return {"error": f"Telegram {method} failed: {description}"}
+            return {"success": True, "message_id": str(reply["result"]["message_id"])}
+        except urllib.error.URLError as exc:
+            reason = exc.reason
+            if isinstance(reason, (ConnectionRefusedError, socket.gaierror)):  # no connection: nothing was sent
+                return {"error": f"Telegram {method} failed: ConnectError: {type(reason).__name__}"}
+            failure = reason if isinstance(reason, Exception) else exc
+        except Exception as exc:
+            failure = exc
+        if isinstance(failure, TimeoutError):
+            return {"error": f"{method} timed out after {self.timeout:.0f}s; it may still have been delivered"}
+        return {"error": f"{method} raised {type(failure).__name__}; it may have been delivered"}
+
     def send(self, destination, text):
         refused = self._foreign(destination)
         if refused:
             return refused
-        try:
-            from gateway.config import Platform, PlatformConfig
-            from tools.send_message_tool import _send_to_platform
-        except Exception as exc:
-            return {"error": f"Hermes platform sender is not installed ({type(exc).__name__})"}
-        thread = str(destination.thread_id) if destination.thread_id is not None else None
-
-        async def run():
-            return await asyncio.wait_for(_send_to_platform(
-                Platform.TELEGRAM, PlatformConfig(enabled=True, token=self.token), str(destination.chat_id), text,
-                thread_id=thread), timeout=self.timeout)
-        try:
-            return asyncio.run(run())
-        except TimeoutError:
-            return {"error": f"send timed out after {self.timeout:.0f}s; it may still have been delivered"}
-        except Exception as exc:
-            return {"error": f"send raised {type(exc).__name__}; it may have been delivered"}
+        fields = {"chat_id": destination.chat_id, "text": text}
+        # A forum's General topic is thread 1 inbound, but the Bot API refuses message_thread_id=1.
+        if destination.thread_id not in (None, 1):
+            result = self._call("sendMessage", {**fields, "message_thread_id": destination.thread_id})
+            if "thread not found" not in str(result.get("error")).lower():
+                return result
+            # Telegram refused a deleted topic, so nothing was sent: the chat itself gets the message.
+        return self._call("sendMessage", fields)
 
     def edit(self, destination, message_id, text):
-        refused = self._foreign(destination)
-        if refused:
-            return refused
-        try:
-            from tools.send_message_senders import _telegram_bot
-        except Exception as exc:
-            return {"error": f"Hermes Telegram sender is not installed ({type(exc).__name__})"}
-
-        async def run():
-            await asyncio.wait_for(_telegram_bot(self.token).edit_message_text(
-                chat_id=destination.chat_id, message_id=int(message_id), text=text), timeout=self.timeout)
-            return {"success": True, "message_id": str(message_id)}
-        try:
-            return asyncio.run(run())
-        except TimeoutError:
-            return {"error": f"edit timed out after {self.timeout:.0f}s"}
-        except Exception as exc:
-            return {"error": f"Telegram edit failed: {exc}"}
+        return self._foreign(destination) or self._call(
+            "editMessageText", {"chat_id": destination.chat_id, "message_id": int(message_id), "text": text})
 
 
 class ReportDesk:

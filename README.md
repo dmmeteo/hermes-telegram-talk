@@ -371,10 +371,10 @@ that user (`REPORT TO: <name>` at the end of the delegation). It then goes only 
 id; any other name, a raw chat id or "home" is refused before the task starts. A bare platform target (a home channel)
 is refused in the config.
 
-Sending uses Hermes' own platform sender, `tools.send_message_tool._send_to_platform`, the call cron delivery makes
-(`cron/scheduler_delivery.py`), with a Telegram platform config holding the Talk bot token the server already has.
-Edits use the same module's Bot factory (`tools.send_message_senders._telegram_bot`, which honors `TELEGRAM_PROXY`)
-and `editMessageText`. Talk stores no token.
+Talk makes the two Bot API calls itself (`sendMessage`, then `editMessageText`), as plain text over `urllib`, with
+the Talk bot token the server already has. It imports nothing from Hermes for them, so a core update cannot break
+status messages (see `docs/adr/0013-status-message-bot-api-client.md`). An HTTP(S) proxy in `TELEGRAM_PROXY` is used. Talk
+stores no token, and a sender error never contains the request URL.
 
 Report states are pending, sending, sent, failed and uncertain, separate from the job state and the voice receipt.
 The record (title, destination, status to show) is stored before the send. The only send is claimed (pending to

@@ -4,11 +4,12 @@
   python3 tests/logsecrets/run.py [--require-host]    prints TALK_LOG_SECRETS_OK
 
 Runs server.main() up to the point where it would serve (so the real logging setup is the one under test), then
-sends and edits through the real Hermes Telegram sender (python-telegram-bot, httpx) against a local fake Bot API
+sends and edits through Talk's own Bot API sender (hermes_talk/receipts.py, urllib) against a local fake Bot API
 that answers with success, 401, 500 and a refused connection, and through a real httpx request that fails with
 httpx.HTTPStatusError (whose message carries the full request URL). The bot token is synthetic. Every byte written
 to the process' stderr (what journald keeps) and every error Talk stores is searched for it.
-Needs a Hermes runtime with python-telegram-bot; without one it is SKIPPED, and --require-host makes that a failure.
+Needs a Hermes runtime (httpx and the modules server.py loads); without one it is SKIPPED, and --require-host
+makes that a failure.
 """
 import glob
 import http.server
@@ -32,11 +33,11 @@ TOKEN = f"{BOT}:TEST-notreal-0123456789abcdefGHIJKLMNOP"  # a real token's shape
 MESSAGE = {"message_id": 8001, "date": 0, "chat": {"id": USER, "type": "private"}, "text": "hello"}
 
 
-PROBE = "import telegram, tools.send_message_senders as s; s._telegram_bot"
+PROBE = "import httpx, hermes_cli"
 
 
 def hermes_python():
-    """HERMES_TALK_HERMES_PYTHON, else the newest-listed runtime that has python-telegram-bot and the sender."""
+    """HERMES_TALK_HERMES_PYTHON, else the newest-listed Hermes runtime."""
     explicit = os.environ.get("HERMES_TALK_HERMES_PYTHON")
     if explicit:
         return explicit
@@ -74,7 +75,7 @@ class FakeBotApi:
 
         self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.port = self.httpd.server_address[1]
-        self.base = f"http://127.0.0.1:{self.port}/bot"
+        self.base = f"http://127.0.0.1:{self.port}"
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
 
     def close(self):
@@ -125,14 +126,12 @@ def main():
         runtime = hermes_python()
         if runtime and Path(runtime).resolve() != Path(sys.executable).resolve():
             os.execv(runtime, [runtime, *sys.argv])
-        print("SKIPPED: no Hermes runtime with python-telegram-bot")
+        print("SKIPPED: no Hermes runtime")
         return 1 if "--require-host" in sys.argv[1:] else 0
     sys.path.insert(0, str(ROOT))
     os.environ["HERMES_HOME"] = tempfile.mkdtemp(prefix="talk-logsecrets-")
     os.environ.pop("TELEGRAM_PROXY", None)
     import httpx
-    import telegram as ptb
-    import tools.send_message_senders as senders
     from hermes_talk import receipts
     from hermes_talk.history import MemoryHistory
     from hermes_talk.talk import redact
@@ -142,18 +141,7 @@ def main():
 
     api = FakeBotApi()
     stderr = io.StringIO()
-    real_bot, real_factory = ptb.Bot, senders._telegram_bot
-
-    class LocalBot(real_bot):
-        def __init__(self, token, *args, **kwargs):
-            super().__init__(token, *args, base_url=api.base, **kwargs)
-
-    class RaisingBot(LocalBot):
-        """A bot whose edit fails the way a raw httpx caller's does: raise_for_status() on the real response."""
-
-        async def edit_message_text(self, *args, **kwargs):
-            async with httpx.AsyncClient() as client:
-                (await client.post(f"{api.base}{self.token}/editMessageText", json={})).raise_for_status()
+    real_api, receipts.BOT_API = receipts.BOT_API, api.base
 
     destination = receipts.Destination.private(USER, BOT)
     sender = receipts.TelegramSender(TOKEN, timeout=10.0)
@@ -182,35 +170,38 @@ def main():
     @check
     def refused_connection_carries_no_token():
         api.mode = "ok"
-        port, api.base = api.port, "http://127.0.0.1:9/bot"  # nothing listens on the discard port
+        receipts.BOT_API = "http://127.0.0.1:9"  # nothing listens on the discard port
         try:
             results = [sender.send(destination, "hello"), sender.edit(destination, "8001", "again")]
         finally:
-            api.base = f"http://127.0.0.1:{port}/bot"
+            receipts.BOT_API = api.base
         assert all("error" in r for r in results), results
         check_no_token("connection refused", [("results", json.dumps(results))], stderr, api, arrived=False)
 
     @check
     def an_exception_that_embeds_the_request_url_is_not_stored():
-        """httpx.HTTPStatusError's message is the full URL; the sender's edit error is stored on the report."""
+        """httpx.HTTPStatusError's message is the full URL; a sender's edit error is stored on the report."""
         history, tracker = MemoryHistory(), []
 
         class Spy(receipts.TelegramSender):
-            def edit(self, *args):
-                tracker.append(super().edit(*args))
+            """A sender that reports a failed edit the way a raw httpx caller would: with the exception's text."""
+
+            def edit(self, destination, message_id, text):
+                try:
+                    httpx.post(f"{api.base}/bot{self.token}/editMessageText", json={}).raise_for_status()
+                    tracker.append({"success": True, "message_id": message_id})
+                except httpx.HTTPStatusError as exc:
+                    tracker.append({"error": f"Telegram edit failed: {exc}"})
                 return tracker[-1]
 
         desk = reports.desk_for(history, Spy(TOKEN, timeout=10.0), redact=redact)
         j = reports.walk(desk, reports.job(report_to=asdict(destination)), reports.jobs.ACCEPTED)  # the status message is sent normally
-        api.mode, ptb.Bot = "server_error", RaisingBot
-        try:
-            reports.walk(desk, j, reports.jobs.RUNNING, settle_each=False)  # its first edit then fails
-            deadline = time.monotonic() + 10
-            while not tracker and time.monotonic() < deadline:
-                time.sleep(0.05)
-            desk.wait_settled(j.id, 2)
-        finally:
-            ptb.Bot = LocalBot
+        api.mode = "server_error"
+        reports.walk(desk, j, reports.jobs.RUNNING, settle_each=False)  # its first edit then fails
+        deadline = time.monotonic() + 10
+        while not tracker and time.monotonic() < deadline:
+            time.sleep(0.05)
+        desk.wait_settled(j.id, 2)
         assert tracker and TOKEN in tracker[0].get("error", ""), "the edit error must embed the request URL"
         stored = json.dumps(history.meta, sort_keys=True)
         check_no_token("embedded url", [("stored report", stored)], stderr, api)
@@ -222,18 +213,17 @@ def main():
 
     @check
     def any_logger_message_or_traceback_is_scrubbed():
-        """Hermes' sender, python-telegram-bot or Talk may log an exception whose message is the request URL."""
+        """A library or Talk may log an exception whose message is the request URL."""
         api.mode = "server_error"
         try:
-            httpx.post(f"{api.base}{TOKEN}/getMe").raise_for_status()
+            httpx.post(f"{api.base}/bot{TOKEN}/getMe").raise_for_status()
         except httpx.HTTPStatusError as exc:
-            for name in ("tools.send_message_senders", "telegram.ext", "tg-voice", "some.other.library"):
+            for name in ("plugins.platforms.telegram.standalone", "telegram.ext", "tg-voice", "some.other.library"):
                 logging.getLogger(name).warning("send failed (%s)", exc)
                 logging.getLogger(name).error("with traceback", exc_info=True)
         check_no_token("other loggers", [], stderr, api)
         assert "[bot token]" in stderr.getvalue()[MARK[0]:], "the scrubbed lines are still logged"
 
-    ptb.Bot = LocalBot
     failures = 0
     try:
         start_talk_logging(stderr)
@@ -248,7 +238,7 @@ def main():
                 print(f"FAIL [logsecrets] {name}: {type(exc).__name__}: {exc}\n{traceback.format_exc()[-800:]}",
                       flush=True)
     finally:
-        ptb.Bot, senders._telegram_bot = real_bot, real_factory
+        receipts.BOT_API = real_api
         api.close()
     print(f"{len(checks) - failures}/{len(checks)} log-secret checks passed; "
           f"{len(stderr.getvalue().splitlines())} log lines searched")

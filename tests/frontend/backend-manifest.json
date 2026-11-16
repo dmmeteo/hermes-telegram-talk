@@ -12,7 +12,7 @@
     "hermes_talk/fixtures.py": "8af565185c610c4068492f31ff9d5abe9c43c7a837087f8eef619202eee86b79",
     "hermes_talk/history.py": "87db530e4ced74a6162baff3dbe1101a8c2874e35ec0c4d59d27a145ec1d9851",
     "hermes_talk/jobs.py": "e8b0db9a81e8041ed6f022464e9665d31a24b17262720a8fcd58fafeda1f1b5b",
-    "hermes_talk/receipts.py": "7f5f046cf64ca63ee0205be829ef8246632afeb749af0708093119d9c8228e72",
+    "hermes_talk/receipts.py": "9b4df9e2812749f2dd6c5ff9f6a23caa54cff43428f1f41587ad799403083ed4",
     "hermes_talk/spool.py": "b947b9655ebba380738007be1c35f4c2c3ab3b6757bb4d3a72330bf001128057",
     "hermes_talk/store.py": "4dcb84b9d7a8aec83cb1853cda540c714e10eea38a5eb2ad7caef0576d627f53",
     "hermes_talk/talk.py": "de0e9744b15e5343780758f4f0d9028eed2776f4feffd2846360629fb55543e2",

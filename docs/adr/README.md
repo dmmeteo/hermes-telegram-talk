@@ -12,3 +12,4 @@
 - [0010 Three tasks of one call at once: the conversation's session plus parallel fresh sessions](0010-parallel-tasks-of-one-call.md)
 - [0011 Voice tasks: confirmed T3 work, uncapped waiting requests and two status-message switches](0011-t3-work-and-task-visibility.md)
 - [0012 A configurable mini-task pool with independent dispatch](0012-configurable-mini-task-pool.md)
+- [0013 Status messages use Talk's own Bot API client, not Hermes' sender internals](0013-status-message-bot-api-client.md)

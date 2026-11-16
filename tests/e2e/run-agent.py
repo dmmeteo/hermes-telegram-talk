@@ -1022,8 +1022,7 @@ def telegram_default_receipt(model):
         assert report.state == "sent" and len(sends) == 1 and report.message_id == sends[0]["message_id"], TELEGRAM.calls
         assert claims and claims[0]["title"] == "Check receipt alpha" and claims[0]["destination"]["chat_id"] == fx.USER_ID, \
             "the title and destination were stored before the only send"
-        assert (sends[0]["chat_id"], sends[0]["token"], sends[0]["thread_id"], sends[0]["media"]) == \
-            (str(fx.USER_ID), fx.BOT_TOKEN, None, [])
+        assert (sends[0]["chat_id"], sends[0]["token"], sends[0]["thread_id"]) == (str(fx.USER_ID), fx.BOT_TOKEN, None)
         shown = shown_texts(report.message_id)
         assert shown[0] in ("🕓 Check receipt alpha", "⏳ Check receipt alpha") and shown[-1] == "✅ Check receipt alpha", shown
         edits = [c for c in TELEGRAM.calls if c["kind"] == "edit"]
@@ -1058,7 +1057,7 @@ def telegram_default_receipt(model):
         e.wait(big_body["job"]["id"], conv, vs)
         big = settled_report(e, big_body["job"]["id"])
         assert shown_texts(big.message_id)[-1] == "✅ Build big synthetic result"
-        assert not any(c.get("media") for c in TELEGRAM.calls) and max(len(c["text"]) for c in TELEGRAM.calls) <= 64
+        assert max(len(c["text"]) for c in TELEGRAM.calls) <= 64  # the fixture refuses any field but text and address
         assert not (e.home / "plugin-data" / "hermes-talk" / "reports").exists(), "no result document is written"
         assert len(TELEGRAM.sent()) == 5, "one message per task"
         from hermes_talk import receipts
@@ -1074,8 +1073,7 @@ def telegram_default_receipt(model):
                 "secret": shown_texts(redacted.message_id)[-1], "non_english": named,
                 "large_result": shown_texts(big.message_id)[-1], "sends": len(TELEGRAM.sent()),
                 "edits": len(TELEGRAM.edits()), "other_bot_refused": [r["error"] for r in refused],
-                "transport": "synthetic (tests/agent/synthetic_telegram.py) behind Hermes _send_to_platform and "
-                             "_telegram_bot"}
+                "transport": "synthetic Bot API (tests/agent/synthetic_telegram.py) behind Talk's own sender"}
     finally:
         TELEGRAM.on_call = None
         e.close()
@@ -1094,7 +1092,7 @@ def telegram_alternate_destination(model):
         report = settled_report(e, job["id"])
         sent = TELEGRAM.sent()
         assert report.state == "sent" and len(sent) == 1, sent
-        assert (sent[0]["chat_id"], sent[0]["thread_id"]) == ("-1009876543210", "17"), sent
+        assert (sent[0]["chat_id"], sent[0]["thread_id"]) == ("-1009876543210", 17), sent
         assert {str(c["chat_id"]) for c in TELEGRAM.calls} == {"-1009876543210"}, "every edit goes to the named chat"
         assert shown_texts(report.message_id)[-1] == "✅ Alternate alpha"
         _, here = e.task(conv, vs, "alternate beta\nREPORT TO: this chat", "del_alt2")
