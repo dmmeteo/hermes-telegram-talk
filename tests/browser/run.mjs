@@ -129,6 +129,17 @@ try {
   const colors=await page.evaluate(()=>({listen:getComputedStyle(document.documentElement).getPropertyValue('--listen').trim(),speak:getComputedStyle(document.documentElement).getPropertyValue('--speak').trim()}));
   assert(colors.listen==='#4FC3F7'&&colors.speak==='#FFB74D','configured distinct colors');return colors;
  });
+ await step('retro-meters-follow-real-microphone-and-incoming-energy',async()=>{
+  const meters=()=>page.evaluate(()=>Object.fromEntries([...document.querySelectorAll('.meter')].map(m=>[m.id,{level:Number(m.dataset.level),width:m.getBoundingClientRect().width}])));
+  await page.evaluate(()=>{applyTheme('typesafe');render();});
+  const you=await until(async()=>{const m=await meters();return m['meter-you']?.width>0&&m['meter-you'].level>0&&m;},'real microphone energy fills the human meter');
+  await gain(index,.18);
+  const agent=await until(async()=>{const m=await meters();return m['meter-agent'].level>0&&m;},'real incoming energy fills the assistant meter');
+  await screenshot(page,'mobile-390-retro-meters');await gain(index,0);
+  await until(async()=>(await meters())['meter-agent'].level===0,'the assistant meter empties when playback falls silent');
+  await page.evaluate(()=>{applyTheme('modern');render();});
+  return {you:you['meter-you'].level,agent:agent['meter-agent'].level};
+ });
  await step('touch-mute-and-keyboard-unmute',async()=>{
   await page.tap('#mute');assert((await state(page)).tracks.every(t=>!t.enabled),'touch mutes actual track');
   assert(await page.locator('#mute').getAttribute('aria-pressed')==='true','pressed state');
@@ -388,6 +399,6 @@ try {
  for(const context of contexts)await context.close();
  await nativePolicyBrowser?.close();await browser.close();mainChrome?.kill('SIGTERM');fixture.kill('SIGTERM');
 }
-log('summary',{passes,failures,mandatory:28});
-assert(passes+failures===28,'complete mandatory inventory ran');
+log('summary',{passes,failures,mandatory:29});
+assert(passes+failures===29,'complete mandatory inventory ran');
 process.exitCode=failures?1:0;

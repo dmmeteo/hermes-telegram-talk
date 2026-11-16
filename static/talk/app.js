@@ -1,8 +1,8 @@
 "use strict";
 
-// Theme -> values CSS cannot carry: the browser theme color and the canvas ring track. The stored choice applies
-// before anything else runs; the server CSP allows no inline script that could apply it earlier.
-const THEMES = {modern: {themeColor: "#30302e", ringTrack: "#4b4a47"}, typesafe: {themeColor: "#b9dff8", ringTrack: "#2c312c"}};
+// Theme -> values CSS cannot carry: the browser theme color and Modern's canvas ring track (Retro 95 has no ring).
+// The stored choice applies before anything else runs; the server CSP allows no inline script that could apply it earlier.
+const THEMES = {modern: {themeColor: "#30302e", ringTrack: "#4b4a47"}, typesafe: {themeColor: "#b9dff8"}};
 const THEME_KEY = "talk-theme";
 let theme = "modern";
 function applyTheme(name) {
@@ -15,7 +15,7 @@ function chooseTheme(event) {
   if (!Object.keys(THEMES).includes(event.target.value)) return;
   applyTheme(event.target.value);
   try { localStorage.setItem(THEME_KEY, theme); } catch (_) { /* Storage can be off; the choice still applies to this page. */ }
-  // The ring animates only during a call; an idle ring keeps the old theme's colours until repainted.
+  // The ring and meters animate only during a call; idle ones keep the old theme's look until repainted.
   render();
 }
 try {
@@ -119,6 +119,59 @@ const STATUS = {
 };
 const statusLine = {shown: null, next: null, timer: 0};
 
+const micLive = current => !current.muted && current.stream?.getAudioTracks().some(track => track.enabled && track.readyState !== "ended");
+const audible = current => current.playing && current.audio?.state === "running" && current.peer?.connectionState === "connected"
+  && !remoteAudio.muted && remoteAudio.volume !== 0;
+
+// Retro 95 level meters, ported from Full Duplex client/levels.ts and client/VoiceLevels.svelte. A call holds
+// {level, peak, hold} per source in `meters`, plus `due`, the earliest time of the next reduced-motion update.
+const SILENT = {level: 0, peak: 0, hold: 0};
+const METERS = {
+  you: {canvas: document.getElementById("meter-you"), heard: current => micLive(current) ? current.inputLevel : 0,
+    tone: {lit: "#2f7dff", hot: "#6cb4ff", cap: "#d6ebff", unlit: "#0b1a33"}},
+  agent: {canvas: document.getElementById("meter-agent"), heard: current => audible(current) ? current.outputLevel : 0,
+    tone: {lit: "#ff9a1f", hot: "#ffc14d", cap: "#ffecc4", unlit: "#2b1804"}},
+};
+// A small noise gate, fixed gain, then a gentle curve so quiet speech still shows.
+const loudness = rms => Math.min(1, Math.max(0, (rms - .008) / .1)) ** .6;
+
+function follow(meter, now) {
+  const level = now >= meter.level ? now : Math.max(now, meter.level - .07);
+  if (level >= meter.peak) return {level, peak: level, hold: 8};
+  if (meter.hold > 0) return {level, peak: meter.peak, hold: meter.hold - 1};
+  return {level, peak: Math.max(level, meter.peak - .06), hold: 0};
+}
+
+function advanceMeters(current, now) {
+  if (reducedMotion.matches && now < current.meters.due) return;
+  const next = {due: now + 250};
+  for (const [source, {heard}] of Object.entries(METERS)) {
+    const level = loudness(heard(current));
+    next[source] = reducedMotion.matches ? {level, peak: level, hold: 0} : follow(current.meters[source], level);
+  }
+  current.meters = next;
+}
+
+function drawMeter({canvas, tone}, {level, peak}) {
+  canvas.dataset.level = level.toFixed(3);
+  canvas.dataset.peak = peak.toFixed(3);
+  const width = canvas.clientWidth, height = canvas.clientHeight;
+  if (!width || !height) return;
+  const ratio = devicePixelRatio || 1;
+  if (canvas.width !== Math.round(width * ratio) || canvas.height !== Math.round(height * ratio)) {
+    canvas.width = Math.round(width * ratio); canvas.height = Math.round(height * ratio);
+  }
+  const g = canvas.getContext("2d");
+  g.setTransform(ratio, 0, 0, ratio, 0, 0);
+  const count = Math.floor(height / 8), lit = Math.round(level * count), cap = Math.round(peak * count);
+  const margin = (height - (count * 8 - 2)) / 2;
+  g.fillStyle = "#000"; g.fillRect(0, 0, width, height);
+  for (let s = 0; s < count; s++) {
+    g.fillStyle = s < lit ? (s / count < .7 ? tone.lit : tone.hot) : s === cap - 1 ? tone.cap : tone.unlit;
+    g.fillRect(1, height - margin - s * 8 - 6, width - 2, 6);
+  }
+}
+
 function showStatus(state) {
   const {label, hold} = STATUS[state];
   if (statusLine.next && STATUS[statusLine.next].label === label) return;
@@ -143,9 +196,8 @@ function render() {
   const mediaReady = current && current.phase === "ready" && current.playing && current.audio?.state === "running"
     && current.peer?.connectionState === "connected";
   const state = !current ? "idle" : current.phase === "blocked" ? "blocked"
-    : current.phase !== "ready" ? "connecting" : !mediaReady ? "blocked" : current.outputLevel > .015 && !remoteAudio.muted && remoteAudio.volume !== 0
-      ? "speaking" : current.muted ? "muted" : current.inputLevel > .005 && current.stream?.getAudioTracks().some(track => track.enabled && track.readyState !== "ended")
-      ? "listening" : "silent";
+    : current.phase !== "ready" ? "connecting" : !mediaReady ? "blocked" : current.outputLevel > .015 && audible(current)
+      ? "speaking" : current.muted ? "muted" : current.inputLevel > .005 && micLive(current) ? "listening" : "silent";
   orb.dataset.state = state;
   // While muted, the text keeps saying so; the ring still turns orange for assistant output.
   showStatus(state === "speaking" && current.muted ? "muted" : state);
@@ -169,6 +221,8 @@ function rms(analyser, samples) {
 }
 
 function draw(current) {
+  for (const [source, meter] of Object.entries(METERS)) drawMeter(meter, current ? current.meters[source] : SILENT);
+  if (!canvas.clientWidth) return;
   const state = orb.dataset.state;
   const css = getComputedStyle(orb);
   const level = current && ["speaking", "listening"].includes(state)
@@ -190,6 +244,7 @@ function sample(current) {
   if (call !== current) return;
   current.inputLevel = rms(current.inputAnalyser, current.inputSamples);
   current.outputLevel = rms(current.outputAnalyser, current.outputSamples);
+  advanceMeters(current, performance.now());
   if (current.phase === "greeting" && current.outputLevel > .008) current.greetingHeard = true;
   if (current.phase === "greeting" && current.greetingDone && current.greetingHeard && current.outputLevel < .008) {
     if (!current.quietSince) current.quietSince = performance.now();
@@ -877,7 +932,7 @@ async function start() {
   if (!auth) { stop("Open Hermes Telegram Talk from Telegram to sign in."); return; }
   const current = { auth, phase: "connecting", abort: new AbortController(), nodes: [], began: performance.now(), stages: {},
     seen: new Set(), delegations: new Set(), jobs: new Map(), spoken: new Set(), cut: new Set(), polls: 0,
-    muted: microphoneMuted, inputLevel: 0, outputLevel: 0 };
+    muted: microphoneMuted, inputLevel: 0, outputLevel: 0, meters: {you: SILENT, agent: SILENT, due: 0} };
   call = current; showError(); render();
   try {
     current.audio = new AudioContext();
@@ -988,6 +1043,7 @@ function onPageHide(event) {
   voiceSelect?.removeEventListener("change", chooseVoice);
   reconnectButton?.removeEventListener("click", reconnectVoice);
   window.removeEventListener("resize", pinTranscript);
+  window.removeEventListener("resize", render);
   remoteAudio.removeEventListener("pause", onAudioPause);
   const avatar = document.getElementById("avatar");
   avatar.onload = avatar.onerror = null;
@@ -1048,6 +1104,8 @@ function bindControls() {
   voiceSelect?.addEventListener("change", chooseVoice);
   reconnectButton?.addEventListener("click", reconnectVoice);
   window.addEventListener("resize", pinTranscript);
+  // Meter bitmaps follow their layout size; without a call no frame loop would redraw them.
+  window.addEventListener("resize", render);
   remoteAudio.addEventListener("pause", onAudioPause);
   window.addEventListener("pagehide", onPageHide);
 }

@@ -101,8 +101,9 @@ try {
   });
   const levels = (input, output) => room.evaluate(([input, output]) => { window.__levels = {input, output}; }, [input, output]);
   const frames = count => room.evaluate(count => new Promise(done => {
-    let left = count;
-    const next = () => { left -= 1; if (left) requestAnimationFrame(next); else done(); };
+    const shown = [];
+    const read = () => Object.fromEntries([...document.querySelectorAll('.meter')].map(meter => [meter.id, [Number(meter.dataset.level), Number(meter.dataset.peak)]]));
+    const next = () => { shown.push(read()); if (shown.length < count) requestAnimationFrame(next); else done(shown); };
     requestAnimationFrame(next);
   }), count);
   const uncovered = () => room.evaluate(() => {
@@ -138,6 +139,86 @@ try {
     }
     log('presence-uncovered', {theme});
   }
+  await levels(0, 0);
+  const square = await room.evaluate(() => {
+    const box = element => element.getBoundingClientRect().toJSON();
+    const face = document.getElementById('face'), avatar = document.getElementById('avatar');
+    const fill = element => ({box: box(element), radius: getComputedStyle(element).borderRadius, fit: getComputedStyle(element).objectFit});
+    const image = fill(avatar);
+    avatar.hidden = true; face.removeAttribute('hidden');
+    const fallback = fill(face);
+    avatar.hidden = false; face.setAttribute('hidden', '');
+    return {orb: box(document.getElementById('orb')), portrait: fill(document.querySelector('.portrait')), image, fallback,
+      ring: document.getElementById('ring').getClientRects().length};
+  });
+  const same = (a, b) => ['x', 'y', 'width', 'height'].every(key => Math.abs(a[key] - b[key]) < .5);
+  assert(Math.abs(square.orb.width - square.orb.height) < .5 && same(square.portrait.box, square.orb) && square.portrait.radius === '0px',
+    `the Retro 95 portrait is the whole square block, with square corners: ${JSON.stringify(square)}`);
+  assert(same(square.image.box, square.orb) && square.image.fit === 'cover' && same(square.fallback.box, square.orb),
+    `the image and the neutral face fill the square edge to edge without stretching: ${JSON.stringify(square)}`);
+  assert(square.ring === 0, 'Retro 95 draws no ring');
+
+  const meterBoxes = await room.evaluate(() => {
+    const box = element => element.getBoundingClientRect().toJSON();
+    return {orb: box(document.getElementById('orb')), meters: [...document.querySelectorAll('.meter')].map(meter => ({id: meter.id,
+      hidden: meter.getAttribute('aria-hidden'), box: box(meter)}))};
+  });
+  const [you, agent] = ['meter-you', 'meter-agent'].map(id => meterBoxes.meters.find(meter => meter.id === id));
+  assert(you && agent && you.hidden === 'true' && agent.hidden === 'true', `two decorative meters, hidden from assistive tech: ${JSON.stringify(meterBoxes)}`);
+  const beside = (meter, gap) => gap >= 0 && gap <= 8 && meter.box.width >= 4 && meter.box.width <= 12
+    && Math.abs(meter.box.top - meterBoxes.orb.top) < .5 && Math.abs(meter.box.height - meterBoxes.orb.height) < .5;
+  assert(you && agent && beside(you, meterBoxes.orb.left - you.box.right) && beside(agent, agent.box.left - meterBoxes.orb.right),
+    `slim meters stand directly left (you) and right (assistant) of the square: ${JSON.stringify(meterBoxes)}`);
+
+  const lit = () => room.evaluate(() => Object.fromEntries([...document.querySelectorAll('.meter')].map(meter => {
+    const paint = meter.getContext('2d'), {width, height} = meter;
+    const column = paint.getImageData(Math.floor(width / 2), 0, 1, height).data;
+    const rows = {lit: 0, unlit: 0};
+    for (let y = 0; y < height; y++) {
+      const [r, g, b] = column.slice(y * 4, y * 4 + 3);
+      if (r + g + b === 0) continue;
+      if (Math.max(r, g, b) > 150) rows.lit++; else rows.unlit++;
+    }
+    return [meter.id, rows.lit / (rows.lit + rows.unlit)];
+  })));
+  const loud = rms => Math.min(1, Math.max(0, (rms - .008) / .1)) ** .6;
+  await room.waitForFunction(() => [...document.querySelectorAll('.meter')].every(meter => meter.dataset.level === '0.000' && meter.dataset.peak === '0.000'))
+    .catch(() => { throw new Error('both meters settle to empty, with no held peak, in silence'); });
+  await levels(.05, 0);
+  let shown = await frames(2);
+  assert(Math.abs(shown[0]['meter-you']?.[0] - loud(.05)) < .002 && shown[0]['meter-agent']?.[0] === 0,
+    `the human meter rises at once to the microphone level, the assistant meter stays empty: ${JSON.stringify(shown[0])}`);
+  let drawn = await lit();
+  assert(Math.abs(drawn['meter-you'] - loud(.05)) < .1 && drawn['meter-agent'] === 0, `drawn segments follow the levels: ${JSON.stringify(drawn)}`);
+  await levels(.05, .09);
+  shown = await frames(2);
+  assert(Math.abs(shown[1]['meter-you']?.[0] - loud(.05)) < .002 && Math.abs(shown[1]['meter-agent']?.[0] - loud(.09)) < .002,
+    `both sides at once drawn independently: ${JSON.stringify(shown[1])}`);
+  drawn = await lit();
+  assert(Math.abs(drawn['meter-you'] - loud(.05)) < .1 && Math.abs(drawn['meter-agent'] - loud(.09)) < .1, `drawn segments for both sides: ${JSON.stringify(drawn)}`);
+  await room.screenshot({path: `${out}/presence-typesafe-meters.png`});
+  await levels(0, .09);
+  shown = await frames(30);
+  const fall = shown.map(frame => frame['meter-you']?.[0]);
+  assert(fall.every((level, n) => n === 0 || (level <= fall[n - 1] && fall[n - 1] - level <= .0715)) && fall.some(level => level > 0) && fall.at(-1) === 0
+    && shown.every(frame => Math.abs(frame['meter-agent']?.[0] - loud(.09)) < .002),
+    `the human meter falls at most 0.07 a frame to empty while the assistant meter holds: ${JSON.stringify(fall)}`);
+  await levels(.05, .09);
+  await frames(2);
+  await room.click('#mute');
+  shown = await frames(30);
+  assert(shown.at(-1)['meter-you']?.[0] === 0 && shown.at(-1)['meter-you']?.[1] === 0 && Math.abs(shown.at(-1)['meter-agent']?.[0] - loud(.09)) < .002,
+    `mute empties the human meter only: ${JSON.stringify(shown.at(-1))}`);
+  await room.click('#mute');
+  await frames(2);
+  await room.evaluate(() => stop());
+  shown = await frames(1);
+  drawn = await lit();
+  assert(JSON.stringify(shown[0]) === JSON.stringify({'meter-you': [0, 0], 'meter-agent': [0, 0]}) && drawn['meter-you'] === 0 && drawn['meter-agent'] === 0,
+    `stop empties both meters: ${JSON.stringify({shown, drawn})}`);
+  await room.evaluate(() => document.getElementById('theme-modern').click());
+  assert(await room.evaluate(() => [...document.querySelectorAll('.meter')].every(meter => !meter.getClientRects().length)), 'Modern shows no meters');
+  log('presence-meters', {you: you?.box, agent: agent?.box});
   await presenceContext.close();
 
   const panelContext = await browser.newContext({viewport: {width: 390, height: 844}, hasTouch: true});
@@ -201,6 +282,8 @@ try {
         return {panel: box(menu), heading: box(document.getElementById('menu-title') || menu), row: box(document.querySelector('.control-row')),
           order: ['menu-toggle', 'orb', 'mute'].map(id => box(document.getElementById(id)).x), targets,
           overflow: document.documentElement.scrollWidth > innerWidth, status: !document.getElementById('call-status').hidden,
+          meters: [...document.querySelectorAll('.meter')].filter(element => element.getClientRects().length).map(box),
+          buttons: ['menu-toggle', 'mute'].map(id => box(document.getElementById(id))),
           lines: ['error', 'start'].filter(id => !document.getElementById(id).hidden)};
       });
       const where = `${theme} ${state} ${width}x${height}`;
@@ -208,6 +291,9 @@ try {
       assert(g.heading.top >= g.panel.top && g.heading.top >= 0, `panel heading is not clipped (${where})`);
       assert(g.panel.bottom <= g.row.top, `panel sits above the control row (${where})`);
       assert(g.order[0] < g.order[1] && g.order[1] < g.order[2], `menu left, avatar center, microphone right (${where})`);
+      const apart = (a, b) => a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top;
+      assert(g.meters.length === (theme === 'typesafe' ? 2 : 0) && g.meters.every(m => m.left >= 0 && m.right <= width && m.top >= 0 && m.bottom <= height
+        && g.buttons.every(button => apart(m, button))), `meters only in Retro 95, inside the viewport and clear of the controls (${where}): ${JSON.stringify(g.meters)}`);
       assert(g.targets.every(t => t.width >= 44 && t.height >= 44 && t.hit), `panel controls are reachable 44 px targets (${where}): ${JSON.stringify(g.targets)}`);
       assert(await inPanel(), `opening moves focus into the panel (${where})`);
       await panel.screenshot({path: `${out}/menu-${theme}-${state}-${width}x${height}.png`});

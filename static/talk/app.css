@@ -36,6 +36,7 @@ h2 { max-width: 100%; text-align: center; white-space: nowrap; overflow: hidden;
 #ring { width: 100%; height: 100%; position: absolute; inset: 0; }
 .portrait { position: absolute; inset: 16%; border-radius: 50%; overflow: hidden; background: #252f32; }
 .portrait svg, .portrait img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.meter { display: none; }
 #orb[data-state="listening"] { color: var(--listen); }
 #orb[data-state="speaking"] { color: var(--speak); }
 
@@ -83,7 +84,7 @@ button:disabled { opacity: .45; cursor: default; }
   --control: #c9cac4; --control-ink: #171b18; --control-open: #c9cac4;
   --primary: #f183b1; --primary-ink: #171b18;
   --danger: #9d264b; --danger-line: #272d26; --pressed: #9d264b; --pressed-ink: #fff;
-  --focus: #ef65ad; --plate: #000; --panel-control: #c9cac4;
+  --focus: #ef65ad; --panel-control: #c9cac4;
   --raised: inset 1px 1px #fff, inset -1px -1px #5a5d56, inset 2px 2px #e6e8df, inset -2px -2px #92988d;
   --inset: inset 1px 1px #50564e, inset -1px -1px #fff, inset 2px 2px #92988d;
 }
@@ -92,8 +93,14 @@ button:disabled { opacity: .45; cursor: default; }
 [data-theme="typesafe"] #transcript { scrollbar-color: #171b18 transparent; }
 [data-theme="typesafe"] #transcript li { border-radius: 0; background: #f3f1e4; border: 1px solid #171b18; box-shadow: inset 1px 1px #fff, 3px 3px #171b18; }
 [data-theme="typesafe"] #transcript li[data-role="user"] { background: #d3efdc; color: #16261b; }
-/* The ring keeps its blue and orange; a black plate behind it keeps them visible against the light sky. */
-[data-theme="typesafe"] #orb::before { content: ""; position: absolute; inset: 6%; background: var(--plate); box-shadow: inset 1px 1px #50564e, inset -1px -1px #fff, inset 2px 2px #0b0d0b; }
+/* No ring: the portrait fills a square inside the same 96 px slot, and level meters stand on either side of it.
+   The bevels sit outside the boxes, so they never cover the image or the segments. */
+[data-theme="typesafe"] #orb { width: 84px; height: 84px; margin: 6px; box-shadow: -1px -1px #fff, 1px 1px #5a5d56, 0 0 0 2px #272d26; }
+[data-theme="typesafe"] #ring { display: none; }
+[data-theme="typesafe"] .portrait { inset: 0; border-radius: 0; }
+[data-theme="typesafe"] .meter { display: block; position: absolute; top: 0; width: 8px; height: 100%; box-shadow: -1px -1px #5a5d56, 1px 1px #fff, 0 0 0 2px #272d26; }
+[data-theme="typesafe"] #meter-you { right: calc(100% + 7px); }
+[data-theme="typesafe"] #meter-agent { left: calc(100% + 7px); }
 [data-theme="typesafe"] button, [data-theme="typesafe"] #menu-toggle, [data-theme="typesafe"] #mute { border-radius: 0; box-shadow: var(--raised); }
 [data-theme="typesafe"] button:hover:enabled { filter: brightness(1.06); }
 [data-theme="typesafe"] button:active:enabled, [data-theme="typesafe"] #menu-toggle[aria-expanded="true"], [data-theme="typesafe"] #mute[aria-pressed="true"] { transform: none; box-shadow: var(--inset); }
@@ -113,6 +120,7 @@ button:disabled { opacity: .45; cursor: default; }
   main { gap: 4px; padding-top: max(6px, env(safe-area-inset-top)); padding-bottom: max(6px, env(safe-area-inset-bottom)); }
   .actions { gap: 4px; }
   #orb { width: 72px; height: 72px; }
+  [data-theme="typesafe"] #orb { width: 62px; height: 62px; margin: 5px; }
   #call-menu { bottom: calc(100% + 4px); width: min(600px, 100%); grid-template-columns: 1fr 1fr; align-items: start; max-height: calc(100dvh - 112px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)); padding-bottom: 12px; gap: 10px 16px; }
   [data-theme="typesafe"] #call-menu { padding-top: 3px; }
   .menu-footer { padding-top: 10px; }

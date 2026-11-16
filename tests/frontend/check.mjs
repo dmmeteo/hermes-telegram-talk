@@ -48,7 +48,8 @@ function fixture(options = {}) {
       stream:{getAudioTracks:()=>[track],getTracks:()=>[track]},
       channel:{readyState:'open',send:m=>sent.push(JSON.parse(m)),close(){}},
       peer:{connectionState:'connected',close(){}},audio:{state:'running',close:async()=>{}},
-      playing:true, outputLevel:0, inputLevel:0};
+      playing:true, outputLevel:0, inputLevel:0,
+      meters:{you:{level:0,peak:0,hold:0},agent:{level:0,peak:0,hold:0},due:0}};
     const track = {enabled:false,stop(){this.stopped=true;}};
     call = current; conversation = owner;
     initData = ()=>'synthetic';
@@ -333,6 +334,57 @@ test('status text follows a raw state only after it holds, while the ring follow
  assert.equal(text(),'Audio and microphone paused.','blocked shows at once');
  f.run(`current.phase='connecting';render();`);assert.equal(text(),'Connecting. Microphone paused.','connecting shows at once');
  f.run(`call=null;render();`);assert.equal(text(),'Call stopped.','idle shows at once');
+});
+function meterFixture(options) {
+ const f=fixture(options);
+ f.run(`current.phase='ready';current.handshake=true;updateMic(current);globalThis.levels={input:0,output:0};
+  Object.assign(current,{inputAnalyser:{getFloatTimeDomainData:a=>a.fill(levels.input)},inputSamples:new Float32Array(8),
+   outputAnalyser:{getFloatTimeDomainData:a=>a.fill(levels.output)},outputSamples:new Float32Array(8)});`);
+ const shown=source=>{const {level,peak}=f.nodes.get(`meter-${source}`).dataset;return [Number(level),Number(peak)];};
+ const frame=(input,output)=>{f.run(`levels.input=${input};levels.output=${output};sample(current);`);return {you:shown('you'),agent:shown('agent')};};
+ return {f,frame,shown};
+}
+test('each level meter follows its own side: instant rise, a 0.07 fall per frame and an 8-frame peak hold',()=>{
+ const {frame}=meterFixture();
+ assert.deepEqual(frame(0,0),{you:[0,0],agent:[0,0]},'silence reads empty');
+ assert.deepEqual(frame(.108,0),{you:[1,1],agent:[0,0]},'the microphone alone lights only the human meter, at once');
+ assert.deepEqual(frame(.108,.058).agent,[.66,.66],'assistant output rises at once on its own meter, by the Full Duplex curve');
+ assert.deepEqual(frame(.108,.058).you,[1,1],'both sides speaking at once keep their own levels');
+ const fall=[];for(let n=0;n<26;n++)fall.push(frame(0,.058));
+ assert.deepEqual(fall.map(f=>f.you[0]),[.93,.86,.79,.72,.65,.58,.51,.44,.37,.3,.23,.16,.09,.02,0,0,0,0,0,0,0,0,0,0,0,0],'the level falls 0.07 a frame');
+ assert.deepEqual(fall.map(f=>f.you[1]),[1,1,1,1,1,1,1,1,.94,.88,.82,.76,.7,.64,.58,.52,.46,.4,.34,.28,.22,.16,.1,.04,0,0],'the peak holds 8 frames, then falls 0.06 a frame');
+ assert(fall.every(f=>f.agent[0]===.66),'the assistant meter is unaffected by the microphone falling silent');
+ assert.deepEqual(frame(.004,0),{you:[0,0],agent:[.59,.66]},'a level below the noise gate reads empty');
+});
+test('the human meter empties on mute, both on disconnect and playback end, and stop clears them at once',()=>{
+ const {f,frame,shown}=meterFixture();
+ frame(.108,.058);
+ f.run('toggleMute()');
+ let last;for(let n=0;n<25;n++)last=frame(.108,.058);
+ assert.deepEqual(last,{you:[0,0],agent:[.66,.66]},'mute empties the human meter while the assistant meter keeps following');
+ f.run('toggleMute()');
+ assert.deepEqual(frame(.108,.058).you,[1,1],'unmute shows the microphone at once');
+ f.run(`current.peer.connectionState='disconnected';current.phase='connecting';updateMic(current);`);
+ for(let n=0;n<25;n++)last=frame(.108,.058);
+ assert.deepEqual(last,{you:[0,0],agent:[0,0]},'a disconnect empties both meters');
+ f.run(`current.peer.connectionState='connected';current.phase='ready';updateMic(current);`);
+ assert.deepEqual(frame(.108,.058),{you:[1,1],agent:[.66,.66]},'reconnected media lights both again');
+ f.run(`remoteAudio.srcObject={};onAudioPause();`);
+ for(let n=0;n<25;n++)last=frame(.108,.058);
+ assert.deepEqual(last.agent,[0,0],'playback ending empties the assistant meter');
+ f.run(`current.phase='ready';current.playing=true;updateMic(current);`);
+ frame(.108,.058);
+ f.run('stop()');
+ assert.deepEqual([shown('you'),shown('agent')],[[0,0],[0,0]],'stop empties both meters without waiting for a frame');
+});
+test('with reduced motion a meter shows the plain level a few times a second, with no fall or peak',()=>{
+ const {f,frame}=meterFixture({clock:true});
+ f.run('reducedMotion.matches=true');
+ assert.deepEqual(frame(.108,.058),{you:[1,1],agent:[.66,.66]});
+ f.wait(100);
+ assert.deepEqual(frame(0,0),{you:[1,1],agent:[.66,.66]},'the meter holds still between updates');
+ f.wait(200);
+ assert.deepEqual(frame(0,0),{you:[0,0],agent:[0,0]},'the next update shows silence at once, with no peak left');
 });
 test('a stored theme applies at load, and an unknown or unreadable value falls back to Modern',()=>{
  const saved=[];
