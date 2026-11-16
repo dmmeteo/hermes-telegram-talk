@@ -404,12 +404,14 @@ and other sessions record nothing. The large task's turn then holds no slot. Whe
 running and Talk follows the thread through the profile's own `t3_control` handler until T3 shows the run completed
 (the result is the thread's newest message when it is the assistant's), failed, interrupted, or stopped after a cancel.
 When T3 no longer shows how the run ended (a later run of the thread started first, only `idle`, or the thread is
-gone), the task ends as unknown (❔, no result), never as completed. The same holds once Talk has failed to read T3
-for 30 minutes in a row; any good read in between starts that count again. A blocked thread stays open. A
-restart keeps following; nothing is relaunched or resent. The `pre_tool_call` hook notes each start or send before it
-runs. When a turn is stopped with one still unanswered, T3 may hold work that no record names and no read can tell
-from another run: the task settles from its turn and says so ("T3 may run that work unseen by Talk"); it is never
-followed and never given a result. The voice model handles existing tasks with control lines
+gone), the task ends as unknown (❔, no result), never as completed. The same holds once Talk has spent 30 minutes
+failing to read T3: only time between failed reads counts (a pause such as Talk being down adds at most 2 minutes),
+and any good read starts the count again. A blocked thread stays open. A restart keeps following; nothing is relaunched or resent. When Hermes
+stops waiting for a running start or send (a cancel, the run budget, the live-turn bound, or its own tool deadline),
+it reports that call to the same hook as `cancelled` or `timeout` and drops T3's real answer. T3 may then hold work
+that no read can tell from another run: the task settles from its turn and says so ("T3 may run that work unseen by
+Talk"); that work is never followed and never given a result. A process killed outright during the call reports
+nothing, so such a task settles from its turn without the note. The voice model handles existing tasks with control lines
 (`CONTROL: list`, `CONTROL: status N`, `CONTROL: result N`, `CONTROL: cancel N`), answered at once from server state and
 never queued. See `docs/adr/0011-t3-work-and-task-visibility.md`.
 

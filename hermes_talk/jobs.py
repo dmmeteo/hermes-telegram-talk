@@ -21,9 +21,9 @@ slot, and when the turn ends the job stays running on its T3 work: `turn` keeps 
 settled to, and the job settles only from what T3 shows. Everything newer than the base record (`parallel`, `links`,
 `turn`, `unknown`) is stored under its own key, so a Talk from before these fields still loads every job it wrote.
 `unknown` marks a job whose T3 run ended without T3 showing how: its base state is interrupted (a state every reader
-knows), it carries no result, and it is spoken and posted as unknown, never as completed. That includes a run T3
-stayed unreadable for (work.UNREADABLE_S). A turn that was cut with a T3 call unanswered leaves a note link: the job
-settles from its turn and its reason says T3 may hold work Talk cannot see.
+knows), it carries no result, and it is spoken and posted as unknown, never as completed. That includes a run Talk
+failed to read from T3 for `unread_s`. A T3 call the core stopped waiting for leaves a note link: the job settles from
+its turn and its reason says T3 may hold work Talk cannot see.
 """
 import errno
 import json
@@ -243,11 +243,10 @@ class JobBoard:
     """
 
     def __init__(self, history, agent, tasks, clock, prompt_for, bind, redact, desk=None, home=None, t3=None,
-                 follow_s=FOLLOW_S):
+                 follow_s=FOLLOW_S, unread_s=work.UNREADABLE_S):
         self.history, self.agent, self.tasks, self.clock = history, agent, tasks, clock
         self.prompt_for, self.bind, self.redact, self.desk = prompt_for, bind, redact, desk
-        self.home, self.t3, self.follow_s = home, t3 or work.T3(), follow_s
-        self.unread_s = work.UNREADABLE_S
+        self.home, self.t3, self.follow_s, self.unread_s = home, t3 or work.T3(), follow_s, unread_s
         self.lock = threading.RLock()
         self.handles = {}
         self.revision = 0
@@ -582,11 +581,6 @@ class JobBoard:
                 self.bind(job, outcome.session_id)
         state, fields = self._turn_outcome(job, outcome, timed_out, restarted)
         self.reaped.discard(job.id)
-        if state != SUCCEEDED and self.home is not None:
-            # A turn that ended on its own saw every call answered; one that was cut may have left one in T3.
-            known = {link.key for link in job.links}
-            cut = [work.cut_link(r) for r in work.pending(self.home, job.id) if r["key"] not in known]
-            job = replace(job, links=job.links + tuple(cut))
         if job.links:
             # The admission moves into `turn`: a rollback to a Talk before T3 work then finds no admission to settle
             # this still-running job from, and marks it interrupted instead of completed with the turn's reply.
@@ -634,6 +628,9 @@ class JobBoard:
         links = {link.key: link for link in job.links}
         changed = False
         for record in work.observations(self.home, job_id):
+            if record.get("answered"):  # a cut call whose retry T3 answered: the admission's own link stands for it
+                changed = links.pop(record["key"], None) is not None or changed
+                continue
             known = links.get(record["key"])
             link = work.merge(known, record) if known is not None else work.link_from(record)
             if known is None:

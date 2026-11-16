@@ -16,13 +16,15 @@ the fallback when T3 shows no ids. Its outcome is read only while it is the thre
 interrupted, with a result only when the thread's newest message is the assistant's. T3's read is per thread, not per
 run, so when a later run started before Talk saw this one settle, or the run cannot be singled out, or T3 shows only
 `idle`, the outcome is `unknown`: never success, and never the later run's text. An unreadable T3 changes nothing
-until it has stayed unreadable for UNREADABLE_S; then the run's outcome is `unknown` too. A possibly admitted
+until Talk has spent UNREADABLE_S failing to read it; then the run's outcome is `unknown` too. A possibly admitted
 start or send (T3's answer was lost) is confirmed only by the thread itself and is never resent; a lost start that
 came back without a thread id is kept as a note, since nothing can follow it.
 
-The core's pre_tool_call hook records each start or send before it runs (`intend`), and any answer removes that
-record. A turn stopped with one still open may have left work in T3 that no record names: T3 shows nothing that
-tells such a run from another one, so it is kept as a note as well, never followed and never given a result.
+When the core gives up on a running call (a stop, or its tool deadline), it reports that call to the same hook
+itself, with the call's own arguments, a made-up result and the status `cancelled` or `timeout`, and drops the real
+answer. T3 may have accepted such a start or send, and T3 shows nothing that tells its run from another one. So it is
+recorded as a cut call and kept as a note as well: never followed, never given a result. A later answer to the same
+call (a retry with the same request_id and arguments) replaces the note with the admission.
 """
 import hashlib
 import json
@@ -44,11 +46,12 @@ DONE = frozenset({"completed", "failed", "interrupted", UNKNOWN})
 DROPPED = "unconfirmed"
 LOST_START = ("T3's answer to a start was lost before it named a thread; T3 may run that work unseen by Talk. "
               "Check T3.")
-CUT_START = "The task's turn stopped while a T3 start was in flight; T3 may run that work unseen by Talk. Check T3."
-CUT_SEND = ("The task's turn stopped while a message to T3 thread {thread} was in flight; T3 may run it unseen by "
+CUT_START = "Hermes stopped waiting for a T3 start before T3 answered; T3 may run that work unseen by Talk. Check T3."
+CUT_SEND = ("Hermes stopped waiting for a message to T3 thread {thread} before T3 answered; T3 may run it unseen by "
             "Talk. Check that thread.")
-PENDING = "pending"  # a subfolder, so a Talk from before intents never reads one as an admission
-UNREADABLE_S = 1800.0  # how long T3 may stay unreadable before a followed run is given up as unknown
+CUT = frozenset({"cancelled", "timeout"})  # the hook statuses of a call the core stopped waiting for
+UNREADABLE_S = 1800.0  # how long Talk may fail to read T3 before a followed run is given up as unknown
+UNREAD_GAP_S = 120.0  # the most one pause between two failed reads adds to that time
 RESULT_CHARS = 6000
 
 
@@ -59,8 +62,8 @@ class Link:
     `run_id` is this run's T3 id once known; `prior_run_id` the run it must differ from (the active run a queued send
     waits behind, or the latest run of an idle thread); `base_runs` the thread's run count before it (None when
     unknown), for a T3 that shows no run ids. `started` marks the run seen live or counted. `confirmed` is False only
-    for an admission whose answer was lost, until the thread shows the run. `unread_since` is the first of the failed
-    reads since T3 was last readable (0 while it is readable)."""
+    for an admission whose answer was lost, until the thread shows the run. `unread_s` is the time spent between
+    failed reads since T3 was last readable and `unread_at` the newest of those reads (both 0 while it is readable)."""
     key: str
     thread_id: str
     via: str
@@ -76,7 +79,8 @@ class Link:
     seen: float = 0.0  # when T3 first confirmed or disproved a possible admission
     run_id: str = None
     prior_run_id: str = None
-    unread_since: float = 0.0
+    unread_s: float = 0.0
+    unread_at: float = 0.0
 
     @property
     def done(self):
@@ -189,7 +193,10 @@ def _result(result):
 
 
 def _call(tool_name, args, session_id, home, environ, parent):
-    """(home, job id, intent key) of a T3 start or send made by a Talk task's own turn, else None."""
+    """(home, job id, call id) of a T3 start or send made by a Talk task's own turn, else None.
+
+    The call id covers the request_id and every argument, as the bridge's own command ids do: a reused request_id
+    with another thread or message is another call."""
     if tool_name != "t3_control" or not isinstance(args, dict) or args.get("action") not in ADMITTING:
         return None
     environ = os.environ if environ is None else environ
@@ -199,49 +206,45 @@ def _call(tool_name, args, session_id, home, environ, parent):
     job_id = environ.get(ENV_JOB) or _session_job(home, session_id, parent)
     if not isinstance(job_id, str) or not JOB_ID.fullmatch(job_id):
         return None
-    return home, job_id, _digest(f"intent:{args['action']}:{args.get('request_id')}")
-
-
-def intend(tool_name=None, args=None, session_id=None, home=None, environ=None, clock=time.time, parent=_parent,
-           **_):
-    """`pre_tool_call` body: note that this Talk task's turn is about to ask T3 for a start or send.
-
-    The note only says a call is in flight. `observe` removes it with any answer, so one that outlives its turn marks
-    a call nobody saw answered. It never blocks or changes the call."""
-    call = _call(tool_name, args, session_id, home, environ, parent)
-    if call is None:
-        return None
-    home, job_id, key = call
-    thread_id = args.get("thread_id") if args["action"] == "send" else None
-    record = {"job_id": job_id, "key": key, "action": args["action"], "at": clock(),
-              "thread_id": thread_id if isinstance(thread_id, str) and 0 < len(thread_id) <= 600 else None}
-    _write(work_dir(home) / job_id / PENDING / f"{key}.json", record)
-    return record
+    return home, job_id, _digest("call:" + json.dumps(args, sort_keys=True, default=str))
 
 
 def observe(tool_name=None, args=None, result=None, session_id=None, home=None, environ=None, clock=time.time,
-            parent=_parent, **_):
+            parent=_parent, status=None, **_):
     """`post_tool_call` body: record a T3 start or send this Talk task's turn made; returns the record or None.
 
-    Only an `ok` answer, or a lost answer T3 may have committed (`outcome_unknown`), is recorded. A refusal, a status
-    or read call, or a call outside a Talk task records nothing. Every answer closes the call's intent."""
+    An `ok` answer, or a lost answer T3 may have committed (`outcome_unknown`), is recorded as an admission. A call the
+    core stopped waiting for (`status` in CUT, with a result the core made up) is recorded as a cut call. A refusal,
+    a blocked or skipped call (the core reports a skipped one without its arguments), a status or read call, or a
+    call outside a Talk task records nothing."""
     call = _call(tool_name, args, session_id, home, environ, parent)
     if call is None:
         return None
-    home, job_id, intent = call
-    try:
-        return _admission(args, result, session_id, home, job_id, intent, clock)
-    finally:
-        try:  # after the record, which names the intent: a stop between the two leaves no open call behind
-            (work_dir(home) / job_id / PENDING / f"{intent}.json").unlink()
-        except OSError:
-            pass
-
-
-def _admission(args, result, session_id, home, job_id, intent, clock):
+    home, job_id, call_id = call
     data = _result(result)
-    if data is None or (data.get("ok") is not True and data.get("outcome_unknown") is not True):
-        return None
+    if data is not None and (data.get("ok") is True or data.get("outcome_unknown") is True):
+        return _admission(args, data, session_id, home, job_id, call_id, clock)
+    if status in CUT:
+        return _cut(args, status, session_id, home, job_id, call_id, clock)
+    return None
+
+
+def _cut(args, status, session_id, home, job_id, call_id, clock):
+    """A start or send T3 may have accepted with no answer seen. It names no `thread_id`, so no Talk, this one or
+    one from before cut calls, ever follows a thread for it; a send's target is kept as `to`, for the note."""
+    to = args.get("thread_id") if args["action"] == "send" else None
+    record = {"job_id": job_id, "session_id": str(session_id or ""), "action": args["action"], "thread_id": None,
+              "to": to if isinstance(to, str) and 0 < len(to) <= 600 else None, "confirmed": False, "cut": status,
+              "call": call_id, "at": clock(), "key": _digest("cut:" + call_id)}
+    path = work_dir(home) / job_id / f"{record['key']}.json"
+    earlier = _read(path)
+    if earlier is not None:
+        return earlier
+    _write(path, record)
+    return record
+
+
+def _admission(args, data, session_id, home, job_id, call_id, clock):
     ok = data.get("ok") is True
     thread_id = data.get("thread_id") or (args.get("thread_id") if args["action"] == "send" else None)
     if thread_id is not None and (not isinstance(thread_id, str) or not thread_id or len(thread_id) > 600):
@@ -254,7 +257,7 @@ def _admission(args, result, session_id, home, job_id, intent, clock):
               "outcome": state.get("outcome") if ok else None,
               "run_count": count if type(count) is int and ok else None,
               "active_id": run.get("active_id") if ok else None, "latest_id": run.get("latest_id") if ok else None,
-              "at": clock(), "intent": intent}
+              "at": clock(), "call": call_id}
     record["key"] = _digest(f"{args['action']}:{args.get('request_id')}:{thread_id or args.get('cwd') or ''}")
     path = work_dir(home) / job_id / f"{record['key']}.json"
     earlier = _read(path)
@@ -265,32 +268,23 @@ def _admission(args, result, session_id, home, job_id, intent, clock):
 
 
 def observations(home, job_id):
-    """The admissions recorded for a job, oldest first."""
+    """The admissions and cut calls recorded for a job, oldest first. A cut call that an admission of the same call
+    answered later comes back marked `answered`: it is no longer a note."""
     folder = work_dir(home) / job_id
     if not JOB_ID.fullmatch(job_id) or not folder.is_dir():
         return []
     found = [_read(p) for p in folder.glob("*.json")]
-    return sorted((r for r in found if r and r.get("job_id") == job_id and isinstance(r.get("key"), str)),
-                  key=lambda r: (r.get("at") or 0, r["key"]))
-
-
-def pending(home, job_id):
-    """The job's starts and sends still in flight: noted before the call, and answered by no record. Oldest first."""
-    folder = work_dir(home) / job_id / PENDING
-    if not JOB_ID.fullmatch(job_id) or not folder.is_dir():
-        return []
-    answered = {r.get("intent") for r in observations(home, job_id)}
-    found = [_read(p) for p in folder.glob("*.json")]
-    return sorted((r for r in found if r and r.get("job_id") == job_id and isinstance(r.get("key"), str)
-                   and r["key"] not in answered and r.get("action") in ADMITTING),
+    found = [r for r in found if r and r.get("job_id") == job_id and isinstance(r.get("key"), str)]
+    answered = {r.get("call") for r in found if not r.get("cut")} - {None}
+    return sorted(({**r, "answered": True} if r.get("cut") and r.get("call") in answered else r for r in found),
                   key=lambda r: (r.get("at") or 0, r["key"]))
 
 
 def cut_link(record):
-    """The note a call leaves when its turn ended before any answer: nothing to follow, nothing counted."""
-    thread_id = record.get("thread_id") or ""
-    error = CUT_SEND.format(thread=thread_id[:80]) if record["action"] == "send" and thread_id else CUT_START
-    return Link(key=record["key"], thread_id=thread_id, via=record["action"], confirmed=False, status=DROPPED,
+    """The note a cut call leaves: nothing to follow, nothing counted."""
+    thread_id = record.get("to") or ""
+    error = CUT_SEND.format(thread=thread_id[:80]) if record.get("action") == "send" and thread_id else CUT_START
+    return Link(key=record["key"], thread_id=thread_id, via=record.get("action"), confirmed=False, status=DROPPED,
                 admitted=float(record.get("at") or 0), error=error)
 
 
@@ -306,6 +300,8 @@ def _ident(value):
 def link_from(record):
     """The link an observation opens. A start's thread is new, so its run is the first one."""
     via = record.get("action")
+    if record.get("cut"):
+        return cut_link(record)
     if not record.get("thread_id"):
         return Link(key=record["key"], thread_id="", via=via, confirmed=False, status=DROPPED,
                     admitted=float(record.get("at") or 0), error=LOST_START)
@@ -363,19 +359,22 @@ def _settled(link, outcome, read):
                    error=text[-300:] if outcome == "failed" else "")
 
 
-def _unreadable(link, now, unread_s):
-    """T3 gave no answer about the thread. Past the bound the run is given up as unknown, never as any outcome."""
-    since = link.unread_since or now
-    link = replace(link, unread_since=since)
-    if now - since < unread_s:
+def _unreadable(link, now, bound):
+    """T3 gave no answer about the thread. Once Talk has spent `bound` failing to read it, the run is given up as
+    unknown, never as any outcome. Only time between two failed reads counts, and one pause for at most
+    UNREAD_GAP_S: time Talk was down, or a clock that jumped, is not time T3 was seen unreadable."""
+    gap = now - link.unread_at if link.unread_at else 0.0
+    spent = link.unread_s + min(max(gap, 0.0), UNREAD_GAP_S)
+    link = replace(link, unread_s=spent, unread_at=now)
+    if spent < bound:
         return link
-    waited = f"Talk could not read T3 for {max(1, round((now - since) / 60))} min"
+    waited = f"Talk could not read T3 for {max(1, round(spent / 60))} min"
     if not link.confirmed:
         return replace(link, status=DROPPED, error=f"{waited}, so whether T3 took this work is not known. Check T3.")
     return _unknown(link, f"{waited}, so how this run ended is not known. Check the T3 thread.")
 
 
-def assess(link, read, now, unread_s=UNREADABLE_S):
+def assess(link, read, now, bound=UNREADABLE_S):
     """The link after one T3 read. Nothing it cannot read is ever concluded, except that it could not be read."""
     if link.done or not isinstance(read, dict):
         return link
@@ -384,9 +383,9 @@ def assess(link, read, now, unread_s=UNREADABLE_S):
             if not link.confirmed:
                 return replace(link, status=DROPPED, seen=now, error="T3 has no such thread; nothing was admitted.")
             return _unknown(link, "T3 no longer has this thread, so how its run ended is not known.")
-        return _unreadable(link, now, unread_s)
-    if link.unread_since:
-        link = replace(link, unread_since=0.0)
+        return _unreadable(link, now, bound)
+    if link.unread_at or link.unread_s:
+        link = replace(link, unread_s=0.0, unread_at=0.0)
     state = read.get("state") if isinstance(read.get("state"), dict) else {}
     outcome = state.get("outcome")
     run = state.get("run") if isinstance(state.get("run"), dict) else {}

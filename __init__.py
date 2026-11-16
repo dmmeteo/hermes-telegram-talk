@@ -59,7 +59,8 @@ def _chat_reply(**kwargs):
 
 
 def _t3_admission(**kwargs):
-    """`post_tool_call`: record T3 work a Talk voice task's own turn started or continued (hermes_talk/work.py)."""
+    """`post_tool_call`: record T3 work a Talk voice task's own turn started or continued, and a start or send the
+    core stopped waiting for (hermes_talk/work.py)."""
     if kwargs.get("tool_name") != "t3_control":
         return
     if str(PLUGIN_DIR) not in sys.path:
@@ -67,21 +68,6 @@ def _t3_admission(**kwargs):
     try:
         from hermes_talk.work import observe
         observe(**kwargs)
-    except Exception:  # never disturb the agent's turn
-        pass
-
-
-def _t3_intent(**kwargs):
-    """`pre_tool_call`: note a T3 start or send a Talk voice task's turn is about to make (hermes_talk/work.py).
-
-    Returns nothing, so the call is never blocked or changed."""
-    if kwargs.get("tool_name") != "t3_control":
-        return
-    if str(PLUGIN_DIR) not in sys.path:
-        sys.path.insert(0, str(PLUGIN_DIR))
-    try:
-        from hermes_talk.work import intend
-        intend(**kwargs)
     except Exception:  # never disturb the agent's turn
         pass
 
@@ -100,8 +86,8 @@ def register(ctx):
     # call's own bot, chat, topic and user (see hermes_talk/thread_inbox.py) and passes everything else unchanged.
     ctx.register_hook("pre_gateway_dispatch", _chat_input)
     ctx.register_hook("post_llm_call", _chat_reply)
-    # In a voice task's turn (its `hermes chat` child or the gateway) this sees T3 admissions; elsewhere it records nothing.
-    ctx.register_hook("pre_tool_call", _t3_intent)
+    # In a voice task's turn (its `hermes chat` child or the gateway) this sees T3 admissions and cut T3 calls;
+    # elsewhere it records nothing.
     ctx.register_hook("post_tool_call", _t3_admission)
     if hasattr(ctx, "register_telegram_handler"):
         ctx.register_telegram_handler(_talk_command)

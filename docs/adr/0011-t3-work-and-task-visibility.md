@@ -56,9 +56,10 @@ stopped the turn and reported the task failed while T3 kept working. Telegram po
 - When a later queued message of the same thread starts before Talk's next read (10 s), the earlier task ends as
   unknown, since no supported read shows how that run ended. Updates queued on a busy thread therefore often leave the
   earlier task unknown; T3 itself keeps the full history.
-- A start whose answer was lost before T3 named a thread cannot be followed. Killing a turn between T3's commit and
-  the hook's write (cancel, budget) loses that admission the same way. Both settle from the turn.
-- If the voice server has no `t3_control` (plugin missing), large work stays running until it can read T3.
+- A start whose answer was lost before T3 named a thread cannot be followed. It settles from the turn, with a note.
+  (As first written, a turn killed between T3's commit and the hook's write lost its admission silently, and large
+  work stayed running for as long as the voice server could not read T3. The 2026-11-16 amendment below replaces
+  both.)
 - Rollback: the old Talk loads every job. A job that was following T3 (turn ended, still running) has no admission or
   live process in its base record, so the old Talk marks it interrupted and never reruns it; its T3 thread keeps
   running and is visible in T3. Hidden tasks keep their inert `hidden` record, so the old desk posts none of them;
@@ -66,21 +67,37 @@ stopped the turn and reported the task failed while T3 kept working. Telegram po
   means 3). The new receipts keys must be removed before a rollback, since the old parser refuses them.
 - Amended 2026-11-16 (`fix/talk-t3-outcomes-1116`), replacing the two consequences above about a killed turn and an
   unreadable T3:
-  - **A cut call is noted.** The plugin's `pre_tool_call` hook writes one intent per start or send under
-    `work/<job>/pending/` before the call runs; every answer the `post_tool_call` hook sees removes it, and each
-    admission record names its intent. When a turn ends in any state but succeeded with an intent still open, the
-    job gets a note link (`unconfirmed`, never counted) and settles from its turn with "T3 may run that work unseen
-    by Talk", naming the thread for a send. It is not followed: `t3_control` read shows the thread's status and the
-    ids of its latest and active run only, so a run with no recorded baseline cannot be told from another one, and a
-    start's thread id is derived inside the bridge. A turn that ended on its own saw each call answered, so an
-    intent left by a blocked call adds no note. A lost start without a thread id stays a note for the same reason.
-  - **An unreadable T3 is bounded.** A link keeps `unread_since`, the first failed read since the last good one.
-    After `work.UNREADABLE_S` (30 minutes) the run is unknown ("Talk could not read T3 for N min"): the job is
-    interrupted with `unknown`, no result. A possible admission T3 never confirmed becomes a note instead. The
-    window is stored on the link, so a restart does not start it again; time Talk was down counts.
+  - **A cut call is noted, from the core's own report.** When the core stops waiting for a running tool call it
+    fires `post_tool_call` itself, with the call's real arguments, a result it made up and `status` `cancelled`
+    (a stop: `session.interrupt` on the gateway, SIGINT in a `hermes chat` child) or `timeout` (its tool deadline),
+    and drops the tool's real answer. Talk's cancel, run budget and live-turn bound all stop a turn that way. For a
+    `t3_control` start or send of a task's turn the hook writes a cut record beside the admissions
+    (`work/<job>/<key>.json`, `cut`, no `thread_id`, the send's target as `to`). The job gets a note link
+    (`unconfirmed`, never counted) and settles from its turn with "T3 may run that work unseen by Talk", naming the
+    thread for a send; after a deadline the turn goes on and the note is added to its result. It is not followed:
+    `t3_control` read shows the thread's status and the ids of its latest and active run only, so a run with no
+    recorded baseline cannot be told from another one, and a start's thread id is derived inside the bridge. A
+    call id covers the request_id and every argument, as the bridge's command ids do; when the same call is later
+    answered (a retry), the admission replaces the note and the work is followed. A call the core never started
+    (it reports that one without arguments) or a hook blocked records nothing. A lost start without a thread id
+    stays a note for the same reason.
+  - **What is still silent.** A process killed outright while the call is open (SIGKILL, a crash, the gateway
+    stopped mid-call) reports nothing, so that task settles from its turn without a note. In a parallel tool batch
+    the core reports an unfinished call the same way whether or not it had started, so there the note can be about
+    a call that never reached T3. No `pre_tool_call` record is kept: it added a second hook and files per call to
+    cover only the hard kill.
+  - **An unreadable T3 is bounded by unreadable time.** A link keeps `unread_s`, the time spent between failed
+    reads since the last good one, and `unread_at`, the newest failed read. One pause between two failed reads
+    counts for at most `work.UNREAD_GAP_S` (2 minutes), so time Talk was down or a clock step forward adds at most
+    that, and a step back adds nothing. At `work.UNREADABLE_S` (30 minutes; `JobBoard(unread_s=...)`) the run is unknown
+    ("Talk could not read T3 for N min"): the job is interrupted with `unknown`, no result. A possible admission T3
+    never confirmed becomes a note instead. Both values are stored on the link, so a restart keeps what was counted.
+    A T3 that stays unreadable always ends the run after a bounded number of reads.
   - The superseded-run case stays unknown: the handler exposes no per-run status and no run list.
-  - Rollback to `ccdc0c6`: its loader ignores `unread_since` and reads note links as dropped ones; it never reads
-    `pending/`. It needs no step first.
+  - Rollback to `ccdc0c6`: its loader ignores `unread_s` and `unread_at` and reads note links as dropped ones. It
+    reads a cut record as a lost start without a thread id, which is a note too and follows nothing. It needs no
+    step first.
 - Tests: `tests/work/run.py` (real server, board, desk, NativeAgent, spool and hook body; bounded runner and a
   file-backed T3), `tests/capacity/run.py` (lanes, no open cap), and `tests/e2e/run-agent.py` `t3_admission_real_hook`
-  (a real turn calls a synthetic `t3_control` plugin; the real hook fires; Talk follows through the registry).
+  (a real turn calls a synthetic `t3_control` plugin; the real hook fires; Talk follows through the registry) and
+  `t3_cut_call_real_core` (the core's real stop and tool-deadline paths cut an accepted start; the note appears).
