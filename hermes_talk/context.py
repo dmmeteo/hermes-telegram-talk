@@ -4,19 +4,23 @@ The frame (voice limits) comes first and the opening policy last; room for both 
 else. The other sections fill the remaining room in priority order, each within its own character budget,
 headers and the "[clipped]" marker included. Skills are guidance text only. They register no tools.
 """
+import re
+
 from . import resume
-from .config import SELF_REFERENCE
+from .config import DEFAULT_PERSONA, PERSONA_CHARS, SELF_REFERENCE
 
 FRAME = (
     "You are the realtime voice of the Hermes profile \"{name}\" in Hermes Telegram Talk, a Telegram Mini App. "
-    "Speak naturally and briefly. When interrupted, stop and listen.\n"
+    "Your name is \"{name}\": if asked who you are, you are {name}; never introduce yourself as ChatGPT or a "
+    "generic assistant. Speak naturally and briefly. When interrupted, stop and listen.\n"
     "Voice limits in this build: you cannot run tools, start or cancel Hermes work, read files or "
     "browse. If asked to do something, say plainly that Talk cannot start work yet and that nothing "
     "was executed. Never claim a task ran, finished or was sent. Ending this call cancels nothing."
 )
 TASKS_FRAME = (
     "You are the realtime voice of the Hermes profile \"{name}\" in Hermes Telegram Talk, a Telegram Mini App. "
-    "Speak naturally and briefly. When interrupted, stop and listen.\n"
+    "Your name is \"{name}\": if asked who you are, you are {name}; never introduce yourself as ChatGPT or a "
+    "generic assistant. Speak naturally and briefly. When interrupted, stop and listen.\n"
     "You can hand work to Hermes, this profile's own agent with its tools. When the user asks for something this "
     "context cannot answer (look something up, read or check something, research), delegate it. A delegated task "
     "runs in the background: say you handed it to Hermes and keep talking. Its result arrives later on that "
@@ -146,6 +150,17 @@ def _inside(make, text, limit):
     return make(_fit(text.strip(), room)) if text.strip() and room >= MIN_SECTION else ""
 
 
+def soul_persona(soul):
+    """The part of a profile's SOUL a voice carries: its lead (identity, before the first "## " section) and its
+    "## Voice" section when that still fits whole. Operational sections never reach the call."""
+    sections = re.split(r"(?m)^(?=## )", (soul or "").strip())
+    lead = "" if sections[0].startswith("## ") else _fit(sections[0].strip(), PERSONA_CHARS)
+    voice = next((s.strip() for s in sections if s.split("\n", 1)[0].strip().lower() == "## voice"), "")
+    if voice and len(lead) + 2 + len(voice) <= PERSONA_CHARS:
+        return "\n\n".join(filter(None, (lead, voice)))
+    return lead
+
+
 def opening(config, greeting_line):
     if not config.greeting_enabled:
         return WAIT_FOR_USER
@@ -163,7 +178,7 @@ def language_rule(config):
 
 
 def compose(config, skills, summary, activity_lines, activity_total, activity_note,
-            tasks_ready=False, job_items=(), reports_note="", greeting_line=None):
+            tasks_ready=False, job_items=(), reports_note="", greeting_line=None, persona=None):
     """Instruction text plus a per-section report of what was included (names and sizes only).
 
     report["activity_items"] is how many of activity_lines the text carries whole; only those count
@@ -182,7 +197,7 @@ def compose(config, skills, summary, activity_lines, activity_total, activity_no
     middle = [
         ("language", lambda room: _fit(_section("Language", language_rule(config), 800), room)),
         ("persona", lambda room: _inside(lambda text: "## Persona\n" + PERSONA + resume.fenced("hermes_persona", text),
-                                         config.persona_text, room)),
+                                         persona or config.persona_text or DEFAULT_PERSONA, room)),
         ("skills", lambda room: _fit("\n\n".join(part for _, part in skill_parts), room)),
         ("summary", lambda room: _inside(lambda text: SUMMARY_HEADER + resume.summary_block(text), summary,
                                          min(room, b.summary_chars + len(SUMMARY_HEADER + resume.summary_block(""))))),

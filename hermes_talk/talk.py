@@ -16,7 +16,7 @@ from . import activity, notify, pulse, pulse_policy, resume
 from .agent import Readiness
 from .gateway_rpc import TASK_SOURCE, task_agent
 from .config import PRIVATE_NAMES
-from .context import UPDATE_HEADER, chat_section, compose, update
+from .context import UPDATE_HEADER, chat_section, compose, soul_persona, update
 from .jobs import DELEGATION_ID, OPEN, SUCCEEDED, UNDELIVERED, JobBoard
 from .pulse_engine import SELECT_ON_CALL_S, PulseEngine
 from .pulse_ledger import PulseLedger
@@ -83,6 +83,16 @@ def background(fn):
     threading.Thread(target=run, name="talk-resume", daemon=True).start()
 
 
+def native_soul(home):
+    """The profile's SOUL.md through the core loader (scanned, pinned to this profile's home); "" when absent."""
+    try:
+        from agent.prompt_builder import load_soul_md
+        return load_soul_md(home_override=home) or ""
+    except Exception as exc:
+        logger.warning("soul unavailable: %s", type(exc).__name__)
+        return ""
+
+
 def native_skill(name):
     from tools.skills_tool import skill_view
     result = json.loads(skill_view(name, preprocess=False))
@@ -105,6 +115,7 @@ class TalkRuntime:
         self.spawn = spawn or background
         self._summary_lock = threading.Lock()
         self._summarizing = set()
+        self.soul = soul if soul is not None else (lambda: native_soul(home))
         self.skill = skill
         self.clock = clock
         self._last_greeting = {}
@@ -288,6 +299,7 @@ class TalkRuntime:
             self.store.owned(account, conversation_id, bound=True)
         c = self.config
         skills = [(name, redact(self.skill(name) or "")) for name in c.skills]
+        persona = c.persona_text or soul_persona(redact(self.soul() or ""))
         summary, items = self._resume(account, conversation_id)
         self.pulse.remember_talk(account, conversation_id)
         limit = c.budgets.activity_items if c.activity_enabled else 0
@@ -299,15 +311,17 @@ class TalkRuntime:
         job_items = self._job_items(account, conversation_id)
         instructions, report = compose(c, [s for s in skills if s[1]], summary or "", lines, total, note,
                                        self.readiness(user_id).ready, job_items, self._reports_note(user_id),
-                                       self._greeting_line(account))
+                                       self._greeting_line(account), persona)
         report["initial_items"] = items
+        report["persona_source"] = "config" if c.persona_text else "soul" if persona else "default"
         # Only cards the final text carries whole are exposed; none counts as heard until the call shows it.
         carried = [card["fp"] for card in cards[: report["activity_items"]]]
         report["job_ids"] = [i for i in report["job_ids"] if not i.startswith("open:")]
         report["job_numbers"] = self._job_numbers(account, conversation_id, report["job_ids"])
         logger.info("context frame=instructions sources=%s", json.dumps(
             {**{key: report[key] for key in ("frame", "language", "persona", "skills", "summary", "jobs", "activity",
-                                             "greeting", "activity_items")}, "initial_items": len(items)},
+                                             "greeting", "activity_items", "persona_source")},
+             "initial_items": len(items)},
             sort_keys=True))
         return conversation_id, instructions, carried, report
 

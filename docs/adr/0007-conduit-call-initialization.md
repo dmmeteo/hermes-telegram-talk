@@ -46,6 +46,7 @@ Conduit (iOS app `kaishi00/hermes-conduit` at 4b6889097d53ad731089f255b03afe534e
   `tests/startup/backend.py`): the summary is written in the background, when a call ends and when a call opens and
   finds one needed, deduplicated per conversation. Until it exists the call gets its latest turns and, if a stored
   summary ends before them, that summary of the start. Conduit instead waits for the summary at setup.
+- Superseded by [ADR 0012](0012-voice-persona-from-soul-identity.md) for the default persona source.
 - Deviation from Conduit, by the assignment: Talk no longer reads SOUL. The persona is `persona.text` (YAML, at most
   1200 characters) or a short default in the tone of Hermes' `LIVE_PERSONA`, inside Conduit's `<hermes_persona>`
   framing. `TalkRuntime(soul=...)` is still accepted from frontend-owned harnesses and ignored.

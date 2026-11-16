@@ -15,9 +15,9 @@ voice:
                              # the GPT-Live session has no language field)
   # language_hint: "..."     # optional extra language guidance, added after the language rule
   session_ttl_minutes: 120   # an unended call is marked expired after this; the conversation itself never resets
-# persona:                   # the voice persona; Talk does not read the profile's SOUL.md
+# persona:                   # the voice persona; default: the identity of the profile's SOUL.md (ADR 0012)
 #   text: "Calm, warm and to the point. Dry humour is welcome; never chatty."  # up to 1200 characters;
-#                            # default: a calm and friendly voice assistant
+#                            # replaces the SOUL identity; without either, a calm and friendly voice assistant
 #   self_reference: feminine # Ukrainian feminine forms for herself: «я готова», «я зрозуміла»
 greeting:
   enabled: true              # false: the voice waits for the user to speak first

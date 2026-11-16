@@ -60,7 +60,7 @@ class Harness:
             os.environ["HERMES_HOME"] = str(self.home)
             from hermes_talk.history import NativeHistory
             self.history = NativeHistory(self.home)
-            self.talk = TalkRuntime(self.config, fx.BOT_TOKEN, self.history, clock=self.clock)
+            self.talk = TalkRuntime(self.config, fx.BOT_TOKEN, self.history, clock=self.clock, home=self.home)
         else:
             self.history = MemoryHistory()
             self.talk = TalkRuntime(self.config, fx.BOT_TOKEN, self.history, soul=fx.file_soul(self.home),
@@ -744,15 +744,15 @@ def each_profile_speaks_its_own_soul_and_a_missing_soul_is_reported(h):
         (long.home / "SOUL.md").write_text("# Long\n" + "SYNTHETIC-LONG-SOUL words. " * 200 + "\n## Voice\nloud\n")
         stream = io.StringIO()
         handler = logging.StreamHandler(stream)
-        logging.getLogger("hermes_talk.talk").addHandler(handler)
-        logging.getLogger("hermes_talk.talk").setLevel(logging.INFO)
+        server.logger.addHandler(handler)
+        server.logger.setLevel(logging.INFO)
         try:
             _, mine = h.call()
             _, theirs = other.call()
             _, none = bare.call()
             _, clipped = long.call()
         finally:
-            logging.getLogger("hermes_talk.talk").removeHandler(handler)
+            server.logger.removeHandler(handler)
         persona = lambda text: text.split("<hermes_persona>\n", 1)[1].split("\n</hermes_persona>", 1)[0]
         assert fx.SOUL_MARKER in persona(mine) and "SYNTHETIC-OTHER-SOUL" not in mine, "profile isolation"
         assert "SYNTHETIC-OTHER-SOUL" in persona(theirs) and fx.SOUL_MARKER not in theirs, "profile isolation"
