@@ -22,6 +22,10 @@ instruction budget.
 - Both frames carry a name rule from `profile.display_name`: if asked who it is, the voice is that name and never
   introduces itself as ChatGPT or a generic assistant. It sits in the frame, so the persona cannot override it.
 - The opening line stays configuration: `greeting.phrases` (each at most 160 characters), else the language line.
+  A configured phrase is said exactly as written, in the language it is written in and untranslated (voice task 46:
+  the default profile opens with the English "Hey, Vsauce, Michael here" and then speaks Ukrainian). Its opening
+  policy no longer names the call language, and the language rule then reads "after the configured opening line,
+  speak <language>" instead of "open the call in <language>".
 
 ## Alternatives
 

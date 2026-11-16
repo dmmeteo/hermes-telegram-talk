@@ -123,9 +123,10 @@ section ends with `[clipped]`.
    visit. If more changed, the briefing says older updates were not read, rather than claiming it saw everything.
    When room allows, a short "Pulse updates" section tells the model to name updates by title and how to delegate
    feedback.
-7. The opening policy, last so no section above overrides it. With the greeting on, the model speaks first in the
-   configured language and says one line: one of `greeting.phrases` (chosen locally, never the account's previous
-   one), else the language's own line, else it follows `greeting.text`. It leaves updates for later. With the
+7. The opening policy, last so no section above overrides it. With the greeting on, the model speaks first and says
+   one line: one of `greeting.phrases` (chosen locally, never the account's previous one) exactly as written, in its
+   own language and untranslated, after which the language rule applies; else the language's own line; else it
+   follows `greeting.text`. It leaves updates for later. With the
    greeting off, it waits for the user to speak first.
 
 ### Fast start and in-call catch-up

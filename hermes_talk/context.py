@@ -39,6 +39,10 @@ PERSONA = ("Speak with the personality below. It shapes how you sound, not how m
 GREET_FIRST = ("Opening policy: speak first. As soon as the call starts, greet the user{language} in one short "
                "sentence so they know you're there and listening.{say} Then wait for them. Do not list updates in "
                "the greeting; bring them up once the user has spoken. This applies whatever the persona above says.")
+SAY_LINE = ("Opening policy: speak first. As soon as the call starts, say this configured opening line exactly as "
+            "written, word for word and in the language it is written in, without translating or adding to it: "
+            "\"{line}\" Then wait for them. Do not list updates in the greeting; bring them up once the user has "
+            "spoken. This applies whatever the persona above says.")
 WAIT_FOR_USER = ("Opening policy: do not speak first. When the call starts, stay silent until the user speaks, then "
                  "answer what they said. This applies whatever the persona above says.")
 SUMMARY_HEADER = "## Earlier in this conversation\n"
@@ -164,15 +168,19 @@ def soul_persona(soul):
 def opening(config, greeting_line):
     if not config.greeting_enabled:
         return WAIT_FOR_USER
+    if greeting_line:
+        return SAY_LINE.format(line=greeting_line.replace(chr(34), chr(39)))
     language = config.language
-    line = greeting_line or (language.greeting if language else None)
-    say = f' Say: "{line.replace(chr(34), chr(39))}"' if line else f" {config.greeting}"
+    line = language.greeting if language else None
+    say = f' Say: "{line}"' if line else f" {config.greeting}"
     return GREET_FIRST.format(language=f" in {language.name}" if language else "", say=say)
 
 
 def language_rule(config):
     language = config.language
-    rule = (f"Speak {language.name}: open the call in {language.name} and keep speaking it unless the user switches "
+    start = ("after the configured opening line, speak" if config.greeting_enabled and config.greeting_phrases
+             else "open the call in")
+    rule = (f"Speak {language.name}: {start} {language.name} and keep speaking it unless the user switches "
             "language." if language else "")
     return " ".join(filter(None, (rule, config.language_hint, SELF_REFERENCE.get(config.self_reference, ""))))
 
