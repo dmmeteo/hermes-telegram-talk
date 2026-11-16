@@ -26,6 +26,8 @@ applyTheme(theme);
 
 const startButton = document.getElementById("start");
 const muteButton = document.getElementById("mute");
+const noticeBox = document.getElementById("notice");
+const noticeTitle = document.getElementById("notice-title");
 const errorBox = document.getElementById("error");
 const remoteAudio = document.getElementById("remote");
 const orb = document.getElementById("orb");
@@ -49,6 +51,8 @@ let followingTranscript = true;
 let call = null;
 let conversation = null;
 let exiting = false;
+let errorText = "";
+const SAVE_FAILED = "Conversation could not be saved. Tap Retry saving.";
 const APPEND_MAX_BYTES = 500;
 const FINISHED = ["succeeded", "failed", "cancelled", "interrupted"];
 // Statuses that prove the server refused the task before accepting it; anything else may have been accepted.
@@ -67,8 +71,8 @@ function initData() {
 }
 
 function showError(message = "") {
-  errorBox.textContent = message;
-  errorBox.hidden = !message;
+  errorText = message;
+  render();
 }
 
 async function post(route, body, options = {}) {
@@ -206,10 +210,30 @@ function render() {
   muteButton.disabled = !current || current.phase !== "ready";
   muteButton.setAttribute("aria-pressed", String(Boolean(current?.muted)));
   muteButton.querySelector("span").textContent = current?.muted ? "Unmute" : "Mute";
-  startButton.hidden = Boolean(current && current.phase !== "blocked" && !current.conversation?.saveFailed);
-  startButton.textContent = current?.phase === "blocked" ? "Enable audio"
-    : current?.conversation?.saveFailed ? "Retry saving" : errorBox.textContent ? "Retry" : "Connect";
+  const shown = notice(current);
+  noticeBox.hidden = !shown;
+  noticeBox.dataset.kind = shown?.kind ?? "";
+  write(noticeTitle, shown?.title ?? "");
+  write(errorBox, shown?.message ?? "");
+  errorBox.hidden = !shown?.message;
+  write(startButton, shown?.action ?? "");
+  startButton.hidden = !shown?.action;
   draw(current);
+}
+
+// The action names the branch start() takes in the same state, so the button keeps running the real action.
+function notice(current) {
+  const action = !current ? (errorText ? "Retry" : "Connect") : current.phase === "blocked" ? "Enable audio"
+    : current.conversation?.saveFailed ? "Retry saving" : null;
+  // Enabling audio clears the error text; a save that still failed keeps saying so next to its button.
+  const message = action === "Retry saving" ? SAVE_FAILED : errorText;
+  if (message) return {kind: "error", title: "Error", message, action};
+  return action ? {kind: "prompt", title: "", message, action} : null;
+}
+
+// render() runs every frame; rewriting unchanged text would replace the node and could repeat the alert.
+function write(element, text) {
+  if (element.textContent !== text) element.textContent = text;
 }
 
 function rms(analyser, samples) {
@@ -325,7 +349,6 @@ function stop(message = "") {
   remoteAudio.srcObject = null;
   transcriptCut();
   showError(message);
-  render();
   renderVoice(null);
 }
 
@@ -347,7 +370,7 @@ async function flush(owner) {
     }
     if (!owner.pending.length && owner.saveFailed) {
       owner.saveFailed = false;
-      if (!exiting) { showError(); render(); }
+      if (!exiting) showError();
     }
   } catch (error) {
     if ([401, 403, 404, 409].includes(error.status)) {
@@ -358,8 +381,7 @@ async function flush(owner) {
       owner.retryTimer = setTimeout(() => void flush(owner), 500 * 2 ** owner.retries);
     } else if (!exiting) {
       owner.saveFailed = true;
-      showError("Conversation could not be saved. Tap Retry saving.");
-      render();
+      showError(SAVE_FAILED);
     }
   } finally { owner.busy = false; }
 }
@@ -933,7 +955,7 @@ async function start() {
   const current = { auth, phase: "connecting", abort: new AbortController(), nodes: [], began: performance.now(), stages: {},
     seen: new Set(), delegations: new Set(), jobs: new Map(), spoken: new Set(), cut: new Set(), polls: 0,
     muted: microphoneMuted, inputLevel: 0, outputLevel: 0, meters: {you: SILENT, agent: SILENT, due: 0} };
-  call = current; showError(); render();
+  call = current; showError();
   try {
     current.audio = new AudioContext();
     current.audio.onstatechange = () => {

@@ -6,17 +6,21 @@
 <meta name="color-scheme" content="dark">
 <meta id="theme-color" name="theme-color" content="#30302e">
 <title>Hermes Telegram Talk</title>
-<link rel="stylesheet" href="app.css?v=938ff92edb0f0dd4">
+<link rel="stylesheet" href="app.css?v=a13827395347e6c5">
 <script src="https://telegram.org/js/telegram-web-app.js" defer></script>
-<script src="app.js?v=77e789af55317d18" defer></script>
+<script src="app.js?v=8f0c83143c8fde03" defer></script>
 </head>
 <body>
 <main>
   <ol id="transcript" aria-label="Transcript" aria-live="polite" tabindex="0" hidden></ol>
   <div class="actions">
     <p id="call-status" role="status">Connecting</p>
-    <p id="error" role="alert" hidden></p>
-    <button id="start" type="button" hidden>Tap to start</button>
+    <div id="notice" hidden>
+      <p id="notice-title" class="notice-title"></p>
+      <svg class="notice-symbol" viewBox="0 0 32 32" aria-hidden="true"><circle cx="17" cy="17" r="14" fill="#171b18"/><circle cx="15" cy="15" r="14" fill="#9d264b" stroke="#171b18"/><path d="m10 10 10 10m0-10-10 10" stroke="#fff" stroke-width="3"/></svg>
+      <p id="error" role="alert" hidden></p>
+      <button id="start" type="button" hidden>Tap to start</button>
+    </div>
     <div class="control-row">
       <button id="menu-toggle" type="button" aria-label="Call settings" aria-expanded="false" aria-controls="call-menu"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h.01M12 12h.01M19 12h.01" stroke-width="4" stroke-linecap="round"/></svg></button>
       <section id="call-menu" aria-labelledby="menu-title" tabindex="-1" hidden>

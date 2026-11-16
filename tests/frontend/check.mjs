@@ -184,6 +184,44 @@ test('exhausted saving retries expose a usable retry without reopening media',as
  const before=f.run('flushCalls');await f.run('start()');assert.equal(f.run('flushCalls'),before+1);
  assert.equal(f.run('call===current'),true);assert.equal(f.run('owner.retries'),0);
 });
+const SAVE_FAILED='Conversation could not be saved. Tap Retry saving.';
+const shownNotice=f=>{const n=id=>f.run(`document.getElementById('${id}')`);return n('notice').hidden?null:{kind:n('notice').dataset.kind,title:n('notice-title').textContent,
+ message:n('error').hidden?'':n('error').textContent,action:n('start').hidden?null:n('start').textContent};};
+test('the notice follows the call phase, the save state and the error text, and its button runs the real action',async()=>{
+ const f=fixture();
+ f.run(`current.phase='ready';showError();`);
+ assert.equal(shownNotice(f),null,'a working call shows no notice');
+ f.run(`emit({type:'turn.done',turn:{role:'user',transcript:'Synthetic unsaved line'}});owner.retries=3;post=async()=>{throw new Error('network');};`);
+ await f.run('realFlush(owner)');
+ assert.deepEqual(shownNotice(f),{kind:'error',title:'Error',message:SAVE_FAILED,action:'Retry saving'},'a failed save is an error');
+ f.run(`flush=realFlush;globalThis.saved=[];post=async(route,body)=>{if(route!=='events')return {ok:true};
+  saved.push(...body.events.map(e=>e.text));return {conversation_id:owner.id,accepted_ids:body.events.map(e=>e.id)};};`);
+ f.run('start()');await drain();
+ assert.deepEqual(JSON.parse(f.run('JSON.stringify(saved)')),['Synthetic unsaved line'],'Retry saving sends the unsaved line again');
+ assert.equal(f.run('owner.pending.length'),0);assert.equal(f.run('call===current'),true,'saving again keeps the call');
+ assert.equal(shownNotice(f),null,'the notice clears once the conversation is saved');
+ f.run(`current.phase='blocked';render();`);
+ assert.deepEqual(shownNotice(f),{kind:'prompt',title:'',message:'',action:'Enable audio'},'blocked audio is a prompt');
+ f.run(`current.phase='ready';render();`);assert.equal(shownNotice(f),null,'the prompt clears with audio');
+ f.run(`showError('That voice is not available.')`);
+ assert.deepEqual(shownNotice(f),{kind:'error',title:'Error',message:'That voice is not available.',action:null},'an error during a call adds no button');
+ f.run('showError()');assert.equal(shownNotice(f),null);
+ f.run(`stop('Connection lost. Tap Retry to reconnect.')`);
+ assert.deepEqual(shownNotice(f),{kind:'error',title:'Error',message:'Connection lost. Tap Retry to reconnect.',action:'Retry'},'a stopped call with an error offers Retry');
+ f.run('stop()');
+ assert.deepEqual(shownNotice(f),{kind:'prompt',title:'',message:'',action:'Connect'},'a stopped call without an error offers Connect');
+});
+test('a save that failed while audio was blocked stays an error after Enable audio',async()=>{
+ const f=fixture();
+ f.run(`emit({type:'turn.done',turn:{role:'user',transcript:'Synthetic blocked line'}});owner.retries=3;post=async()=>{throw new Error('network');};
+  current.audio={state:'suspended',resume:async()=>{},close:async()=>{}};current.phase='blocked';showError();`);
+ await f.run('realFlush(owner)');
+ assert.equal(shownNotice(f).action,'Enable audio','audio comes first, as start() does');
+ f.run(`current.audio.state='running';`);await f.run('enableAudio(current)');
+ assert.deepEqual(shownNotice(f),{kind:'error',title:'Error',message:SAVE_FAILED,action:'Retry saving'},
+  'enabling audio clears the error text but not the failed save');
+ assert.equal(f.run('owner.pending.length'),1,'the unsaved line is kept');
+});
 test('foreign identity prevents queued event retry',async()=>{
  const f=fixture();f.run(`emit({type:'turn.done',turn:{role:'user',transcript:'old account'}});
  initData=()=>'different';post=()=>{throw new Error('must not send');};`);

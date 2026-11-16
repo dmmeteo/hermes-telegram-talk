@@ -233,6 +233,8 @@ try {
     connecting: () => {},
     blocked: () => { call.phase = 'blocked'; render(); },
     stopped: () => stop('Voice did not become ready. Tap Retry to reconnect.'),
+    'save-failed': () => { call.phase = 'connecting'; call.conversation.saveFailed = true; render(); },
+    connect: () => stop(),
   };
   const contrast = () => panel.evaluate(() => {
     const parse = value => { const n = value.match(/[\d.]+/g)?.map(Number) ?? []; return n.length < 3 ? null : [n[0], n[1], n[2], n.length > 3 ? n[3] : 1]; };
@@ -308,7 +310,7 @@ try {
       assert(await closedWithFocusOn('menu-toggle'), `Escape closes and restores focus (${where})`);
     }
     await panel.evaluate(() => { stop(); void start(); });
-    await panel.waitForFunction(() => call && !document.getElementById('voice-box').hidden);
+    await panel.waitForFunction(() => call?.conversation && !document.getElementById('voice-box').hidden);
   }
   }
   await panel.evaluate(() => document.getElementById('theme-modern').click());
@@ -352,6 +354,120 @@ try {
   assert(await closedWithFocusOn('menu-toggle'), 'the toggle then closes the panel');
   log('panel-keyboard');
   await panelContext.close();
+
+  const noticeContext = await browser.newContext({viewport: {width: 390, height: 844}, hasTouch: true});
+  await noticeContext.addInitScript(() => { navigator.mediaDevices.getUserMedia = () => new Promise(() => {}); });
+  const desk = await open(noticeContext);
+  const settled = (predicate, arg) => desk.waitForFunction(predicate, arg, {timeout: 10000}).then(() => true, () => false);
+  // A live call on a real voice session of the fixture server, so a retried save reaches its event store.
+  const liveCall = async () => {
+    await desk.evaluate(() => { if (!call) void start(); });
+    assert(await settled(() => call?.conversation && !document.getElementById('voice-box').hidden
+      && (call.phase === 'blocked' || call.audio?.state === 'running')), 'a call bootstraps');
+    await desk.evaluate(async () => {
+      const peer = new RTCPeerConnection();
+      peer.createDataChannel('synthetic');
+      await peer.setLocalDescription(await peer.createOffer());
+      const answer = await post('session', {initData: call.auth, sdp: peer.localDescription.sdp, conversation_id: call.conversation.id});
+      peer.close();
+      clearTimeout(call.timeout);
+      const silent = {getFloatTimeDomainData: samples => samples.fill(0)};
+      const track = {enabled: false, readyState: 'live', stop() {}};
+      Object.assign(call, {voiceId: answer.voice_session_id, phase: 'ready', playing: true, handshake: true,
+        audio: {state: 'running', close: async () => {}, resume: async () => {}}, peer: {connectionState: 'connected', close() {}},
+        stream: {getAudioTracks: () => [track], getTracks: () => [track]},
+        inputAnalyser: silent, inputSamples: new Float32Array(64), outputAnalyser: silent, outputSamples: new Float32Array(64)});
+      updateMic(call);
+    });
+  };
+  // Tolerates a source without the window, so every assertion below also runs (and fails) against the old markup.
+  const parts = () => desk.evaluate(() => {
+    const notice = document.getElementById('notice');
+    const box = element => element?.getClientRects().length ? element.getBoundingClientRect().toJSON() : null;
+    const style = notice ? getComputedStyle(notice) : {};
+    return {hidden: notice?.hidden, kind: notice?.dataset.kind, display: style.display, border: style.borderTopWidth, shadow: style.boxShadow ?? '',
+      window: box(notice), title: box(document.getElementById('notice-title')), titleText: document.getElementById('notice-title')?.textContent,
+      symbol: box(notice?.querySelector('.notice-symbol')), message: box(document.getElementById('error')),
+      button: box(document.getElementById('start')), action: document.getElementById('start').textContent,
+      inside: Boolean(notice) && ['notice-title', 'error', 'start'].every(id => notice.contains(document.getElementById(id))),
+      messageLook: [getComputedStyle(document.getElementById('error')).color, getComputedStyle(document.getElementById('error')).textAlign],
+      buttonFace: getComputedStyle(document.getElementById('start')).backgroundColor,
+      status: box(document.getElementById('call-status')), row: box(document.querySelector('.control-row')),
+      transcript: box(document.getElementById('transcript')),
+      fixed: [...document.querySelectorAll('.meter, #menu-toggle, #orb, #mute, #name')].map(box).filter(Boolean),
+      overflow: document.documentElement.scrollWidth > innerWidth};
+  });
+  const apart = (a, b) => a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top;
+  const within = (inner, outer) => inner.left >= outer.left - .5 && inner.right <= outer.right + .5 && inner.top >= outer.top - .5 && inner.bottom <= outer.bottom + .5;
+  const unsaved = 'Synthetic line the server could not save at first.';
+  const scenes = [
+    ['save-failed', 'error', 'Retry saving', async () => {
+      await desk.route('**/api/events', route => route.fulfill({status: 503, contentType: 'application/json', body: '{"error":"Synthetic outage"}'}));
+      await desk.evaluate(text => { call.conversation.retries = 3;
+        settle(call, {turn: {id: `unsaved-${Date.now()}`, role: 'user', transcript: text}}); }, unsaved);
+      assert(await settled(() => call.conversation.saveFailed), 'a failing flush marks the conversation unsaved');
+    }, async click => {
+      await desk.unroute('**/api/events');
+      const answered = desk.waitForResponse(response => response.url().endsWith('/api/events'), {timeout: 10000}).catch(() => null);
+      await click();
+      const response = await answered;
+      const sent = response?.request().postDataJSON(), stored = await response?.json().catch(() => null);
+      assert(response?.ok() && sent.events.some(event => event.text === unsaved) && sent.events.every(event => stored?.accepted_ids?.includes(event.id)),
+        `the window's Retry saving button sends the unsaved line and the fixture server stores it: ${JSON.stringify({sent, stored})}`);
+      return settled(() => !call.conversation.pending.length && !call.conversation.saveFailed);
+    }],
+    ['enable-audio', 'prompt', 'Enable audio', () => desk.evaluate(() => { call.phase = 'blocked'; call.playing = false; updateMic(call); }),
+      async click => { await click(); return settled(() => call && call.phase !== 'blocked'); }],
+    ['error', 'error', 'Retry', () => desk.evaluate(() => stop('Voice did not become ready. Tap Retry to reconnect.')),
+      async click => { await click(); return settled(() => Boolean(call)); }],
+    ['connect', 'prompt', 'Connect', () => desk.evaluate(() => stop()),
+      async click => { await click(); return settled(() => Boolean(call)); }],
+  ];
+  for (const theme of ['modern', 'typesafe']) {
+    await desk.evaluate(theme => document.getElementById(`theme-${theme}`).click(), theme);
+    await liveCall();
+    for (const [scene, kind, action, enter, act] of scenes) {
+      await desk.setViewportSize({width: 390, height: 844});
+      await enter();
+      for (const [width, height] of [[390, 844], [360, 640], [320, 568], [844, 390], [1280, 800]]) {
+        await desk.setViewportSize({width, height});
+        const g = await parts();
+        const where = `${theme} ${scene} ${width}x${height}`;
+        assert(!g.hidden && g.kind === kind && g.inside && g.button && g.action === action,
+          `the ${scene} notice shows ${action} (${where}): ${JSON.stringify({kind: g.kind, action: g.action, button: g.button})}`);
+        const shown = [g.window, g.message, g.button].filter(Boolean);
+        assert(!g.overflow && shown.every(box => box.left >= 0 && box.right <= width && box.top >= 0 && box.bottom <= height),
+          `the notice stays inside the viewport (${where}): ${JSON.stringify(shown)}`);
+        assert(g.status && shown.every(box => g.status.bottom <= box.top) && g.transcript.bottom <= g.status.top,
+          `transcript, status line and notice stack without overlap (${where}): ${JSON.stringify({transcript: g.transcript, status: g.status, shown})}`);
+        assert(shown.every(box => box.bottom <= g.row.top && g.fixed.every(fixed => apart(box, fixed))),
+          `the notice never covers the control row, the portrait or the meters (${where})`);
+        if (theme === 'typesafe' && kind === 'error') {
+          const pieces = [g.title, g.symbol, g.message, g.button];
+          assert(g.display === 'grid' && g.border === '1px' && g.shadow.includes('4px 4px') && g.titleText === 'Error'
+            && pieces.every(piece => piece && within(piece, g.window)),
+            `Retro 95 frames the title, symbol, message and button in one raised window (${where}): ${JSON.stringify(g)}`);
+          assert(pieces.every(Boolean) && g.title.top - g.window.top <= 4 && g.title.width >= g.window.width - 8.5 && g.symbol.right <= g.message.left
+            && pieces.every((a, i) => pieces.slice(i + 1).every(b => apart(a, b))),
+            `the title bar spans the top and the symbol, message and button do not overlap (${where}): ${JSON.stringify(pieces)}`);
+        } else {
+          assert(g.display === 'contents' && !g.title && !g.symbol,
+            `${theme === 'modern' ? 'Modern' : 'a Retro 95 prompt'} keeps the bare line and button, with no window (${where}): ${JSON.stringify(g)}`);
+        }
+        if (theme === 'modern') {
+          assert(g.buttonFace === 'rgb(217, 119, 87)' && (!g.message || (g.messageLook[0] === 'rgb(238, 136, 132)' && g.messageLook[1] === 'center')),
+            `Modern keeps its red centered line and orange button (${where}): ${JSON.stringify([g.messageLook, g.buttonFace])}`);
+        }
+        if (width === 390 || width === 844) await desk.screenshot({path: `${out}/notice-${theme}-${scene}-${width}x${height}.png`});
+      }
+      await desk.setViewportSize({width: 390, height: 844});
+      const cleared = await act(() => desk.locator('#notice #start').click({timeout: 5000}).then(() => true, () => false));
+      const after = await parts();
+      assert(cleared && after.hidden, `the ${action} button runs its action and the notice disappears with its state (${theme}): ${JSON.stringify(after)}`);
+      log('notice', {theme, scene, action});
+    }
+  }
+  await noticeContext.close();
 
   const themed = await browser.newContext({viewport: {width: 390, height: 844}, hasTouch: true});
   await themed.addInitScript(() => {
