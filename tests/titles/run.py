@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests" / "work"))
 
 from hermes_talk import receipts  # noqa: E402
-from hermes_talk.pulse_model import PulseModel  # noqa: E402
+from hermes_talk.pulse.model import PulseModel  # noqa: E402
 from run import World  # noqa: E402  (tests/work/run.py)
 
 # Synthetic Ukrainian speech: long filler first, the objective later (past the first 60 characters).

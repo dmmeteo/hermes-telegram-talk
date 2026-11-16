@@ -34,7 +34,7 @@ import json, sys
 from pathlib import Path
 talk_dir = Path(sys.argv[1])
 sys.path.insert(0, str(talk_dir))
-import hermes_talk.pulse_model as pulse_model
+import hermes_talk.pulse.model as pulse_model
 from hermes_cli.plugins import PluginManager
 m = PluginManager()
 m.discover_and_load(force=True)

@@ -97,7 +97,7 @@ class World:
         self.posts = Posts()
         self.fake = fx.FakeUpstream()
         self.talk = self.httpd = None
-        self.model = model  # the host ctx.llm route as TalkRuntime sees it (pulse_model.PulseModel); None: unbound
+        self.model = model  # the host ctx.llm route as TalkRuntime sees it (pulse.model.PulseModel); None: unbound
 
     def serve(self):
         self.talk = TalkRuntime(self.config, fx.BOT_TOKEN, self.history, home=self.home, agent=self.agent,

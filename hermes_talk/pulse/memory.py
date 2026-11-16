@@ -16,7 +16,7 @@ import re
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from . import pulse_claims
+from . import claims as pulse_claims
 
 KINDS = ("commitment", "promise", "intention", "interest", "fact", "watch")
 SPEAKERS = {"commitment": "user", "intention": "user", "interest": "user", "watch": "user", "promise": "assistant"}
@@ -185,7 +185,7 @@ def _closed(raw, rows, remembered):
 
 def extract(model, rows, remembered, said_at, claims=None):
     """(items, closed, rejected) from one model reading of the new lines; unsupported entries are counted, not kept.
-    What Hermes said it had just done with a tool goes into ``claims`` when given (pulse_claims)."""
+    What Hermes said it had just done with a tool goes into ``claims`` when given (pulse.claims)."""
     when = datetime.fromtimestamp(said_at, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     text = render(rows, remembered, when, "")
     mark = secrets.token_hex(4)

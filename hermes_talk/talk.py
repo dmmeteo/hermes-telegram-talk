@@ -12,15 +12,16 @@ import threading
 import time
 from dataclasses import asdict
 
-from . import activity, notify, pulse, pulse_policy, resume
+from . import activity, notify, pulse, resume
+from .pulse import policy as pulse_policy
 from .agent import Readiness
 from .gateway_rpc import TASK_SOURCE, task_agent
 from .config import PRIVATE_NAMES
 from .context import UPDATE_HEADER, chat_section, compose, update
 from .jobs import DELEGATION_ID, OPEN, SUCCEEDED, UNDELIVERED, JobBoard
-from .pulse_engine import SELECT_ON_CALL_S, PulseEngine
-from .pulse_ledger import PulseLedger
-from .pulse_model import ModelUnavailable, PulseModel
+from .pulse.engine import SELECT_ON_CALL_S, PulseEngine
+from .pulse.ledger import PulseLedger
+from .pulse.model import ModelUnavailable, PulseModel
 from .receipts import DIRECTIVE, SINCE_KEY, Destination, ReportDesk, TelegramSender, ask_title, take_title
 from .store import SOURCE, TalkError, TalkStore, VoiceScope, clip
 from .thread_inbox import ThreadInbox, history_text, item_line, receipt

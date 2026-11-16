@@ -991,7 +991,7 @@ def stored_claims(e):
 def bind_host_model(e):
     """This Env's Talk runtime gets the plugin's own host ctx.llm, discovered from its home as the voice server does;
     the process-wide binding is cleared again so no other check gains a model route."""
-    from hermes_talk import pulse_model
+    from hermes_talk.pulse import model as pulse_model
     target = e.home / "plugins" / "hermes-telegram-talk"
     target.mkdir(parents=True)
     for name in PLUGIN_FILES:
@@ -1541,7 +1541,7 @@ def t3_admission_real_hook(model):
                 "read_job_kind": read["kind"], "posted": [r["state"] for r in [e.desk.get(big).public()]]}
     finally:
         e.close()
-        from hermes_talk import pulse_model
+        from hermes_talk.pulse import model as pulse_model
         pulse_model.bind(None)
 
 
@@ -1594,7 +1594,7 @@ def t3_objective_title_real_hook(model):
                 "title_calls": len(asked)}
     finally:
         e.close()
-        from hermes_talk import pulse_model
+        from hermes_talk.pulse import model as pulse_model
         pulse_model.bind(None)
 
 
@@ -1608,7 +1608,7 @@ def t3_toolset_contract(model):
     bridge = Path(os.environ.get("HERMES_TALK_T3_BRIDGE", ""))
     assert (bridge / "plugin.yaml").is_file() and (bridge / "control.py").is_file(), \
         "set HERMES_TALK_T3_BRIDGE to a copy of the profiles' t3-bridge plugin"
-    from hermes_talk import pulse_model
+    from hermes_talk.pulse import model as pulse_model
     TELEGRAM.reset()
     root = Path(tempfile.mkdtemp(prefix="talk-agent-grant-"))
     home = root / "home"
@@ -1657,7 +1657,7 @@ def gateway_plugin_reload_same_pid(model):
     sys.path.insert(0, str(ROOT / "tests" / "agent"))
     import fake_t3_plugin
     from gateway.control_socket import query_gateway_control, reload_gateway_plugins
-    from hermes_talk import pulse_model
+    from hermes_talk.pulse import model as pulse_model
     sys.path.insert(0, str(ROOT / "tests" / "work"))
     from fake_t3 import FakeT3
     TELEGRAM.reset()

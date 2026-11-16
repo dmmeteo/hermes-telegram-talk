@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT))
 
 from hermes_talk import jobs, receipts, work  # noqa: E402
 from hermes_talk.history import MemoryHistory  # noqa: E402
-from hermes_talk.pulse_model import PulseModel  # noqa: E402
+from hermes_talk.pulse.model import PulseModel  # noqa: E402
 
 USER, BOT = 1001, "123456"
 TOKEN = BOT + ":" + "t" * 35

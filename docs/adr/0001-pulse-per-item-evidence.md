@@ -26,7 +26,7 @@ turn of that call named it) → `acknowledged` (a settled user turn followed, or
 from captions or audio. Task results carried in instructions follow the same rule: they are delivered only when
 an uninterrupted assistant turn names "task N".
 
-Decisions live in `hermes_talk/pulse.py`, the per-account record in `hermes_talk/pulse_ledger.py` (SessionDB meta),
+Decisions live in `hermes_talk/pulse/__init__.py`, the per-account record in `hermes_talk/pulse/ledger.py` (SessionDB meta),
 the wiring in `hermes_talk/talk.py`, and the client marks interrupted assistant turns and routes `pulse ...`
 delegations in `static/talk/app.js`.
 

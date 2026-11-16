@@ -46,10 +46,10 @@ Non-goals for this PoC:
     checkpoint.
   - `history.py` is Hermes `SessionDB` through its public methods, plus a synthetic in-memory twin.
   - `activity.py` scopes the profile's sessions to the user and gives each a truthful status.
-  - `pulse.py` is the Pulse engine's decisions: cards, fingerprints, fallback importance, item attribution and
-    feedback parsing. `pulse_ledger.py` is its persistent per-account record (see "Pulse").
-  - `pulse_select.py`, `pulse_memory.py` and `pulse_followup.py` are the model steps ported from Conduit Pulse
-    (selection, memory extraction, follow-up checks); `pulse_engine.py` runs them and `pulse_model.py` is their
+  - `pulse/__init__.py` is the Pulse engine's decisions: cards, fingerprints, fallback importance, item attribution and
+    feedback parsing. `pulse/ledger.py` is its persistent per-account record (see "Pulse").
+  - `pulse/select.py`, `pulse/memory.py` and `pulse/followup.py` are the model steps ported from Conduit Pulse
+    (selection, memory extraction, follow-up checks); `pulse/engine.py` runs them and `pulse/model.py` is their
     only model route, the plugin's host-owned `ctx.llm`.
   - `context.py` composes the instructions and mid-call context updates.
   - `jobs.py` is the task record, its state machine and the job board (dedupe, scheduling, receipts, restart).
@@ -174,7 +174,7 @@ Pulse is Talk's briefing engine, ported for voice from Hermes Conduit notifier's
 - **Candidates and cards.** Each scanned session revision becomes a card fingerprinted by (kind, session,
   status, normalized title). A changed status supersedes the unread older card of the same session. Follow-ups
   that a check decided to tell become cards too.
-- **Selection.** The model picks the briefing (`pulse_select.py`, upstream `pulse_candidates` prompt): per
+- **Selection.** The model picks the briefing (`pulse/select.py`, upstream `pulse_candidates` prompt): per
   candidate bring_up, value 1-5, a one-word skip (done, covered, raised, rated, minor), a line and a why; it sees
   what Pulse remembers, what it brought up lately and lessons from the user's feedback. Picks go by value up to
   `activity_items`; the why is carried on the card's line. The selection is cached against the eligible cards'
@@ -183,12 +183,12 @@ Pulse is Talk's briefing engine, ported for voice from Hermes Conduit notifier's
   unheard-exposure fatigue and learned preference.
 - **Memory.** After a call ends (and every 5 min), the engine reads new lines of the account's Talk conversation
   and of the profile sessions already scoped to the account. The model extracts commitments, promises,
-  intentions, interests, facts and watches (`pulse_memory.py`, upstream prompt). An item is kept only if its quoted
+  intentions, interests, facts and watches (`pulse/memory.py`, upstream prompt). An item is kept only if its quoted
   evidence is on a line said by the right speaker; a due date only if its words were said. Items keep provenance
   (session, source, line, evidence), repeats refresh them, `replaces` retires the old one, `closed` resolves them.
   Interests, intentions and facts decay by half-life unless said again. Feedback still updates per-source counts
   and topic weights, and a told list serves deduplication.
-- **Follow-up checks.** Open promises, commitments and watches get model checks (`pulse_followup.py`, upstream
+- **Follow-up checks.** Open promises, commitments and watches get model checks (`pulse/followup.py`, upstream
   prompts): tell, done, drop or wait. First check after 30 min (promise, watch), one day or the due day's 09:00
   (commitment); then 2 h, 6 h, 1 d, 2 d, 3 d, shortened by the model's hint; a failed call retries in 30 min
   without counting; give up after 8 checks or 7 days (watch 30). "Tell" becomes a follow-up card: acknowledged in a
@@ -204,21 +204,21 @@ Pulse is Talk's briefing engine, ported for voice from Hermes Conduit notifier's
   optionally with a reason (`not relevant|already knew|too late|too often|wrong time`).
   Useful and more acknowledge the card (more also speaks its details), not useful and dismiss close it, later
   snoozes it for three hours as a follow-up. A resubmitted delegation returns its first outcome.
-- **Learned preferences.** Each rating is a signal (`pulse_policy.signal`): useful and not useful/dismiss are
-  thumbs, more is a Do it at the sent stage, later leaves none. `pulse_prefs.py` is upstream's model unchanged
+- **Learned preferences.** Each rating is a signal (`pulse.policy.signal`): useful and not useful/dismiss are
+  thumbs, more is a Do it at the sent stage, later leaves none. `pulse/prefs.py` is upstream's model unchanged
   (regularized logistic regression over kind, place and timeliness, 60-day long memory, a place following its last
   three votes): a pick's score (learning + value + pick) against `SURFACE_AT`/`PUSH_AT` sets its level. Reasons
-  leave lessons (`pulse_policy.reason`): too often steps the kind's ceiling one level quieter, too late makes it
+  leave lessons (`pulse.policy.reason`): too often steps the kind's ceiling one level quieter, too late makes it
   count as due sooner, already knew is told to the selection model, wrong time closes that part of the day for
   its leads, not relevant turns off what comes from that place.
-- **Delivery policy.** `pulse_policy.py` (upstream levels, quiet, hours and brief): push leads the call's
+- **Delivery policy.** `pulse/policy.py` (upstream levels, quiet, hours and brief): push leads the call's
   briefing ("lead with this"), screen is carried after the leads, brief is held for the first call of the next
   local day that is not in the night or a quiet spell (stamped once per day), off is not brought up. Optional
   config `pulse: {zone, night: ["22:00", "07:00"], quiet_days: [5, 6], quiet_until: <epoch>, nudge}`; with no
   night configured none applies, because a Talk call is always opened by the user. Decisions are written only
   when a card's level changes.
 - **Claims.** The memory reading also lists what Hermes said it had just done with a tool (reminder, event, job,
-  message). `pulse_claims.py` judges each against the tool calls stored in that turn of the same session
+  message). `pulse/claims.py` judges each against the tool calls stored in that turn of the same session
   (SessionDB `get_messages`, public): a worked call that could do it backs it; an unbacked claim becomes a
   `[claim]` card (screen by default) that the selection model may bring up.
 - **Snooze and watch.** A snoozed card comes back once due, boosted and labelled. An acknowledged `active` card
@@ -226,11 +226,11 @@ Pulse is Talk's briefing engine, ported for voice from Hermes Conduit notifier's
 - **Deduplication.** An unchanged session is never told twice. The same news (status and normalized title) from
   another session within ten minutes of an unread or told card is recorded as a duplicate and not offered.
 
-To change a typical behavior: a prompt rule or skip reason in `pulse_select.py`/`pulse_memory.py`/
-`pulse_followup.py` (teach `tests/pulse/model_fixture.py` the new answer and add a step to
-`tests/e2e/run-pulse-engine.py`); a feedback kind or the evidence rules in `pulse.py` (a case in `tests/e2e/run-pulse.py`);
-storage shape in `pulse_ledger.py`; when the engine runs in `pulse_engine.py`; levels, reasons and quiet/night
-rules in `pulse_policy.py`; claim judging in `pulse_claims.py` (a step in `tests/e2e/run-pulse-engine.py` for each). What
+To change a typical behavior: a prompt rule or skip reason in `pulse/select.py`/`pulse/memory.py`/
+`pulse/followup.py` (teach `tests/pulse/model_fixture.py` the new answer and add a step to
+`tests/e2e/run-pulse-engine.py`); a feedback kind or the evidence rules in `pulse/__init__.py` (a case in `tests/e2e/run-pulse.py`);
+storage shape in `pulse/ledger.py`; when the engine runs in `pulse/engine.py`; levels, reasons and quiet/night
+rules in `pulse/policy.py`; claim judging in `pulse/claims.py` (a step in `tests/e2e/run-pulse-engine.py` for each). What
 was ported, adapted or left out, and why, is in
 [docs/adr/0003-pulse-whole-engine.md](docs/adr/0003-pulse-whole-engine.md).
 
@@ -621,5 +621,5 @@ progress, speakable result on the same delegation id, call and task lifetimes ke
 `GPTLiveDelegationBridge.swift` and `VoiceBackgroundJobs.swift`. No other Conduit code is copied. Pulse adapts the
 mechanisms of Conduit notifier's Pulse at d25391f6382211dc22e90672c02ea2709112e3dc and the iOS `PulseFeed` at
 b7fd1cc81bf72c6ef8c35a87cd6b15a135fabd5c (both MIT; `LICENSE`,
-`LICENSE`). `pulse_memory.py`, `pulse_select.py` and `pulse_followup.py` port the notifier's
+`LICENSE`). `pulse/memory.py`, `pulse/select.py` and `pulse/followup.py` port the notifier's
 prompts and decision rules (adapted, under that notice); the rest is written for Talk.

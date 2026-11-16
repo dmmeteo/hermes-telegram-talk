@@ -6,8 +6,8 @@ Ported from Conduit notifier at d25391f6 (MIT, LICENSE):
   quieter, "too late" makes the kind count as due sooner (SOONER, MAX_SOONER), "already knew" (SEEN) is
   told to the selection model, "wrong time" closes that part of the day for the kind's pushes (PART),
   and "not relevant" is a rule that turns off what comes from that place (RULE).
-- pulse_prefs.py (pulse_prefs here): the learned relevance model; a candidate's score (learning, the
-  model's value, its pick) against SURFACE_AT and PUSH_AT decides its level (pulse_prefs.level).
+- pulse_prefs.py (pulse.prefs here): the learned relevance model; a candidate's score (learning, the
+  model's value, its pick) against SURFACE_AT and PUSH_AT decides its level (pulse.prefs.level).
 - pulse_quiet.py: quiet weekdays and a quiet spell (``quiet_until``); while quiet nothing comes up on
   its own and it is held for the first brief after.
 - pulse_hours.py: the night and the parts of the day; in the night only what cannot wait (overdue or
@@ -26,7 +26,7 @@ The night is off unless configured, because a call is always the user's own choi
 """
 from datetime import datetime, timezone
 
-from . import pulse_prefs as prefs
+from . import prefs
 
 LEVELS = prefs.LEVELS
 LEVEL_RANK = {level: n for n, level in enumerate(LEVELS)}  # push 0 .. off 3

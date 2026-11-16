@@ -159,7 +159,7 @@ def name_source(job, redact):
 
 
 def ask_title(model, source):
-    """The host model's English title from name_source (pulse_model.PulseModel over ctx.llm); raises when it has none."""
+    """The host model's English title from name_source (pulse.model.PulseModel over ctx.llm); raises when it has none."""
     title = model.ask(TITLE_INSTRUCTIONS, source, TITLE_PURPOSE, max_tokens=1000, timeout=TITLE_TIMEOUT_S).get("title")
     return title if isinstance(title, str) else ""
 

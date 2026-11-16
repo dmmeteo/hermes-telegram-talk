@@ -27,11 +27,11 @@ def _run(args):
 
 
 def _bind_model(ctx):
-    """Hand Pulse this plugin's host-owned ctx.llm (see hermes_talk/pulse_model.py).
+    """Hand Pulse this plugin's host-owned ctx.llm (see hermes_talk/pulse/model.py).
 
-    Only the Talk voice server imports hermes_talk.pulse_model before it loads the profile's plugins, so only
+    Only the Talk voice server imports hermes_talk.pulse.model before it loads the profile's plugins, so only
     there is anything bound; in every other Hermes process this neither imports nor changes anything."""
-    pulse_model = sys.modules.get("hermes_talk.pulse_model")
+    pulse_model = sys.modules.get("hermes_talk.pulse.model")
     if pulse_model is None or getattr(pulse_model, "PLUGIN_ID", None) != "hermes-telegram-talk":
         return
     llm = getattr(ctx, "llm", None)

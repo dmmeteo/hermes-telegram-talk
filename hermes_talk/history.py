@@ -91,7 +91,7 @@ class NativeHistory:
 
     def rows(self, session_id, limit):
         """The session's latest stored rows with their tool calls (role, content, tool_name, tool_call_id,
-        tool_calls), oldest first: what Pulse judges Hermes's claims against (pulse_claims)."""
+        tool_calls), oldest first: what Pulse judges Hermes's claims against (pulse.claims)."""
         with self.lock:
             return _rows(self.db.get_messages(session_id, limit=limit, latest=True))
 

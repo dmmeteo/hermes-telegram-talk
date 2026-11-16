@@ -35,7 +35,7 @@ import server  # noqa: E402
 from hermes_talk import fixtures as fx  # noqa: E402
 from hermes_talk.config import ConfigError, parse_config  # noqa: E402
 from hermes_talk.history import MemoryHistory  # noqa: E402
-from hermes_talk.pulse_model import PulseModel  # noqa: E402
+from hermes_talk.pulse.model import PulseModel  # noqa: E402
 from hermes_talk.talk import TalkRuntime  # noqa: E402
 
 PLUGIN_FILES = ("plugin.yaml", "__init__.py", "server.py", "hermes_talk", "static", "LICENSE")

@@ -18,7 +18,7 @@ vb = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(vb)
 fx = vb.fx
 
-from hermes_talk.pulse_model import PulseModel  # noqa: E402
+from hermes_talk.pulse.model import PulseModel  # noqa: E402
 
 MODEL_DELAY_S = 2.0
 PHRASES = ["Йо! Синтетичний профіль на зв’язку. Що мутимо?", "Привіт-привіт! Синтетика в ефірі. Що робимо?",
@@ -168,7 +168,7 @@ class _PausedFirstStart(NATIVE_THREAD):
 
 @check
 def a_same_account_call_inside_the_start_window_joins_the_registered_preparation():
-    from hermes_talk import pulse_engine
+    from hermes_talk.pulse import engine as pulse_engine
 
     h = harness()
     refreshes, entered = [], threading.Event()
@@ -206,7 +206,7 @@ def a_same_account_call_inside_the_start_window_joins_the_registered_preparation
 
 @check
 def a_preparation_whose_thread_cannot_start_leaves_the_account_retryable():
-    from hermes_talk import pulse_engine
+    from hermes_talk.pulse import engine as pulse_engine
 
     h = harness()
     refreshes = []
@@ -301,7 +301,8 @@ def the_served_cli_publishes_the_talk_launch_and_its_bot_avatar():
     import tempfile
     from unittest.mock import patch
     import server
-    from hermes_talk import config, history, pulse_engine
+    from hermes_talk import config, history
+    from hermes_talk.pulse import engine as pulse_engine
     from hermes_talk.thread_gateway import offer
     home = Path(tempfile.mkdtemp(prefix="talk-cli-startup-"))
     fx.write_home(home)

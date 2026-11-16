@@ -36,7 +36,8 @@ vb = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(vb)
 fx = vb.fx
 import server  # noqa: E402
-from hermes_talk import pulse, pulse_followup, pulse_model, pulse_select  # noqa: E402
+from hermes_talk import pulse  # noqa: E402
+from hermes_talk.pulse import followup as pulse_followup, model as pulse_model, select as pulse_select  # noqa: E402
 from hermes_talk.config import parse_config  # noqa: E402
 from hermes_talk.talk import TalkRuntime  # noqa: E402
 
@@ -145,7 +146,7 @@ def the_model_selects_the_briefing_not_the_status_ranking(w):
     assert decisions["Synthetic routine sync"] == {"decision": "skipped", "skip": "minor",
                                                    "why": "fixture-model judged 'Synthetic routine sync'"}
     assert decisions["Synthetic broken backup"]["decision"] == "over_limit", decisions
-    ranked, _ = pulse.select([dict(c) for c in state["items"].values()], state["memory"], w.clock(), 2)
+    ranked, _ = pulse.rank([dict(c) for c in state["items"].values()], state["memory"], w.clock(), 2)
     assert ranked[0]["title"] == "Synthetic broken backup", "the deterministic ranking would differ"
     sent = [m for k, m, fmt in w.model.requests[before:] if k == "selection"]
     assert sent and fmt_ok(w.model.requests[before:]), "selection went over HTTP as a JSON-mode call"

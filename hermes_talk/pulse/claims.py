@@ -17,7 +17,7 @@ nothing outside the account's own sessions. A call counts as worked unless its t
 failed. Conduit's scheduled-call tool (conduit_call_watch) does not exist on this surface. Upstream
 keeps claims to judge before showing them; Talk keeps every judged claim and turns an unbacked one
 into a "claim" card the selection model may bring up ("Hermes said it set a reminder, but no call
-made one"), held below push by default (pulse_policy.DEFAULT_LEVELS).
+made one"), held below push by default (pulse.policy.DEFAULT_LEVELS).
 """
 import json
 import re

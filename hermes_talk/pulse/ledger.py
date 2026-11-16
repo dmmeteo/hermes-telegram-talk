@@ -8,7 +8,8 @@ that carried it. Feedback is keyed by its delegation id, so a resubmitted delega
 import json
 import threading
 
-from . import pulse, pulse_policy, pulse_select
+from .. import pulse
+from . import policy as pulse_policy, select as pulse_select
 
 MAX_ITEMS = 500
 MAX_SEEN = 2000
@@ -127,7 +128,7 @@ class PulseLedger:
     def choose(self, account, limit, now, exclude=(), settings=None):
         """(cards, waiting, by): the model's selection when it covers exactly the eligible cards now, else the
         deterministic ranking (by "fallback"). A model pick carries its decision (why, value, line). With
-        ``settings`` the delivery policy (pulse_policy) orders them loudest first and holds or turns off the
+        ``settings`` the delivery policy (pulse.policy) orders them loudest first and holds or turns off the
         rest; a held card comes with the first call that is the brief, which is stamped once per local day when
         a brief card is acknowledged (_acknowledge), never here: being chosen or supplied is not being heard."""
         with self.lock:
@@ -143,7 +144,7 @@ class PulseLedger:
                                in (pulse_select.SKIPPED, pulse_select.NOT_PICKED))
                 rest, by = len(pool) - withheld - len(set(exclude) & set(by_fp)), "model"
             else:
-                ordered, rest = pulse.select([dict(c, pick=None) for c in pool if c["fp"] not in exclude],
+                ordered, rest = pulse.rank([dict(c, pick=None) for c in pool if c["fp"] not in exclude],
                                              state["memory"], now, len(pool))
                 by = "fallback"
             if settings is not None:
@@ -308,7 +309,7 @@ class PulseLedger:
                     for word in sorted(memory["topics"], key=lambda w: abs(memory["topics"][w]))[:100]:
                         del memory["topics"][word]
             card["feedback"] = {"kind": kind, "id": feedback_id, "call": voice_session_id, "at": now}
-            pulse_policy.signal(memory, card, kind, now)  # what pulse_prefs learns from
+            pulse_policy.signal(memory, card, kind, now)  # what pulse.prefs learns from
             if reason in pulse_policy.REASONS:
                 card["feedback"]["reason"] = reason
                 card["feedback"]["lesson"] = pulse_policy.reason(memory, card, reason,

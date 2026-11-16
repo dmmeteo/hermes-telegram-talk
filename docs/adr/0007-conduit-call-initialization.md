@@ -35,7 +35,7 @@ Conduit (iOS app `kaishi00/hermes-conduit` at 4b6889097d53ad731089f255b03afe534e
 - `hermes_talk/resume.py` ports `VoiceResumePlan` with its constants and prompt. `prepare` reads the
   conversation's stored rows (public `SessionDB.get_messages` through `history.rows`, user and assistant text only,
   redacted) and sends the planned turns as `initial_items`. No dialogue goes into the instructions.
-- The summary is written by the plugin's own host model (`ctx.llm` through `pulse_model.PulseModel`, purpose
+- The summary is written by the plugin's own host model (`ctx.llm` through `pulse.model.PulseModel`, purpose
   `talk_resume_summary`, no override, ADR 0002) and stored as `resume_summary: {text, covers}` in the conversation's
   meta state. Because `complete_structured` answers JSON, the prompt adds one sentence asking for
   `{"summary": ...}`, and the token cap is 1200 instead of Conduit's 600 so the wrapping cannot cut the text.

@@ -558,7 +558,7 @@ def main(argv=None):
             fcntl.flock(serve_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             parser.error("another Talk server already serves this profile")
-        from hermes_talk import pulse_model
+        from hermes_talk.pulse import model as pulse_model
         app.attach(TalkRuntime(config, token, NativeHistory(home), home=home_path))
         # Plugin discovery (this plugin's ctx.llm) runs in the Pulse worker after start, never before serving.
         app.talk.engine.start(loader=pulse_model.load_host)

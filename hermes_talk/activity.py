@@ -7,7 +7,7 @@ anything else, including stale open sessions, is "unknown". Nothing is
 reported as done unless a reply row exists.
 
 Rows are scanned by (last_active, session id). What was read is no longer a
-cursor: each row becomes a Pulse card (pulse.py) whose own evidence says whether
+cursor: each row becomes a Pulse card (pulse/__init__.py) whose own evidence says whether
 it was exposed, mentioned or acknowledged.
 """
 from datetime import datetime, timezone

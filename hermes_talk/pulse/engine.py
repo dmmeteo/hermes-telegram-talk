@@ -1,7 +1,7 @@
 """The Pulse engine for one Talk runtime: memory extraction, follow-up checks and model selection.
 
 The model steps run here, never inside a ledger lock: read a snapshot, ask the model through
-pulse_model (the host's ctx.llm), then apply the validated result under the account's lock.
+pulse.model (the host's ctx.llm), then apply the validated result under the account's lock.
 A background worker (started by server.py) runs each known account after a call ends and on a
 slow tick, the way upstream's Pulse tick reads chats once they go quiet; checks and gates call
 run_once/select directly. Every step records how it was decided ("model" or "fallback" with the
@@ -10,8 +10,9 @@ reason), so deterministic ranking is never reported as model selection.
 import logging
 import threading
 
-from . import pulse, pulse_claims, pulse_followup, pulse_memory, pulse_policy, pulse_select
-from .pulse_model import PLUGIN_ID, ModelUnavailable
+from .. import pulse
+from . import claims as pulse_claims, followup as pulse_followup, memory as pulse_memory, policy as pulse_policy, select as pulse_select
+from .model import PLUGIN_ID, ModelUnavailable
 
 logger = logging.getLogger("tg-voice")
 
@@ -200,7 +201,7 @@ class PulseEngine:
 
     @staticmethod
     def _claims(state, judged, provenance, now):
-        """Keep each judged claim (pulse_claims) with its session; one with no call behind it becomes a claim card."""
+        """Keep each judged claim (pulse.claims) with its session; one with no call behind it becomes a claim card."""
         memory = state["memory"]
         kept = pulse_claims.prune(memory.setdefault("claims", []), now)
         for claim in judged:

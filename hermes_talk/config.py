@@ -76,7 +76,7 @@ class Receipts:
 
 @dataclass(frozen=True)
 class PulseSettings:
-    """When and how loudly Pulse brings things up in a call (pulse_policy); all optional."""
+    """When and how loudly Pulse brings things up in a call (pulse.policy); all optional."""
     zone: str = "UTC"
     night: tuple = None  # ((hour, minute) it starts, (hour, minute) it ends), or None for no night
     quiet_days: tuple = ()  # Monday 0 .. Sunday 6

@@ -3,7 +3,7 @@
 Adapted for voice from Hermes Conduit notifier Pulse (MIT, LICENSE): candidates
 become fingerprinted cards, a selection picks the most important unread ones for a call, and every
 card keeps separate evidence for each step a briefing goes through. The persistent per-account
-record of those steps is pulse_ledger.py.
+record of those steps is pulse/ledger.py.
 
 Item states, in order of evidence:
 - candidate: known to Pulse, never supplied to the voice model.
@@ -93,7 +93,7 @@ def eligible(item, now):
     return item["state"] == "snoozed" and due is not None and due <= now
 
 
-def select(items, memory, now, limit):
+def rank(items, memory, now, limit):
     """(chosen, waiting): the most important eligible cards first; ties go to the oldest, so a backlog drains in order."""
     pool = [i for i in items if eligible(i, now)]
     pool.sort(key=lambda i: (-importance(i, memory, now), i["at"], i["ref"]))
@@ -139,7 +139,7 @@ def parse_feedback(request):
 
 
 def feedback_reason(request):
-    """The reason a "pulse P<n> <kind> <reason>" delegation gives (pulse_policy.REASONS), else None."""
+    """The reason a "pulse P<n> <kind> <reason>" delegation gives (pulse.policy.REASONS), else None."""
     match = FEEDBACK_REQUEST.match(request or "")
     if match is None or not match.group(3):
         return None

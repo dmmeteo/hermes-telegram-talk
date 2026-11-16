@@ -12,14 +12,14 @@ left out has a concrete reason below.
 
 | Upstream | Talk | Status |
 | --- | --- | --- |
-| `pulse_prefs.py` (logistic preference model) | `hermes_talk/pulse_prefs.py`, byte-for-byte after the header | ported unchanged |
-| `pulse_learning.py` ladder, DEFAULT_LEVELS, REASONS, lessons (level/too often, sooner/too late, seen/already knew, part/wrong time, rule/not relevant), signals from ratings | `pulse_policy.py` (`signal`, `reason`, `ceiling`, `pace`, `closed_parts`, `muted`, `seen_titles`); reasons parsed from the feedback delegation | ported; signals from voice ratings (thumbs, more = Do it sent, later none) |
-| `pulse_candidates.route` levels (score, SURFACE_AT, PUSH_AT, URGENCY, quieter) | `pulse_policy.decide/arrange` over the model's picks at call setup | ported; push = lead the briefing, screen = after the leads |
-| `pulse_quiet.py` (quiet days, quiet spell) | `pulse_policy.quiet_why`, config `pulse.quiet_days`/`quiet_until` | ported; held for the first brief after |
-| `pulse_hours.py` night and parts of the day; hold unless overdue/soon | `pulse_policy.part/is_night`, config `pulse.night`/`zone` | ported; no night unless configured (a call is the user's own choice) |
-| `pulse_brief.py` (held items delivered once, stamped) | `pulse_ledger._deliver` brief stamp per local day, `briefed` on cards | ported as the first eligible call of the day |
-| `pulse_claims.py` + memory "claims" | `pulse_claims.py`, `pulse_memory` claims prompt, engine `_claims` | ported; judged against the session's own stored tool calls (SessionDB `get_messages`), unbacked claims become `[claim]` cards |
-| `pulse_report.py` nudge bars | `pulse_select.BARS`, config `pulse.nudge` (balanced default) | kept from 0002, nudge now configurable |
+| `pulse_prefs.py` (logistic preference model) | `hermes_talk/pulse/prefs.py`, byte-for-byte after the header | ported unchanged |
+| `pulse_learning.py` ladder, DEFAULT_LEVELS, REASONS, lessons (level/too often, sooner/too late, seen/already knew, part/wrong time, rule/not relevant), signals from ratings | `pulse/policy.py` (`signal`, `reason`, `ceiling`, `pace`, `closed_parts`, `muted`, `seen_titles`); reasons parsed from the feedback delegation | ported; signals from voice ratings (thumbs, more = Do it sent, later none) |
+| `pulse_candidates.route` levels (score, SURFACE_AT, PUSH_AT, URGENCY, quieter) | `pulse.policy.decide/arrange` over the model's picks at call setup | ported; push = lead the briefing, screen = after the leads |
+| `pulse_quiet.py` (quiet days, quiet spell) | `pulse.policy.quiet_why`, config `pulse.quiet_days`/`quiet_until` | ported; held for the first brief after |
+| `pulse_hours.py` night and parts of the day; hold unless overdue/soon | `pulse.policy.part/is_night`, config `pulse.night`/`zone` | ported; no night unless configured (a call is the user's own choice) |
+| `pulse_brief.py` (held items delivered once, stamped) | `pulse.ledger._deliver` brief stamp per local day, `briefed` on cards | ported as the first eligible call of the day |
+| `pulse_claims.py` + memory "claims" | `pulse/claims.py`, `pulse.memory` claims prompt, engine `_claims` | ported; judged against the session's own stored tool calls (SessionDB `get_messages`), unbacked claims become `[claim]` cards |
+| `pulse_report.py` nudge bars | `pulse.select.BARS`, config `pulse.nudge` (balanced default) | kept from 0002, nudge now configurable |
 
 ## Left out, each for a concrete reason
 
