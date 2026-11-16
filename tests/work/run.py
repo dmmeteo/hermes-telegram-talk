@@ -612,8 +612,8 @@ def runs_are_told_apart():
     assert work.assess(work.assess(plain, noid("running", 2), 2), noid("completed", 2, "Own."), 3).result == "Own."
     for raw in ({"ok": False, "error": "server_unreachable"}, {"ok": False, "error": "unavailable"}):
         seen = work.assess(mine, raw, 9)
-        assert seen.unread_since == 9 and replace(seen, unread_since=0.0) == mine, \
-            "an unreadable T3 changes nothing but the time it was first unreadable"
+        assert seen.unread_at == 9 and replace(seen, unread_at=0.0) == mine, \
+            "an unreadable T3 changes nothing but the time of the failed read"
     assert work.assess(mine, None, 9) == mine, "no answer at all changes nothing"
     assert work.assess(mine, {"ok": False, "error": "not_found"}, 9).status == work.UNKNOWN
     return {"by_id": "queued, mine, interrupt guard", "by_count": "fallback", "unreadable": "unchanged"}
@@ -680,7 +680,7 @@ def review_regressions():
         assert not w.job("n1").large and work.LOST_START in w.job("n1").result, w.job("n1").result
         assert w.task(conv, vs, "code d1")[0] == 200
         w.until(lambda: w.job("d1").large, "d1 promoted")
-        (w.root / "t3" / "th-d1.json").unlink()
+        w.t3.forget("th-d1")
         w.until(lambda: w.state("d1") == "interrupted", "a deleted thread ends its task as unknown instead of hanging")
         assert w.job("d1").unknown and "no longer has this thread" in w.job("d1").error
         for key in ("r1", "r2"):
@@ -813,13 +813,12 @@ def unreadable_t3_ends_unknown_after_a_bound():
         assert w.task(conv, vs, "code u2")[0] == 200
         w.until(lambda: w.job("u2").large and w.job("u2").turn is not None, "u2 follows its T3 work")
         w.t3.outage(True)
-        w.until(lambda: w.job("u2").links[0].unread_since, "the first failed read opens the unreadable window",
-                timeout=8)
+        w.until(lambda: w.job("u2").links[0].unread_s, "failed reads add up to unreadable time", timeout=8)
         assert w.state("u2") == "running", "an outage shorter than the bound concludes nothing"
         w.t3.outage(False)
         w.t3.finish("th-u2", "completed", "U2 done.")
         w.until(lambda: w.state("u2") == "succeeded", "u2 settles from T3 after the outage")
-        assert w.job("u2").result == "U2 done." and not w.job("u2").links[0].unread_since
+        assert w.job("u2").result == "U2 done." and not w.job("u2").links[0].unread_s
         w.settle_reports()
         finals = sorted(texts[-1] for texts in w.posts.shown().values())
         assert finals == ["✅ code u2", "❔ code u1"], finals
@@ -830,37 +829,63 @@ def unreadable_t3_ends_unknown_after_a_bound():
         w.close()
 
 
-def unreadable_window_is_exact_and_survives_restart():
-    """Gap 3, pure: the window opens at the first failed read, closes at any good read, and is stored on the link."""
+def unreadable_time_is_counted_not_wall_clock():
+    """Gap 3, pure: only time between failed reads counts toward the bound, never Talk's downtime or a clock step."""
     rec = {"key": "k" * 32, "thread_id": "th", "action": "start", "confirmed": True, "outcome": "running",
            "run_count": 1, "active_id": "run-1", "latest_id": "run-1", "at": 1.0}
     link = work.link_from(rec)
-    bound = work.UNREADABLE_S
+    bound, step = 1800.0, 10.0
+
+    def outage(start, at, reads, read=DOWN):
+        for i in range(reads):
+            start = work.assess(start, read, at + i * step)
+        return start
+
     first = work.assess(link, DOWN, 1000.0)
-    assert not first.done and first.unread_since == 1000.0, first
-    later = work.assess(first, work.T3(lambda args: 1 / 0).read("th"), 1000.0 + bound - 1)
-    assert not later.done and later.unread_since == 1000.0, "a handler that raises is the same unreadable T3"
+    assert not work.assess(first, DOWN, 1000.0 + bound + 60).done, \
+        "two failed reads around 31 minutes of Talk's own downtime are not 30 minutes of an unreadable T3"
+    assert outage(link, 1000.0, int(bound / step) + 1).status == "unknown", \
+        "30 minutes of failed reads end the run as unknown"
+    assert work.UNREADABLE_S == bound
+    assert not first.done and first.unread_s == 0.0 and first.unread_at == 1000.0, first
+    raised = work.assess(first, work.T3(lambda args: 1 / 0).read("th"), 1010.0)
+    assert not raised.done and raised.unread_s == 10.0, "a handler that raises is the same unreadable T3"
+    almost = outage(link, 1000.0, int(bound / step))
+    assert not almost.done and almost.unread_s == bound - step, almost
     stored = jobs.load(jobs.dump(jobs.new_job("p:tg1:1", "c", "v", 1, "d", 1, "code k", 1.0)),
-                       json.dumps({"links": [work.link_dump(later)]}))
-    assert stored.links == (later,), "a restart keeps the window instead of starting it again"
+                       json.dumps({"links": [work.link_dump(almost)]}))
+    assert stored.links == (almost,), "a restart keeps the time already counted"
+    ended = work.assess(almost, DOWN, almost.unread_at + step)
+    assert ended.status == work.UNKNOWN and ended.done and ended.counts and not ended.result, ended
+    assert "could not read T3 for 30 min" in ended.error, ended.error
     running = {"ok": True, "state": {"outcome": "running", "run": {"count": 1, "active_id": "run-1",
                                                                    "latest_id": "run-1"}}}
-    back = work.assess(later, running, 1000.0 + bound + 50)
-    assert back.status == "running" and back.unread_since == 0.0, "any good read closes the window"
-    assert not work.assess(back, DOWN, 5000.0).done, "and the next outage gets a full window of its own"
-    ended = work.assess(later, DOWN, 1000.0 + bound)
-    assert ended.status == work.UNKNOWN and ended.done and ended.counts and not ended.result, ended
-    assert "could not read T3" in ended.error, ended.error
     assert work.assess(ended, running, 9000.0) == ended, "the end is final"
+    back = work.assess(almost, running, almost.unread_at + step)
+    assert back.status == "running" and back.unread_s == 0.0 and back.unread_at == 0.0, "a good read starts it over"
+    assert not outage(back, 50_000.0, int(bound / step)).done, "and the next outage gets a full bound of its own"
+
+    down = work.assess(first, DOWN, 1000.0 + bound + 60)  # Talk was down for 31 minutes between two failed reads
+    assert not down.done and down.unread_s == work.UNREAD_GAP_S, ("Talk's own downtime is not unreadable time", down)
+    jumped = work.assess(first, DOWN, 1000.0 + 86_400)  # the clock stepped a day forward
+    assert not jumped.done and jumped.unread_s == work.UNREAD_GAP_S, jumped
+    early = work.assess(almost, DOWN, 5.0)  # the clock stepped back
+    assert not early.done and early.unread_s == almost.unread_s and early.unread_at == 5.0, early
+    assert work.assess(early, DOWN, 5.0 + step).status == work.UNKNOWN, "a step back neither adds nor stretches"
+    slow = outage(link, 1000.0, 1)
+    for i in range(1, 16):  # reads that each take minutes still end: every one counts for UNREAD_GAP_S
+        slow = work.assess(slow, DOWN, 1000.0 + i * 900)
+    assert slow.status == work.UNKNOWN, ("an unreadable T3 always ends after a bounded number of reads", slow)
+
     maybe = work.link_from({**rec, "confirmed": False, "outcome": None, "run_count": None, "active_id": None,
                             "latest_id": None})
-    unproven = work.assess(work.assess(maybe, DOWN, 10.0), DOWN, 10.0 + bound)
+    unproven = outage(maybe, 10.0, int(bound / step) + 1)
     assert unproven.status == work.DROPPED and not unproven.counts and work.unseen(unproven), \
         ("a possible admission T3 never confirmed is not counted as work, only noted", unproven)
     root, old_jobs = _old_talk(RUNNING_REVISION, "talk_at_running_revision")
     try:
         job = replace(jobs.new_job("p:tg1:1", "c", "v", 1, "d", 1, "code k", 1.0), state=jobs.INTERRUPTED,
-                      links=(ended, unproven, later), turn={"state": "succeeded", "at": 1.0}, unknown=True,
+                      links=(ended, unproven, almost), turn={"state": "succeeded", "at": 1.0}, unknown=True,
                       error=ended.error)
         old = old_jobs.load(jobs.dump(job), jobs.dump_extra(job))
         assert old is not None and len(old.links) == 3 and old.unknown and old.state == "interrupted", old
@@ -868,14 +893,15 @@ def unreadable_window_is_exact_and_survives_restart():
     finally:
         sys.modules.pop("talk_at_running_revision", None)
         shutil.rmtree(root, ignore_errors=True)
-    return {"window": "first failed read to the bound", "restart": "kept", "rollback_revision": RUNNING_REVISION}
+    return {"counted": "time between failed reads, at most UNREAD_GAP_S each", "downtime": "not counted",
+            "clock_step": "not counted", "restart": "kept", "rollback_revision": RUNNING_REVISION}
 
 
-def cut_turn_is_noted_never_followed_blind():
-    """Gap 2: a turn stopped between T3 accepting a start or send and the post hook is told apart from a clean end.
+def cut_call_is_noted_never_followed_blind():
+    """Gap 2: a T3 start or send the core stopped waiting for is told apart from a clean end.
 
-    T3 shows no way to tell that run from another one, so nothing is followed or borrowed: the task settles from its
-    turn and says that T3 may hold work Talk does not see."""
+    The runner reports each call to the hook as the core does. T3 shows no way to tell such a run from another one,
+    so nothing is followed or borrowed: the task settles from its turn and says T3 may hold work Talk does not see."""
     w = World(max_concurrent=3).serve()
     try:
         conv, vs = w.call()
@@ -883,13 +909,25 @@ def cut_turn_is_noted_never_followed_blind():
         w.until(lambda: w.job("p1").large, "p1 promoted")
         w.t3.finish("th-p1", "completed", "P1 private result.")
         w.until(lambda: w.state("p1") == "succeeded", "p1 done")
-        for text in ("cutstart c1", "cutsend th-p1 c2", "blocked c3"):
+        for text in ("cutstart c1", "cutsend th-p1 c2", "blocked c3", "skipped c4", "timeout c5", "retry c6"):
             assert w.task(conv, vs, text)[0] == 200
         w.until(lambda: w.ledger("t3", "c1") and w.ledger("t3", "c2"), "T3 accepted the start and the send")
         assert w.t3.get("th-c1")["count"] == 1 and w.t3.get("th-p1")["count"] == 2
-        w.until(lambda: w.state("c3") == "succeeded", "a turn that ended on its own")
-        assert not w.job("c3").links and w.job("c3").result == "done c3", \
-            ("a call that got no post hook in a turn that went on is not a cut call", w.job("c3"))
+        w.until(lambda: w.state("c3") == "succeeded" and w.state("c4") == "succeeded", "turns that ended on their own")
+        for key in ("c3", "c4"):
+            assert not w.job(key).links and w.job(key).result == f"done {key}", \
+                ("a call that never reached T3 (blocked, or never started) is not a cut call", w.job(key))
+        w.until(lambda: w.state("c5") == "succeeded", "a turn that went on after the tool deadline")
+        c5 = w.job("c5")
+        assert not c5.large and [l.status for l in c5.links] == [work.DROPPED] and work.unseen(c5.links[0]), c5.links
+        assert c5.result.startswith("done c5") and "before T3 answered" in c5.result, c5.result
+        assert "before T3 answered" in c5.spoken(), c5.spoken()
+        w.until(lambda: w.job("c6").large and w.job("c6").turn is not None, "a retried call T3 answered is followed")
+        assert [l.thread_id for l in w.job("c6").links] == ["th-c6"], ("its note gave way to the admission",
+                                                                       w.job("c6").links)
+        w.t3.finish("th-c6", "completed", "C6 done.")
+        w.until(lambda: w.state("c6") == "succeeded", "c6 from T3")
+        assert w.job("c6").result == "C6 done." and w.t3.get("th-c6")["count"] == 1
         with w.talk.board.lock:
             job = w.job("c1")
             w.talk.board.jobs[job.id] = replace(job, started=job.started - 100_000)  # its run budget is long past
@@ -898,76 +936,94 @@ def cut_turn_is_noted_never_followed_blind():
         c1, c2 = w.job("c1"), w.job("c2")
         assert not c1.large and not c2.large, "nothing unproven is counted as T3 work"
         assert [l.status for l in c1.links] == [work.DROPPED] and work.unseen(c1.links[0]), c1.links
-        assert "time budget" in c1.error and "T3 start was in flight" in c1.error, c1.error
-        assert "T3 start was in flight" in c1.spoken(), c1.spoken()
+        assert "time budget" in c1.error and "T3 start before T3 answered" in c1.error, c1.error
+        assert "T3 start before T3 answered" in c1.spoken(), c1.spoken()
         assert [l.status for l in c2.links] == [work.DROPPED] and "th-p1" in c2.error, (c2.links, c2.error)
         assert "th-p1" in c2.spoken() and "was cancelled" in c2.spoken(), c2.spoken()
         assert "P1 private result." not in json.dumps(c2.public()) and not c2.result, "no other run's text"
         reads = w.t3.get("th-p1").get("reads", 0)
         w.t3.finish("th-p1", "completed", "C2 unseen text.")
         w.t3.finish("th-c1", "completed", "C1 unseen text.")
+        w.t3.finish("th-c5", "completed", "C5 unseen text.")
         time.sleep(0.8)
-        assert w.t3.get("th-p1").get("reads", 0) == reads and not w.t3.get("th-c1").get("reads"), \
-            "a run Talk cannot single out is not followed"
+        assert w.t3.get("th-p1").get("reads", 0) == reads and not w.t3.get("th-c1").get("reads") \
+            and not w.t3.get("th-c5").get("reads"), "a run Talk cannot single out is not followed"
         assert w.state("c1") == "failed" and w.state("c2") == "cancelled" and not w.job("c1").result
         assert w.t3.get("th-c1")["count"] == 1 and w.t3.get("th-p1")["count"] == 2, "nothing was resent"
         assert not w.t3.get("th-c1")["interrupts"] and not w.t3.get("th-p1")["interrupts"], \
             "a cancel interrupts no run Talk cannot prove is this task's"
-        before = (c1, c2)
+        before = (c1, c2, w.job("c5"))
         history, root, posts = w.history, w.root, w.posts
         w.stop_serving()
         w2 = World(root=root, max_concurrent=3, history=history)
         w2.posts = posts
         w2.serve()
         w = w2
-        assert (w.job("c1"), w.job("c2")) == before, "a restart reads the same settled tasks"
-        return {"cut_start": c1.error, "cut_send": c2.error, "blocked_call": "no note", "followed": "nothing"}
+        assert (w.job("c1"), w.job("c2"), w.job("c5")) == before, "a restart reads the same settled tasks"
+        return {"cut_start": c1.error, "cut_send": c2.error, "timeout": c5.result, "retry_answered": "followed",
+                "blocked_or_skipped": "no note", "followed": "nothing unproven"}
     finally:
         w.close()
 
 
-def intents_are_answered_exactly():
-    """Gap 2, pure: the pre hook's record of a start or send in flight, and what counts as its answer."""
-    root = Path(tempfile.mkdtemp(prefix="talk-work-intent-"))
+CANCELLED_RESULT = "[Tool execution cancelled — t3_control was abandoned: interrupt requested]"
+TIMEOUT_RESULT = "Error executing tool 't3_control': timed out after 420.0s"
+
+
+def cut_calls_are_recorded_exactly():
+    """Gap 2, pure: what the post hook records for each way the core reports a call it did not see answered."""
+    root = Path(tempfile.mkdtemp(prefix="talk-work-cut-"))
     try:
         home, job = root / "home", "jb_" + "i" * 24
         env = {work.ENV_JOB: job}
         start = {"action": "start", "request_id": "req-start-1", "cwd": "/synthetic", "message": "m"}
         send = {"action": "send", "request_id": "req-send-1", "thread_id": "th-7", "message": "m"}
-        assert work.intend("terminal", start, "s", home, env) is None
-        assert work.intend("t3_control", {"action": "read", "thread_id": "th-7"}, "s", home, env) is None
-        assert work.intend("t3_control", start, "s", home, {}) is None, "outside a Talk task nothing is recorded"
-        assert work.pending(home, job) == []
-        work.intend("t3_control", start, "s", home, env)
-        work.intend("t3_control", start, "s", home, env)
-        assert [r["action"] for r in work.pending(home, job)] == ["start"], "one record per request"
-        assert work.observations(home, job) == [], "an intent is never an admission"
-        refused = {"ok": False, "error": "rejected", "outcome_unknown": False}
-        work.observe("t3_control", start, json.dumps(refused), "s", home, env)
-        assert work.pending(home, job) == [], "a refusal answers the call"
-        work.intend("t3_control", send, "s", home, env)
-        cut = work.pending(home, job)
-        assert [(r["action"], r["thread_id"]) for r in cut] == [("send", "th-7")], cut
-        note = work.cut_link(cut[0])
+        seen = lambda args, result, status, environ=env, session="s": work.observe(
+            tool_name="t3_control", args=args, result=result, session_id=session, home=home, environ=environ,
+            status=status, error_type="tool_interrupted", duration_ms=5, tool_call_id="call_1")
+        assert seen({}, "[Tool execution cancelled — t3_control was skipped. x]", "cancelled") is None, \
+            "the core reports a call it never started without arguments: nothing reached T3"
+        assert seen(start, json.dumps({"error": "blocked", "message": "blocked"}), "blocked") is None
+        assert seen(start, json.dumps({"ok": False, "error": "rejected", "outcome_unknown": False}), "error") is None
+        assert seen({"action": "read", "thread_id": "th-7"}, CANCELLED_RESULT, "cancelled") is None
+        assert seen(start, CANCELLED_RESULT, "cancelled", environ={}) is None, "outside a Talk task nothing is recorded"
+        assert work.observations(home, job) == []
+
+        cut = seen(send, CANCELLED_RESULT, "cancelled")
+        assert cut["cut"] == "cancelled" and cut["thread_id"] is None and cut["to"] == "th-7", cut
+        assert seen(send, json.dumps({"error": "Tool execution cancelled.", "status": "cancelled"}), "cancelled") \
+            == cut and len(work.observations(home, job)) == 1, "one record per call, whatever the core repeats"
+        note = work.link_from(cut)
         assert note.status == work.DROPPED and not note.counts and note.done and work.unseen(note), note
-        assert "th-7" in note.error and len(note.error) < 200, note.error
+        assert "th-7" in note.error and len(note.error) < 200 and note.via == "send", note.error
+        other = seen({**send, "thread_id": "th-8"}, TIMEOUT_RESULT, "timeout")
+        again = seen({**send, "message": "another"}, TIMEOUT_RESULT, "timeout")
+        assert len({cut["key"], other["key"], again["key"]}) == 3 and other["cut"] == "timeout", \
+            "a reused request_id with another thread or message is another call, as it is for the bridge"
+        lost = seen(start, TIMEOUT_RESULT, "timeout")
+        assert "T3 start" in work.link_from(lost).error and not work.link_from(lost).thread_id
+
         ok = {"ok": True, "thread_id": "th-7", "delivery": "started",
               "state": {"outcome": "running", "run": {"count": 2, "active_id": "run-2", "latest_id": "run-2"}}}
-        work.observe("t3_control", send, json.dumps(ok), "s", home, env)
-        assert work.pending(home, job) == [] and len(work.observations(home, job)) == 1
-        work.intend("t3_control", send, "s", home, env)
-        assert work.pending(home, job) == [], "a retry of an answered request is the same work, already followed"
-        work.intend("t3_control", {**start, "request_id": "req-start-2"}, "s", home, env)
-        lost = {"ok": False, "error": "transport_error", "outcome_unknown": True, "committed_calls": 0}
-        work.observe("t3_control", {**start, "request_id": "req-start-2"}, json.dumps(lost), "s", home, env)
-        assert work.pending(home, job) == [], "a lost answer is an answer: its own record carries it"
+        admitted = seen(send, json.dumps(ok), "ok")
+        records = {r["key"]: r for r in work.observations(home, job)}
+        assert records[cut["key"]].get("answered") and not records[admitted["key"]].get("answered"), \
+            "the same call answered later is an admission, and its cut record no longer stands"
+        assert [r["key"] for r in records.values() if r.get("cut") and not r.get("answered")] and \
+            not records[other["key"]].get("answered"), "another call's answer answers nothing else"
+        assert seen(send, CANCELLED_RESULT, "cancelled") == cut and (work_file := work.work_dir(home) / job).is_dir()
+        assert sorted(p.name for p in work_file.iterdir()) == sorted(k + ".json" for k in records), \
+            "every record is one file in the job's folder, and nothing else is left behind"
         work.mark_session(home, "sess-gw", "jb_" + "g" * 24)
-        assert work.intend("t3_control", send, "sess-gw", home, {})["job_id"] == "jb_" + "g" * 24
+        assert seen(send, CANCELLED_RESULT, "cancelled", environ={}, session="sess-gw")["job_id"] == "jb_" + "g" * 24
+
         root_old, old_jobs = _old_talk(RUNNING_REVISION, "talk_at_running_revision_2")
         try:
             old_work = importlib.import_module("talk_at_running_revision_2.work")
-            assert len(old_work.observations(home, job)) == 2 and work.pending(home, "jb_" + "g" * 24), \
-                "the running revision reads the same admissions and never sees an intent as one"
+            old_links = [old_work.link_from(r) for r in old_work.observations(home, job)]
+            assert len(old_links) == len(records) and \
+                sorted(l.thread_id for l in old_links if not l.done) == ["th-7"], \
+                ("the running revision follows the one real admission and reads every cut call as a note", old_links)
             held = replace(jobs.new_job("p:tg1:1", "c", "v", 1, "d", 1, "send k", 1.0), state=jobs.CANCELLED,
                            links=(note,), turn={"state": "cancelled", "at": 1.0}, error=note.error)
             old = old_jobs.load(jobs.dump(held), jobs.dump_extra(held))
@@ -975,8 +1031,8 @@ def intents_are_answered_exactly():
         finally:
             sys.modules.pop("talk_at_running_revision_2", None)
             shutil.rmtree(root_old, ignore_errors=True)
-        return {"recorded": ["start", "send"], "answered_by": ["refusal", "ok", "lost answer"],
-                "rollback_revision": RUNNING_REVISION}
+        return {"recorded": ["cancelled send", "timeout start"], "ignored": ["skipped", "blocked", "refused", "read"],
+                "answered_by": "the same call's admission", "rollback_revision": RUNNING_REVISION}
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -985,8 +1041,8 @@ CHECKS = (hook_records_only_real_admissions, runs_are_told_apart, a_later_run_is
           superseded_run_reports_unknown, turn_budget_is_not_a_t3_outcome, config_contract, rollback_keeps_every_job,
           slow_t3_keeps_requests_responsive, promotion_is_exact, other_user_no_crossover,
           restart_and_uncertain_admission, cancel_large_and_queued_and_blocked, visibility_flags_and_telegram_control,
-          review_regressions, unreadable_t3_ends_unknown_after_a_bound, unreadable_window_is_exact_and_survives_restart,
-          cut_turn_is_noted_never_followed_blind, intents_are_answered_exactly)
+          review_regressions, unreadable_t3_ends_unknown_after_a_bound, unreadable_time_is_counted_not_wall_clock,
+          cut_call_is_noted_never_followed_blind, cut_calls_are_recorded_exactly)
 
 
 def main(argv):

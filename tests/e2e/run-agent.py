@@ -1521,9 +1521,6 @@ def t3_admission_real_hook(model):
         assert job.large and job.turn is not None and job.state == "running", job
         assert [l.thread_id for l in job.links] == ["th-alpha"] and store.get("th-alpha")["count"] == 1, job.links
         assert "TOOL-RESULT-QUOTED" in job.turn.get("result", ""), "the outer turn ended after the start"
-        from hermes_talk import work
-        assert (work.work_dir(home) / big / work.PENDING).is_dir() and work.pending(home, big) == [], \
-            "the real pre_tool_call hook noted the start and the real post_tool_call hook answered it"
         if TRANSPORT == "gateway":
             from hermes_talk import jobs
             stored = json.loads(e.history.get_meta(jobs.job_key(big)))
@@ -1547,6 +1544,64 @@ def t3_admission_real_hook(model):
         e.close()
         from hermes_talk import pulse_model
         pulse_model.bind(None)
+
+
+def t3_cut_call_real_core(model):
+    """A T3 start that T3 accepted and the core then stopped waiting for is noted on its task, on the core's own two
+    paths: Talk's stop of the turn (cancel: `session.interrupt` on the gateway, SIGINT for a `hermes chat` child), and
+    the core's tool deadline, after which the turn goes on. The synthetic t3_control accepts the start and answers
+    long after either. Nothing is followed, resent or given a result."""
+    sys.path.insert(0, str(ROOT / "tests" / "agent"))
+    import fake_t3_plugin
+    sys.path.insert(0, str(ROOT / "tests" / "work"))
+    from fake_t3 import FakeT3
+    from hermes_talk import work
+    TELEGRAM.reset()
+    seen = {}
+    for path, extra in (("stop", ""), ("deadline", "timeouts:\n  tools:\n    sequential_call: 3\n")):
+        root = Path(tempfile.mkdtemp(prefix="talk-agent-cut-"))
+        home = root / "home"
+        fx.write_home(home)
+        (home / "config.yaml").write_text(model_config(
+            model, "plugins:\n  enabled:\n    - hermes-telegram-talk\n    - t3-bridge\n" + extra))
+        store = FakeT3(root / "t3")
+        fake_t3_plugin.install(home, ROOT, root / "t3")
+        e = Env(model, root=root, toolsets=["file", "t3_bridge"])
+        try:
+            bind_host_model(e)
+            e.talk.board.follow_s = 0.5
+            conv, vs = e.call()
+            _, body = e.task(conv, vs, f"t3hang {path}", "del_t3cut_" + path)
+            job_id, thread = body["job"]["id"], f"th-hang-{path}"
+            deadline = time.time() + 120
+            while time.time() < deadline and store.get(thread) is None:
+                time.sleep(0.2)
+            assert store.get(thread)["count"] == 1, "T3 accepted the start while its call was still open"
+            if path == "stop":
+                assert e.post("task/cancel", {"conversation_id": conv, "job_id": job_id})[0] == 200
+            done = e.wait(job_id, conv, vs, timeout=90)
+            job = e.native(job_id)
+            records = work.observations(home, job_id)
+            assert [(r.get("cut"), r["action"], r["thread_id"]) for r in records] == \
+                [({"stop": "cancelled", "deadline": "timeout"}[path], "start", None)], \
+                ("the core reported the call it gave up on to the real post_tool_call hook", records)
+            assert [l.status for l in job.links] == [work.DROPPED] and work.unseen(job.links[0]) and not job.large, job
+            assert done["kind"] == "micro" and work.CUT_START in done["spoken"], done
+            if path == "stop":
+                assert done["state"] == "cancelled" and not done["result"] and work.CUT_START in job.error, done
+            else:
+                assert done["state"] == "succeeded" and "timed out" in done["result"] \
+                    and done["result"].endswith(work.CUT_START), done
+            time.sleep(1.5)
+            now = store.get(thread)
+            assert now["count"] == 1 and not now.get("reads") and not now.get("interrupts"), \
+                ("a run Talk cannot single out is neither followed, resent nor interrupted", now)
+            seen[path] = {"state": done["state"], "hook_status": records[0]["cut"], "note": job.links[0].error}
+        finally:
+            e.close()
+            from hermes_talk import pulse_model
+            pulse_model.bind(None)
+    return {"transport": TRANSPORT, **seen}
 
 
 UNAVAILABLE = ("does not exist", "not available", "could not be resolved", "unknown tool", "not in this session")
@@ -1669,7 +1724,7 @@ def gateway_plugin_reload_same_pid(model):
 
 COMMON = (native_tool_roundtrip, background_result_delivery, context_update_injection, persistent_two_call_history,
           pulse_visibility_and_cursor, pulse_late_after_fast_start, cross_user_denial, cross_profile_denial, restart_job_reconciliation,
-          voice_disconnect_vs_cancel, delegation_id_dedup, one_call_three_native_runs, t3_admission_real_hook, t3_toolset_contract, plugin_native_install, unauthenticated_job_denial,
+          voice_disconnect_vs_cancel, delegation_id_dedup, one_call_three_native_runs, t3_admission_real_hook, t3_cut_call_real_core, t3_toolset_contract, plugin_native_install, unauthenticated_job_denial,
           limits_and_approvals, smart_approval_profile, receipt_ack_no_double_speech, telegram_default_receipt,
           telegram_alternate_destination, telegram_closed_call_delivery, telegram_ambiguous_send,
           telegram_restart_dedup, queue_start_failure, large_old_unread_result, ambiguous_task_submission,

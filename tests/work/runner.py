@@ -1,9 +1,12 @@
 """A bounded stand-in for `hermes chat` in the work gate. No model, provider, Hermes core or T3.
 
 Talk starts it exactly as it starts Hermes (agent.NativeAgent behind spool.py, its own process group, with
-HERMES_TALK_JOB). Where a real turn would call t3_control, it runs the pre_tool_call hook body (work.intend), then
-the post_tool_call hook body (work.observe) with the result T3 would give, against the synthetic T3 store in
-$TALK_WORK_DIR/t3. TASK words:
+HERMES_TALK_JOB). Where a real turn would call t3_control, it runs the post_tool_call hook body (work.observe) with
+what the core passes it, against the synthetic T3 store in $TALK_WORK_DIR/t3: the result T3 would give, or, for a
+call the core gave up on, the core's own made-up result and status (agent/tool_executor.py: `cancelled` with the
+call's arguments when a stop abandons a running call, `timeout` at the tool deadline, `blocked` for a call a hook
+refused, and `cancelled` with empty arguments for a call it never started). The real core's paths themselves are
+driven by tests/e2e/run-agent.py (t3_cut_call_real_core). TASK words:
 
   hold K                 a micro request: hold until release/K
   code K                 t3 start of thread th-K, then end the turn
@@ -13,9 +16,12 @@ $TALK_WORK_DIR/t3. TASK words:
   lostnothread K         a t3 start whose answer was lost before any thread id came back
   refused K              a t3 start T3 refused
   look THREAD K          a t3 read of THREAD (a status read), then end the turn
-  cutstart K             T3 accepts a start of th-K, but the turn is stopped before the post hook records it
-  cutsend THREAD K       T3 accepts a send to THREAD, but the turn is stopped before the post hook records it
-  blocked K              a t3 start that never reached T3 and got no post hook (blocked), then the turn ends itself
+  cutstart K             T3 accepts a start of th-K; the turn is stopped inside the call (hook: cancelled)
+  cutsend THREAD K       T3 accepts a send to THREAD; the turn is stopped inside the call (hook: cancelled)
+  timeout K              T3 accepts a start of th-K after the core's tool deadline (hook: timeout); the turn goes on
+  retry K                as timeout, then the same call again, which T3 answers with the start it already took
+  blocked K              a t3 start a hook refused, so it never reached T3 (hook: blocked); the turn ends itself
+  skipped K              a t3 start the core never started (hook: cancelled, no arguments); the turn ends itself
 """
 import json
 import os
@@ -52,12 +58,16 @@ def log(kind, **extra):
                                  "job": os.environ.get("HERMES_TALK_JOB"), "at": time.time(), **extra}) + "\n")
 
 
-def tool(action, result, **call):
-    """One t3_control call as the hooks see it; result None is a call whose post hook never ran."""
-    call = {"action": action, "request_id": f"req-{key}-{action}", **call}
-    work.intend(tool_name="t3_control", args=call, session_id=session, home=home)
-    if result is not None:
-        work.observe(tool_name="t3_control", args=call, result=json.dumps(result), session_id=session, home=home)
+def tool(action, result, status=None, **call):
+    """One t3_control call as the post hook sees it: T3's answer, or the core's own result and status."""
+    call = {"action": action, "request_id": f"req-{key}-{action}", **call} if action else {}
+    work.observe(tool_name="t3_control", args=call, result=result if isinstance(result, str) else json.dumps(result),
+                 session_id=session, home=home, status=status or ("ok" if result.get("ok") else "error"))
+
+
+def abandoned(action, **call):
+    """The core's report of a running call it stopped waiting for after a stop (its real answer is dropped)."""
+    tool(action, "[Tool execution cancelled — t3_control was abandoned: interrupt requested]", "cancelled", **call)
 
 
 def stop(*_):
@@ -76,6 +86,7 @@ signal.signal(signal.SIGINT, stop)
 signal.signal(signal.SIGTERM, stop)
 emit({"type": "system", "session_id": session})
 log("start", verb=verb)
+cut = None
 try:
     text = f"done {key}"
     if verb in ("code", "codewait"):
@@ -101,20 +112,34 @@ try:
     elif verb == "look":
         tool("read", {"ok": True, "action": "read", "state": t3.state(words[1])}, thread_id=words[1])
     elif verb == "cutstart":
-        tool("start", None, cwd="/synthetic", message=key)
+        cut = ("start", {"cwd": "/synthetic", "message": key})
         t3.start(f"th-{key}")
         log("t3", thread=f"th-{key}")
+        hold()
     elif verb == "cutsend":
-        tool("send", None, thread_id=words[1], message=key)
+        cut = ("send", {"thread_id": words[1], "message": key})
         t3.send(words[1])
         log("t3", thread=words[1])
+        hold()
+    elif verb in ("timeout", "retry"):
+        tool("start", "Error executing tool 't3_control': timed out after 2.0s", "timeout", cwd="/synthetic",
+             message=key)
+        started = {"ok": True, "action": "start", **t3.start(f"th-{key}")}
+        log("t3", thread=f"th-{key}")
+        if verb == "retry":
+            tool("start", started, cwd="/synthetic", message=key)
     elif verb == "blocked":
-        tool("start", None, cwd="/synthetic", message=key)
-    if verb in ("hold", "codewait", "cutstart", "cutsend"):
+        tool("start", {"error": "blocked by a hook", "message": "blocked by a hook"}, "blocked", cwd="/synthetic",
+             message=key)
+    elif verb == "skipped":
+        tool(None, "[Tool execution cancelled — t3_control was skipped. interrupt requested]", "cancelled")
+    if verb in ("hold", "codewait"):
         hold()
     log("end")
     emit({"type": "result", "exit_code": 0, "text": text, "session_id": session})
 except KeyboardInterrupt:
+    if cut:
+        abandoned(cut[0], **cut[1])
     log("stop")
     emit({"type": "result", "exit_code": 130, "text": "", "error": "interrupted", "session_id": session})
     sys.exit(130)

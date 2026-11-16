@@ -92,6 +92,11 @@ class FakeT3:
             return {"outcome": outcome, "messages": messages}
         return self.update(thread_id, change)
 
+    def forget(self, thread_id):
+        """T3 no longer has the thread. Under the lock, so no reader's write brings it back."""
+        with self._locked():
+            self._path(thread_id).unlink(missing_ok=True)
+
     def outage(self, on):
         """While on, every call answers as the bridge does when the T3 server cannot be reached."""
         (self.root / ".down").touch() if on else (self.root / ".down").unlink(missing_ok=True)
@@ -101,10 +106,15 @@ class FakeT3:
             return json.dumps({"ok": False, "error": "server_unreachable", "message": "synthetic outage",
                                "retryable": True, "outcome_unknown": False})
         thread_id = args.get("thread_id")
+        missing = json.dumps({"ok": False, "error": "not_found", "message": "no such thread"})
         if self.get(thread_id) is None:
-            return json.dumps({"ok": False, "error": "not_found", "message": "no such thread"})
+            return missing
         if args["action"] == "read":
-            data = self.update(thread_id, lambda cur: {"reads": (cur or {}).get("reads", 0) + 1})
+            with self._locked():  # the check and the count are one step: a thread forgotten meanwhile stays gone
+                current = self.get(thread_id)
+                if current is None:
+                    return missing
+                data = self._write(thread_id, {**current, "reads": current.get("reads", 0) + 1})
             return json.dumps({"ok": True, "action": "read", "state": self.state(thread_id, data),
                                "messages": data["messages"][-args.get("messages", 2):]})
         if args["action"] == "interrupt":
