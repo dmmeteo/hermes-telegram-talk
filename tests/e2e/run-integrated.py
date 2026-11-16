@@ -64,6 +64,10 @@ def offline(require_host):
     code, secrets = stage("logsecrets", [sys.executable, "tests/logsecrets/run.py",
                                          *(["--require-host"] if require_host else [])])
     ok = ok and code == 0 and ("TALK_LOG_SECRETS_OK" in secrets or "SKIPPED" in secrets and not require_host)
+    code, reports = stage("reports", [sys.executable, "tests/reports/run.py"])
+    ok = ok and code == 0 and "TALK_REPORTS_OK" in reports
+    code, titles = stage("titles", [sys.executable, "tests/titles/run.py"])
+    ok = ok and code == 0 and "TALK_TITLES_OK" in titles
     counts = {**counted(backend, ("legacy", "memory", "host")), **counted(frontend, ("frontend", "http")),
               **counted(pulse, ("pulse_memory", "pulse_host")), **counted(engine, ("pulse_engine",))}
     if "host" not in counts or "pulse_host" not in counts:

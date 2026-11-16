@@ -29,7 +29,6 @@ import logging
 import os
 import re
 import secrets
-import socket
 import threading
 import time
 import urllib.error
@@ -56,6 +55,8 @@ MAX_REPLY_BYTES = 65536
 NOT_SENT_RETRYABLE = ("connecterror", "connection refused", "too many requests", "retry after", "flood control")
 NOT_SENT_FINAL = ("chat not found", "bot was blocked", "forbidden", "user is deactivated", "bad request",
                   "can't initiate conversation", "not configured", "message is too long")
+# Edits held because Hermes' own sender broke on 2026-11-16 (core 471537ae3a), not because Telegram refused them.
+OUTAGE_HOLDS = ("Hermes Telegram sender is not installed", "missing standalone_sender_fn")
 EDIT_DONE, EDIT_RETRY, EDIT_FINAL = "done", "retry", "final"
 EDIT_REFUSED = ("message to edit not found", "message can't be edited", "chat not found", "bot was blocked",
                 "forbidden", "user is deactivated", "bad request", "not configured")
@@ -326,7 +327,8 @@ class TelegramSender:
             return {"success": True, "message_id": str(reply["result"]["message_id"])}
         except urllib.error.URLError as exc:
             reason = exc.reason
-            if isinstance(reason, (ConnectionRefusedError, socket.gaierror)):  # no connection: nothing was sent
+            # urllib wraps only failures before Telegram had the whole request: nothing was sent.
+            if isinstance(reason, OSError) and not isinstance(reason, TimeoutError):
                 return {"error": f"Telegram {method} failed: ConnectError: {type(reason).__name__}"}
             failure = reason if isinstance(reason, Exception) else exc
         except Exception as exc:
@@ -582,7 +584,7 @@ class ReportDesk:
                     self._save(report.to(UNCERTAIN, owner=None, error="Talk stopped during the send; it may or "
                                          "may not have arrived and was not resent.",
                                          notes=report.notes + ("claim found after restart",)))
-                elif report.stalled:
+                elif report.stalled or report.held and any(m in (report.error or "") for m in OUTAGE_HOLDS):
                     self._save(replace(report, held=None, stalled=False, attempts=0, not_before=0.0))
             due = [r.job_id for r in self.reports.values()
                    if r.status and (r.state == PENDING or r.needs_edit or r.renaming)]
