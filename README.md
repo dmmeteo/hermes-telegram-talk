@@ -404,8 +404,12 @@ and other sessions record nothing. The large task's turn then holds no slot. Whe
 running and Talk follows the thread through the profile's own `t3_control` handler until T3 shows the run completed
 (the result is the thread's newest message when it is the assistant's), failed, interrupted, or stopped after a cancel.
 When T3 no longer shows how the run ended (a later run of the thread started first, only `idle`, or the thread is
-gone), the task ends as unknown (❔, no result), never as completed. A blocked thread stays open. A
-restart keeps following; nothing is relaunched or resent. The voice model handles existing tasks with control lines
+gone), the task ends as unknown (❔, no result), never as completed. The same holds once Talk has failed to read T3
+for 30 minutes in a row; any good read in between starts that count again. A blocked thread stays open. A
+restart keeps following; nothing is relaunched or resent. The `pre_tool_call` hook notes each start or send before it
+runs. When a turn is stopped with one still unanswered, T3 may hold work that no record names and no read can tell
+from another run: the task settles from its turn and says so ("T3 may run that work unseen by Talk"); it is never
+followed and never given a result. The voice model handles existing tasks with control lines
 (`CONTROL: list`, `CONTROL: status N`, `CONTROL: result N`, `CONTROL: cancel N`), answered at once from server state and
 never queued. See `docs/adr/0011-t3-work-and-task-visibility.md`.
 

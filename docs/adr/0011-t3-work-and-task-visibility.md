@@ -64,6 +64,23 @@ stopped the turn and reported the task failed while T3 kept working. Telegram po
   running and is visible in T3. Hidden tasks keep their inert `hidden` record, so the old desk posts none of them;
   tasks created after the rollback post as before. The old parser needs no YAML change (`max_open_per_user` absent
   means 3). The new receipts keys must be removed before a rollback, since the old parser refuses them.
+- Amended 2026-11-16 (`fix/talk-t3-outcomes-1116`), replacing the two consequences above about a killed turn and an
+  unreadable T3:
+  - **A cut call is noted.** The plugin's `pre_tool_call` hook writes one intent per start or send under
+    `work/<job>/pending/` before the call runs; every answer the `post_tool_call` hook sees removes it, and each
+    admission record names its intent. When a turn ends in any state but succeeded with an intent still open, the
+    job gets a note link (`unconfirmed`, never counted) and settles from its turn with "T3 may run that work unseen
+    by Talk", naming the thread for a send. It is not followed: `t3_control` read shows the thread's status and the
+    ids of its latest and active run only, so a run with no recorded baseline cannot be told from another one, and a
+    start's thread id is derived inside the bridge. A turn that ended on its own saw each call answered, so an
+    intent left by a blocked call adds no note. A lost start without a thread id stays a note for the same reason.
+  - **An unreadable T3 is bounded.** A link keeps `unread_since`, the first failed read since the last good one.
+    After `work.UNREADABLE_S` (30 minutes) the run is unknown ("Talk could not read T3 for N min"): the job is
+    interrupted with `unknown`, no result. A possible admission T3 never confirmed becomes a note instead. The
+    window is stored on the link, so a restart does not start it again; time Talk was down counts.
+  - The superseded-run case stays unknown: the handler exposes no per-run status and no run list.
+  - Rollback to `ccdc0c6`: its loader ignores `unread_since` and reads note links as dropped ones; it never reads
+    `pending/`. It needs no step first.
 - Tests: `tests/work/run.py` (real server, board, desk, NativeAgent, spool and hook body; bounded runner and a
   file-backed T3), `tests/capacity/run.py` (lanes, no open cap), and `tests/e2e/run-agent.py` `t3_admission_real_hook`
   (a real turn calls a synthetic `t3_control` plugin; the real hook fires; Talk follows through the registry).

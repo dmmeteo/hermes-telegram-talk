@@ -21,7 +21,9 @@ slot, and when the turn ends the job stays running on its T3 work: `turn` keeps 
 settled to, and the job settles only from what T3 shows. Everything newer than the base record (`parallel`, `links`,
 `turn`, `unknown`) is stored under its own key, so a Talk from before these fields still loads every job it wrote.
 `unknown` marks a job whose T3 run ended without T3 showing how: its base state is interrupted (a state every reader
-knows), it carries no result, and it is spoken and posted as unknown, never as completed.
+knows), it carries no result, and it is spoken and posted as unknown, never as completed. That includes a run T3
+stayed unreadable for (work.UNREADABLE_S). A turn that was cut with a T3 call unanswered leaves a note link: the job
+settles from its turn and its reason says T3 may hold work Talk cannot see.
 """
 import errno
 import json
@@ -107,6 +109,11 @@ class Job:
         return any(link.counts for link in self.links)
 
     @property
+    def unseen(self):
+        """It ended on its turn alone while T3 may hold work of it that Talk cannot see."""
+        return self.terminal and not self.large and any(work.unseen(link) for link in self.links)
+
+    @property
     def kind(self):
         return "large" if self.large else "micro"
 
@@ -156,7 +163,7 @@ class Job:
         head = f"Hermes task {self.number} ({self.request[:80]}) {self.spoken_state()}."
         if self.state == SUCCEEDED and self.result:
             return f"{head} Result: {self.result}"
-        if (self.state == FAILED or self.unknown) and self.error:
+        if (self.state == FAILED or self.unknown or self.unseen) and self.error:
             return f"{head} Reason: {self.error}"
         return head
 
@@ -240,6 +247,7 @@ class JobBoard:
         self.history, self.agent, self.tasks, self.clock = history, agent, tasks, clock
         self.prompt_for, self.bind, self.redact, self.desk = prompt_for, bind, redact, desk
         self.home, self.t3, self.follow_s = home, t3 or work.T3(), follow_s
+        self.unread_s = work.UNREADABLE_S
         self.lock = threading.RLock()
         self.handles = {}
         self.revision = 0
@@ -574,6 +582,11 @@ class JobBoard:
                 self.bind(job, outcome.session_id)
         state, fields = self._turn_outcome(job, outcome, timed_out, restarted)
         self.reaped.discard(job.id)
+        if state != SUCCEEDED and self.home is not None:
+            # A turn that ended on its own saw every call answered; one that was cut may have left one in T3.
+            known = {link.key for link in job.links}
+            cut = [work.cut_link(r) for r in work.pending(self.home, job.id) if r["key"] not in known]
+            job = replace(job, links=job.links + tuple(cut))
         if job.links:
             # The admission moves into `turn`: a rollback to a Talk before T3 work then finds no admission to settle
             # this still-running job from, and marks it interrupted instead of completed with the turn's reply.
@@ -650,7 +663,8 @@ class JobBoard:
         counted = [link for link in job.links if link.counts]
         statuses = {link.status for link in counted}
         if not counted:  # every possible admission proved empty: the turn's own outcome stands
-            lost = " " + work.LOST_START if any(l.error == work.LOST_START for l in job.links) else ""
+            notes = dict.fromkeys(l.error for l in job.links if work.unseen(l) and l.error)
+            lost = " " + " ".join(notes) if notes else ""
             result, error = turn.get("result", ""), turn.get("error", "")
             if lost and turn["state"] == SUCCEEDED:
                 result = clip(result + lost, self.tasks.result_chars)
@@ -715,7 +729,7 @@ class JobBoard:
             if link.done:
                 continue
             raw = self.t3.read(link.thread_id)
-            fresh = work.assess(link, raw, now)
+            fresh = work.assess(link, raw, now, self.unread_s)
             assessed[link.key] = (link, fresh)
             # Only this link's own run is interrupted, never one another task queued on the same thread.
             if job.cancel_requested and fresh.counts and fresh.status in ("running", "blocked") \

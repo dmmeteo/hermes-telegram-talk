@@ -1521,6 +1521,9 @@ def t3_admission_real_hook(model):
         assert job.large and job.turn is not None and job.state == "running", job
         assert [l.thread_id for l in job.links] == ["th-alpha"] and store.get("th-alpha")["count"] == 1, job.links
         assert "TOOL-RESULT-QUOTED" in job.turn.get("result", ""), "the outer turn ended after the start"
+        from hermes_talk import work
+        assert (work.work_dir(home) / big / work.PENDING).is_dir() and work.pending(home, big) == [], \
+            "the real pre_tool_call hook noted the start and the real post_tool_call hook answered it"
         if TRANSPORT == "gateway":
             from hermes_talk import jobs
             stored = json.loads(e.history.get_meta(jobs.job_key(big)))
