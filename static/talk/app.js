@@ -1,5 +1,29 @@
 "use strict";
 
+// Theme -> values CSS cannot carry: the browser theme color and the canvas ring track. The stored choice applies
+// before anything else runs; the server CSP allows no inline script that could apply it earlier.
+const THEMES = {modern: {themeColor: "#30302e", ringTrack: "#4b4a47"}, typesafe: {themeColor: "#b9dff8", ringTrack: "#2c312c"}};
+const THEME_KEY = "talk-theme";
+let theme = "modern";
+function applyTheme(name) {
+  theme = name;
+  document.documentElement.dataset.theme = name;
+  document.getElementById("theme-color").setAttribute("content", THEMES[name].themeColor);
+  for (const option of Object.keys(THEMES)) document.getElementById(`theme-${option}`).checked = option === name;
+}
+function chooseTheme(event) {
+  if (!Object.keys(THEMES).includes(event.target.value)) return;
+  applyTheme(event.target.value);
+  try { localStorage.setItem(THEME_KEY, theme); } catch (_) { /* Storage can be off; the choice still applies to this page. */ }
+  // The ring animates only during a call; an idle ring keeps the old theme's colours until repainted.
+  render();
+}
+try {
+  const stored = localStorage.getItem(THEME_KEY);
+  if (Object.keys(THEMES).includes(stored)) theme = stored;
+} catch (_) { /* Storage can be off; the default applies. */ }
+applyTheme(theme);
+
 const startButton = document.getElementById("start");
 const muteButton = document.getElementById("mute");
 const errorBox = document.getElementById("error");
@@ -13,14 +37,9 @@ const transcriptList = document.getElementById("transcript");
 const voiceBox = document.getElementById("voice-box");
 const voiceSelect = document.getElementById("voice");
 const voiceNote = document.getElementById("voice-note");
-const threadNote = document.getElementById("thread-note");
 // The /talk button URL carries a server-issued handle for the chat thread it was sent in; nothing else binds one.
 const launch = /^[A-Za-z0-9_-]{32,64}$/.test(new URLSearchParams(location.search).get("launch") || "")
   ? new URLSearchParams(location.search).get("launch") : null;
-const THREAD_NOTES = {unbound: "Not linked to a chat. Send /talk there to link it.",
-  expired: "Talk link expired. Send /talk in the chat again.", used: "Talk link already used. Send /talk again.",
-  invalid: "Talk link not valid. Send /talk in the chat again.", foreign: "Talk link is for another account.",
-  not_private: "Chat input works only in a private chat.", unavailable: "Chat input is unavailable here."};
 const reconnectButton = document.getElementById("reconnect");
 const menuButton = document.getElementById("menu-toggle");
 const callMenu = document.getElementById("call-menu");
@@ -87,6 +106,38 @@ function updateMic(current) {
   render();
 }
 
+// Raw orb state -> status text, and how long (ms) the state must hold before its text replaces a different one.
+// Listening and speaking alternate at every short pause, so a change between them waits; any other change shows at once.
+const STATUS = {
+  idle: {label: "Call stopped.", hold: 0},
+  connecting: {label: "Connecting. Microphone paused.", hold: 0},
+  blocked: {label: "Audio and microphone paused.", hold: 0},
+  muted: {label: "Microphone muted.", hold: 0},
+  silent: {label: "Listening.", hold: 1000},
+  listening: {label: "Listening.", hold: 1000},
+  speaking: {label: "Speaking.", hold: 1000},
+};
+const statusLine = {shown: null, next: null, timer: 0};
+
+function showStatus(state) {
+  const {label, hold} = STATUS[state];
+  if (statusLine.next && STATUS[statusLine.next].label === label) return;
+  clearTimeout(statusLine.timer);
+  statusLine.next = null;
+  if (statusLine.shown && STATUS[statusLine.shown].label === label) return;
+  const wait = Math.min(hold, STATUS[statusLine.shown]?.hold ?? 0);
+  if (!wait) { applyStatus(state); return; }
+  statusLine.next = state;
+  statusLine.timer = setTimeout(() => applyStatus(state), wait);
+}
+
+function applyStatus(state) {
+  statusLine.shown = state;
+  statusLine.next = null;
+  orb.setAttribute("aria-label", STATUS[state].label);
+  document.getElementById("call-status").textContent = STATUS[state].label;
+}
+
 function render() {
   const current = call;
   const mediaReady = current && current.phase === "ready" && current.playing && current.audio?.state === "running"
@@ -96,12 +147,8 @@ function render() {
       ? "speaking" : current.muted ? "muted" : current.inputLevel > .005 && current.stream?.getAudioTracks().some(track => track.enabled && track.readyState !== "ended")
       ? "listening" : "silent";
   orb.dataset.state = state;
-  orb.setAttribute("aria-label", ({idle: "Call stopped.", blocked: "Tap to enable audio. Microphone paused.",
-    connecting: "Connecting. Microphone paused.", listening: "Listening.", speaking: "Speaking.",
-    silent: "Connected. Quiet.", muted: "Microphone muted."})[state]);
-  const status = document.getElementById("call-status");
-  const label = orb.getAttribute?.("aria-label") || state;
-  if (status.textContent !== label) status.textContent = label;
+  // While muted, the text keeps saying so; the ring still turns orange for assistant output.
+  showStatus(state === "speaking" && current.muted ? "muted" : state);
   if (endButton) endButton.disabled = !current;
   muteButton.setAttribute("aria-label", current?.muted ? "Unmute microphone" : "Mute microphone");
   muteButton.disabled = !current || current.phase !== "ready";
@@ -128,7 +175,7 @@ function draw(current) {
     ? Math.min(1, (state === "speaking" ? current.outputLevel : current.inputLevel) * 5) : 0;
   paint.clearRect(0, 0, 640, 640);
   paint.beginPath(); paint.arc(320, 320, 248, 0, Math.PI * 2);
-  paint.strokeStyle = "#2d3933"; paint.lineWidth = 2; paint.stroke();
+  paint.strokeStyle = THEMES[theme].ringTrack; paint.lineWidth = 2; paint.stroke();
   paint.beginPath();
   const radius = 248 + (reducedMotion.matches ? 0 : level * 20);
   paint.arc(320, 320, radius, state === "connecting" ? -.7 : 0,
@@ -343,9 +390,6 @@ function renderVoice(current) {
 async function loadVoice(current) {
   try {
     const data = await post("voice", {initData: current.auth, ...(launch ? {launch} : {})}, {signal: current.abort.signal});
-    const status = data.thread && typeof data.thread.status === "string" ? data.thread.status : "bound";
-    threadNote.textContent = THREAD_NOTES[status] || "";
-    threadNote.hidden = !THREAD_NOTES[status];
     if (data.voice && Array.isArray(data.voice.choices) && typeof data.voice.current === "string") {
       voiceState = data.voice;
       // The voice this call's session was created with: the account's stored choice when the call started.
@@ -355,20 +399,24 @@ async function loadVoice(current) {
   renderVoice(call);
 }
 
+// The selector stays enabled while saving: disabling it would drop its focus and close the settings panel.
+let choosingVoice = false;
 async function chooseVoice() {
   const current = call;
   const auth = current?.auth || initData();
-  if (!auth || !voiceSelect.value || voiceSelect.value === voiceState?.current) return;
-  voiceSelect.disabled = true;
+  if (!auth || choosingVoice || !voiceSelect.value || voiceSelect.value === voiceState?.current) return;
+  choosingVoice = true;
+  const picked = voiceSelect.value;
   try {
-    const data = await post("voice", {initData: auth, voice: voiceSelect.value});
+    const data = await post("voice", {initData: auth, voice: picked});
     voiceState = data.voice;
     showError();
   } catch (error) {
     showError(error.status === 400 ? "That voice is not available." : error.message);
   } finally {
-    voiceSelect.disabled = false;
-    renderVoice(call);
+    choosingVoice = false;
+    if (voiceSelect.value !== picked && voiceSelect.value !== voiceState?.current) void chooseVoice();
+    else renderVoice(call);
   }
 }
 
@@ -376,6 +424,7 @@ function reconnectVoice() {
   if (!call || reconnectButton.hidden) return;
   if (callMenu) callMenu.hidden = true;
   menuButton?.setAttribute("aria-expanded", "false");
+  menuButton?.focus();
   stop();
   void start();
 }
@@ -747,7 +796,7 @@ async function enableAudio(current) {
     if (call !== current) return;
     current.playing = false; current.phase = "blocked";
     updateMic(current);
-    showError("Tap Enable audio to hear the call. Your microphone is paused.");
+    showError();
   }
 }
 
@@ -765,17 +814,28 @@ async function waitForIce(current) {
   });
 }
 
+function resetAvatar() {
+  const avatar = document.getElementById("avatar");
+  avatar.onload = avatar.onerror = null;
+  avatar.removeAttribute("src");
+  avatar.hidden = true;
+  document.getElementById("face").removeAttribute("hidden");
+}
+
 function applyProfile(data) {
   if (typeof data.profile?.display_name !== "string" || !/^#[0-9a-f]{6}$/i.test(data.appearance?.listen_color)
     || !/^#[0-9a-f]{6}$/i.test(data.appearance?.speak_color)) throw new Error("Voice configuration is unavailable. Tap Retry.");
   document.getElementById("name").textContent = data.profile.display_name;
   document.documentElement.style.setProperty("--listen", "#4FC3F7");
   document.documentElement.style.setProperty("--speak", "#FFB74D");
+  resetAvatar();
+  // The authenticated blob from refreshAvatar needs these handlers too, whichever fallback URL was accepted.
   const avatar = document.getElementById("avatar");
+  avatar.onload = () => { avatar.hidden = false; document.getElementById("face").setAttribute("hidden", ""); };
+  avatar.onerror = () => { avatar.hidden = true; document.getElementById("face").removeAttribute("hidden"); };
   const path = new URL(data.profile.avatar_url || "", location.href);
-  if (path.origin === location.origin && path.pathname === "/tg-voice/avatar" && !path.search && !path.hash && !path.username && !path.password) {
-    avatar.onload = () => { avatar.hidden = false; document.getElementById("face").setAttribute("hidden", ""); };
-    avatar.onerror = () => { avatar.hidden = true; document.getElementById("face").removeAttribute("hidden"); };
+  const fallback = new URL("avatar", location.href);
+  if (path.origin === location.origin && path.pathname === fallback.pathname && !path.search && !path.hash && !path.username && !path.password) {
     avatar.src = path.href;
   }
 }
@@ -812,6 +872,7 @@ async function start() {
     }
     return;
   }
+  resetAvatar();
   const auth = initData();
   if (!auth) { stop("Open Hermes Telegram Talk from Telegram to sign in."); return; }
   const current = { auth, phase: "connecting", abort: new AbortController(), nodes: [], began: performance.now(), stages: {},
@@ -916,7 +977,11 @@ function onPageHide(event) {
   if (conversation) clearTimeout(conversation.retryTimer);
   menuButton?.removeEventListener("click", toggleMenu);
   endButton?.removeEventListener("click", endCall);
+  document.getElementById("menu-close").removeEventListener("click", toggleMenu);
   document.removeEventListener?.("keydown", closeMenu);
+  document.removeEventListener?.("pointerdown", closeMenu);
+  callMenu?.removeEventListener("focusout", closeMenu);
+  for (const option of Object.keys(THEMES)) document.getElementById(`theme-${option}`).removeEventListener("change", chooseTheme);
   transcriptList?.removeEventListener("scroll", trackTranscriptScroll);
   startButton.removeEventListener("click", start);
   muteButton.removeEventListener("click", toggleMute);
@@ -947,19 +1012,36 @@ if (webApp) { webApp.ready(); webApp.expand(); }
 function toggleMenu() {
   callMenu.hidden = !callMenu.hidden;
   menuButton.setAttribute("aria-expanded", String(!callMenu.hidden));
-  if (!callMenu.hidden) voiceSelect?.focus?.();
+  if (!callMenu.hidden) callMenu.focus();
+  else menuButton.focus();
 }
+// Escape, a pointer outside, or focus moving out closes the panel; the toggle counts as inside so it can close it itself.
 function closeMenu(event) {
-  if (event.key === "Escape" && !callMenu.hidden) { toggleMenu(); menuButton.focus(); }
+  if (callMenu.hidden) return;
+  if (event.type === "keydown") {
+    if (event.key === "Escape") { event.preventDefault(); toggleMenu(); }
+    return;
+  }
+  // WebKit leaves relatedTarget null when a tap lands on a button it does not focus, and on an app switch;
+  // closing then would let the same tap on the toggle reopen the panel.
+  if (event.type === "focusout" && !event.relatedTarget) return;
+  const target = event.type === "focusout" ? event.relatedTarget : event.target;
+  if (callMenu.contains(target) || menuButton.contains(target)) return;
+  callMenu.hidden = true;
+  menuButton.setAttribute("aria-expanded", "false");
 }
-function endCall() { stop(); callMenu.hidden = true; menuButton.setAttribute("aria-expanded", "false"); }
+function endCall() { stop(); callMenu.hidden = true; menuButton.setAttribute("aria-expanded", "false"); menuButton.focus(); }
 function trackTranscriptScroll() {
   followingTranscript = transcriptList.scrollTop + transcriptList.clientHeight >= transcriptList.scrollHeight - 24;
 }
 function bindControls() {
   menuButton?.addEventListener("click", toggleMenu);
   endButton?.addEventListener("click", endCall);
+  document.getElementById("menu-close").addEventListener("click", toggleMenu);
   document.addEventListener?.("keydown", closeMenu);
+  document.addEventListener?.("pointerdown", closeMenu);
+  callMenu?.addEventListener("focusout", closeMenu);
+  for (const option of Object.keys(THEMES)) document.getElementById(`theme-${option}`).addEventListener("change", chooseTheme);
   transcriptList?.addEventListener("scroll", trackTranscriptScroll);
   startButton.addEventListener("click", start);
   muteButton.addEventListener("click", toggleMute);
