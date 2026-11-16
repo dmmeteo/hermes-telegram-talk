@@ -83,6 +83,63 @@ try {
   log('avatar-replacement');
   await context.close();
 
+  const presenceContext = await browser.newContext({viewport: {width: 390, height: 844}, hasTouch: true});
+  await presenceContext.addInitScript(() => { navigator.mediaDevices.getUserMedia = () => new Promise(() => {}); });
+  const room = await open(presenceContext);
+  await visibleAvatar(room);
+  await room.waitForFunction(() => call && (call.phase === 'blocked' || call.audio?.state === 'running'));
+  await room.evaluate(() => {
+    window.__levels = {input: 0, output: 0};
+    const analyser = key => ({getFloatTimeDomainData: samples => samples.fill(window.__levels[key])});
+    const track = {enabled: false, readyState: 'live', stop() {}};
+    clearTimeout(call.timeout);
+    Object.assign(call, {phase: 'ready', playing: true, handshake: true,
+      audio: {state: 'running', close: async () => {}, resume: async () => {}}, peer: {connectionState: 'connected', close() {}},
+      stream: {getAudioTracks: () => [track], getTracks: () => [track]},
+      inputAnalyser: analyser('input'), inputSamples: new Float32Array(64), outputAnalyser: analyser('output'), outputSamples: new Float32Array(64)});
+    updateMic(call); sample(call);
+  });
+  const levels = (input, output) => room.evaluate(([input, output]) => { window.__levels = {input, output}; }, [input, output]);
+  const frames = count => room.evaluate(count => new Promise(done => {
+    let left = count;
+    const next = () => { left -= 1; if (left) requestAnimationFrame(next); else done(); };
+    requestAnimationFrame(next);
+  }), count);
+  const uncovered = () => room.evaluate(() => {
+    const portrait = document.querySelector('.portrait'), box = portrait.getBoundingClientRect();
+    const round = getComputedStyle(portrait).borderTopLeftRadius !== '0px';
+    const misses = [];
+    for (let i = 1; i < 16; i++) for (let j = 1; j < 16; j++) {
+      const x = box.left + box.width * i / 16, y = box.top + box.height * j / 16;
+      if (round && Math.hypot(x - box.left - box.width / 2, y - box.top - box.height / 2) > box.width / 2 - 2) continue;
+      const hit = document.elementFromPoint(x, y);
+      if (!portrait.contains(hit)) misses.push(hit?.id || hit?.getAttribute('class') || hit?.tagName);
+    }
+    return misses;
+  });
+  const slashed = () => room.evaluate(() => {
+    const slash = document.querySelector('#mute .slash');
+    return {pressed: document.getElementById('mute').getAttribute('aria-pressed'), slash: Boolean(slash && slash.getBoundingClientRect().width > 10)};
+  });
+  for (const theme of ['modern', 'typesafe']) {
+    await room.evaluate(theme => document.getElementById(`theme-${theme}`).click(), theme);
+    for (const [state, enter] of [['silent', () => levels(0, 0)], ['listening', () => levels(.05, 0)], ['speaking', () => levels(0, .09)],
+      ['muted', async () => { await levels(0, 0); await room.click('#mute'); }], ['connecting', () => room.evaluate(() => { call.phase = 'connecting'; render(); })]]) {
+      await enter();
+      await frames(3);
+      assert(await room.evaluate(() => document.getElementById('orb').dataset.state) === state, `${theme} ${state} state reached`);
+      const misses = await uncovered();
+      assert(misses.length === 0, `nothing covers the portrait (${theme} ${state}): ${JSON.stringify(misses)}`);
+      const icon = await slashed();
+      assert(icon.slash === (icon.pressed === 'true') && icon.slash === (state === 'muted'), `the microphone icon is crossed out exactly while muted (${theme} ${state}): ${JSON.stringify(icon)}`);
+      if (state === 'muted') await room.screenshot({path: `${out}/presence-${theme}-muted.png`});
+      if (state === 'muted') await room.click('#mute');
+      if (state === 'connecting') await room.evaluate(() => { call.phase = 'ready'; updateMic(call); });
+    }
+    log('presence-uncovered', {theme});
+  }
+  await presenceContext.close();
+
   const panelContext = await browser.newContext({viewport: {width: 390, height: 844}, hasTouch: true});
   await panelContext.addInitScript(() => { navigator.mediaDevices.getUserMedia = () => new Promise(() => {}); });
   const panel = await open(panelContext);
