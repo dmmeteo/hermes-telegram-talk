@@ -35,7 +35,7 @@ function fixture(options = {}) {
   }
   const context = vm.createContext({document:{getElementById:element,documentElement:element('html')},
     window:{addEventListener(){},removeEventListener(){}}, location:{hash:'',href:`http://localhost${options.base||'/tg-voice/'}`,origin:'http://localhost'},
-    URL, URLSearchParams, AbortController, DOMException, TextEncoder, crypto:globalThis.crypto,
+    URL, URLSearchParams, AbortController, DOMException, TextEncoder, crypto:globalThis.crypto, localStorage:options.storage,
     matchMedia:()=>({matches:false}), getComputedStyle:()=>({color:'#ffffff'}),
     ...clock, cancelAnimationFrame(){}, requestAnimationFrame:()=>1,
     fetch:async()=>{throw new Error('Unexpected network');}});
@@ -322,6 +322,20 @@ test('status text follows a raw state only after it holds, while the ring follow
  assert.equal(text(),'Audio and microphone paused.','blocked shows at once');
  f.run(`current.phase='connecting';render();`);assert.equal(text(),'Connecting. Microphone paused.','connecting shows at once');
  f.run(`call=null;render();`);assert.equal(text(),'Call stopped.','idle shows at once');
+});
+test('a stored theme applies at load, and an unknown or unreadable value falls back to Modern',()=>{
+ const saved=[];
+ const store=value=>({getItem:()=>value,setItem:(key,next)=>saved.push([key,next])});
+ const f=fixture({storage:store('typesafe')});
+ assert.equal(f.nodes.get('html').dataset.theme,'typesafe');
+ assert.equal(f.nodes.get('theme-color').content,'#b9dff8');
+ assert.equal(f.nodes.get('theme-typesafe').checked,true);assert.equal(f.nodes.get('theme-modern').checked,false);
+ f.run(`chooseTheme({target:{value:'modern'}})`);
+ assert.equal(f.nodes.get('html').dataset.theme,'modern');assert.equal(f.nodes.get('theme-color').content,'#30302e');
+ assert.deepEqual(saved,[['talk-theme','modern']]);
+ for(const value of [null,'constructor','__proto__','dark']) assert.equal(fixture({storage:store(value)}).nodes.get('html').dataset.theme,'modern',String(value));
+ assert.equal(fixture({storage:{getItem(){throw new Error('blocked');}}}).nodes.get('html').dataset.theme,'modern','unreadable storage');
+ assert.equal(fixture().nodes.get('html').dataset.theme,'modern','no storage');
 });
 test('synthetic provider waits for native channel readiness and sends one handshake',async()=>{
  const html=readFileSync('tests/browser/provider.html','utf8');

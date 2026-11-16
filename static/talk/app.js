@@ -1,5 +1,27 @@
 "use strict";
 
+// Theme -> values CSS cannot carry: the browser theme color and the canvas ring track. The stored choice applies
+// before anything else runs; the server CSP allows no inline script that could apply it earlier.
+const THEMES = {modern: {themeColor: "#30302e", ringTrack: "#4b4a47"}, typesafe: {themeColor: "#b9dff8", ringTrack: "#2c312c"}};
+const THEME_KEY = "talk-theme";
+let theme = "modern";
+function applyTheme(name) {
+  theme = name;
+  document.documentElement.dataset.theme = name;
+  document.getElementById("theme-color").setAttribute("content", THEMES[name].themeColor);
+  for (const option of Object.keys(THEMES)) document.getElementById(`theme-${option}`).checked = option === name;
+}
+function chooseTheme(event) {
+  if (!Object.keys(THEMES).includes(event.target.value)) return;
+  applyTheme(event.target.value);
+  try { localStorage.setItem(THEME_KEY, theme); } catch (_) { /* Storage can be off; the choice still applies to this page. */ }
+}
+try {
+  const stored = localStorage.getItem(THEME_KEY);
+  if (Object.keys(THEMES).includes(stored)) theme = stored;
+} catch (_) { /* Storage can be off; the default applies. */ }
+applyTheme(theme);
+
 const startButton = document.getElementById("start");
 const muteButton = document.getElementById("mute");
 const errorBox = document.getElementById("error");
@@ -151,7 +173,7 @@ function draw(current) {
     ? Math.min(1, (state === "speaking" ? current.outputLevel : current.inputLevel) * 5) : 0;
   paint.clearRect(0, 0, 640, 640);
   paint.beginPath(); paint.arc(320, 320, 248, 0, Math.PI * 2);
-  paint.strokeStyle = "#2d3933"; paint.lineWidth = 2; paint.stroke();
+  paint.strokeStyle = THEMES[theme].ringTrack; paint.lineWidth = 2; paint.stroke();
   paint.beginPath();
   const radius = 248 + (reducedMotion.matches ? 0 : level * 20);
   paint.arc(320, 320, radius, state === "connecting" ? -.7 : 0,
@@ -955,6 +977,7 @@ function onPageHide(event) {
   document.removeEventListener?.("keydown", closeMenu);
   document.removeEventListener?.("pointerdown", closeMenu);
   callMenu?.removeEventListener("focusout", closeMenu);
+  for (const option of Object.keys(THEMES)) document.getElementById(`theme-${option}`).removeEventListener("change", chooseTheme);
   transcriptList?.removeEventListener("scroll", trackTranscriptScroll);
   startButton.removeEventListener("click", start);
   muteButton.removeEventListener("click", toggleMute);
@@ -1011,6 +1034,7 @@ function bindControls() {
   document.addEventListener?.("keydown", closeMenu);
   document.addEventListener?.("pointerdown", closeMenu);
   callMenu?.addEventListener("focusout", closeMenu);
+  for (const option of Object.keys(THEMES)) document.getElementById(`theme-${option}`).addEventListener("change", chooseTheme);
   transcriptList?.addEventListener("scroll", trackTranscriptScroll);
   startButton.addEventListener("click", start);
   muteButton.addEventListener("click", toggleMute);

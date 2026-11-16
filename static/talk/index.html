@@ -4,11 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark">
-<meta name="theme-color" content="#101416">
+<meta id="theme-color" name="theme-color" content="#30302e">
 <title>Hermes Telegram Talk</title>
-<link rel="stylesheet" href="app.css?v=9cedaf5c1b56336d">
+<link rel="stylesheet" href="app.css?v=bdcc82f808ee84c8">
 <script src="https://telegram.org/js/telegram-web-app.js" defer></script>
-<script src="app.js?v=7b1b3260974726e8" defer></script>
+<script src="app.js?v=0d7b9ae70355e263" defer></script>
 </head>
 <body>
 <main>
@@ -28,6 +28,13 @@
           <p id="voice-note" class="note" hidden>The new voice starts after Reconnect.</p>
           <button id="reconnect" type="button" hidden>Reconnect</button>
         </div>
+        <fieldset class="menu-section theme-choice">
+          <legend>Theme</legend>
+          <div class="theme-options">
+            <label><input type="radio" name="theme" id="theme-modern" value="modern" checked>Modern</label>
+            <label><input type="radio" name="theme" id="theme-typesafe" value="typesafe">Retro 95</label>
+          </div>
+        </fieldset>
         <div class="menu-footer"><button id="end" type="button"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 15v-4c4-4 12-4 16 0v4h-5v-3H9v3Z"/></svg>End call</button></div>
       </section>
       <section class="presence" aria-label="Voice conversation">

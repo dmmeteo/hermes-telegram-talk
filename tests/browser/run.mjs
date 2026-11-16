@@ -114,7 +114,7 @@ try {
    overflow:document.documentElement.scrollWidth>innerWidth,face:document.getElementById('avatar').complete,
    name:document.getElementById('name').textContent,bg:getComputedStyle(document.body).backgroundColor}));
   assert(await page.evaluate(()=>getComputedStyle(document.getElementById('face')).display==='none' && !document.getElementById('avatar').hidden),'configured profile avatar painted');
-  assert(JSON.stringify(d.buttons)==='["Call settings","Mute microphone"]'&&!d.overflow&&d.face&&d.name==='Synthetic Talk'&&d.bg==='rgb(16, 20, 22)','minimal dark avatar UI');
+  assert(JSON.stringify(d.buttons)==='["Call settings","Mute microphone"]'&&!d.overflow&&d.face&&d.name==='Synthetic Talk'&&d.bg==='rgb(48, 48, 46)','minimal dark avatar UI in the default Modern theme');
   await screenshot(page,'mobile-390-listening');return d;
  });
  await step('real-incoming-energy-drives-speaking-ring',async()=>{

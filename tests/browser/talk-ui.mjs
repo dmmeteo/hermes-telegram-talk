@@ -96,8 +96,41 @@ try {
     blocked: () => { call.phase = 'blocked'; render(); },
     stopped: () => stop('Voice did not become ready. Tap Retry to reconnect.'),
   };
+  const contrast = () => panel.evaluate(() => {
+    const parse = value => { const n = value.match(/[\d.]+/g)?.map(Number) ?? []; return n.length < 3 ? null : [n[0], n[1], n[2], n.length > 3 ? n[3] : 1]; };
+    const over = (top, base) => top.slice(0, 3).map((v, i) => v * top[3] + base[i] * (1 - top[3]));
+    const lum = rgb => rgb.map(v => v / 255).map(v => v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4).reduce((sum, v, i) => sum + v * [.2126, .7152, .0722][i], 0);
+    const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + .05) / (y + .05); };
+    const bases = element => {
+      const layers = [];
+      const settle = base => layers.reduceRight((below, layer) => over(layer, below), base);
+      for (let node = element; node; node = node.parentElement) {
+        const style = getComputedStyle(node);
+        if (style.backgroundImage.includes('gradient')) return [...style.backgroundImage.matchAll(/rgba?\([^)]*\)/g)].map(m => settle(parse(m[0]).slice(0, 3)));
+        const color = parse(style.backgroundColor);
+        if (color && color[3] >= 1) return [settle(color.slice(0, 3))];
+        if (color && color[3] > 0) layers.push(color);
+      }
+      return [settle([255, 255, 255])];
+    };
+    const texts = [...document.body.querySelectorAll('*')].filter(element => element.getClientRects().length
+      && !element.closest(':disabled, [hidden], svg') && getComputedStyle(element).visibility === 'visible'
+      && ([...element.childNodes].some(node => node.nodeType === 3 && node.textContent.trim()) || element.matches('select')));
+    return texts.map(element => {
+      const ink = parse(getComputedStyle(element).color);
+      const worst = Math.min(...bases(element).map(base => ratio(over(ink, base), base)));
+      return {text: (element.id || element.textContent.trim()).slice(0, 40), ratio: Math.round(worst * 100) / 100};
+    });
+  });
+  for (const theme of ['modern', 'typesafe']) {
+  await panel.evaluate(theme => document.getElementById(`theme-${theme}`).click(), theme);
   for (const [state, enter] of Object.entries(states)) {
     await panel.evaluate(enter);
+    await panel.evaluate(() => {
+      transcriptFinal('user', `synthetic-${Math.random()}`, 'Synthetic question about the settings panel.', false);
+      transcriptFinal('assistant', `synthetic-${Math.random()}`, 'Synthetic answer, cut short.', true);
+      transcriptFragment('assistant', 'Synthetic interim reply');
+    });
     for (const [width, height] of [[390, 844], [360, 640], [320, 568], [844, 390], [1280, 800]]) {
       await panel.setViewportSize({width, height});
       await panel.click('#menu-toggle');
@@ -113,19 +146,29 @@ try {
           overflow: document.documentElement.scrollWidth > innerWidth, status: !document.getElementById('call-status').hidden,
           lines: ['error', 'start'].filter(id => !document.getElementById(id).hidden)};
       });
-      const where = `${state} ${width}x${height}`;
+      const where = `${theme} ${state} ${width}x${height}`;
       assert(g.panel.top >= 0 && g.panel.bottom <= height && g.panel.left >= 0 && g.panel.right <= width && !g.overflow, `panel fits the viewport (${where})`);
       assert(g.heading.top >= g.panel.top && g.heading.top >= 0, `panel heading is not clipped (${where})`);
       assert(g.panel.bottom <= g.row.top, `panel sits above the control row (${where})`);
       assert(g.order[0] < g.order[1] && g.order[1] < g.order[2], `menu left, avatar center, microphone right (${where})`);
       assert(g.targets.every(t => t.width >= 44 && t.height >= 44 && t.hit), `panel controls are reachable 44 px targets (${where}): ${JSON.stringify(g.targets)}`);
       assert(await inPanel(), `opening moves focus into the panel (${where})`);
-      await panel.screenshot({path: `${out}/menu-${state}-${width}x${height}.png`});
-      log('panel-geometry', {state, width, height, panel: g.panel, row: g.row.top, lines: g.lines});
+      await panel.screenshot({path: `${out}/menu-${theme}-${state}-${width}x${height}.png`});
+      if (width === 390) {
+        const texts = await contrast();
+        const low = texts.filter(text => text.ratio < 4.5);
+        assert(texts.length > 8 && low.length === 0, `text contrast is at least 4.5:1 (${where}): ${JSON.stringify(low)}`);
+        log('contrast', {theme, state, checked: texts.length, lowest: Math.min(...texts.map(text => text.ratio))});
+      }
+      log('panel-geometry', {theme, state, width, height, panel: g.panel, row: g.row.top, lines: g.lines});
       await panel.keyboard.press('Escape');
       assert(await closedWithFocusOn('menu-toggle'), `Escape closes and restores focus (${where})`);
     }
+    await panel.evaluate(() => { stop(); void start(); });
+    await panel.waitForFunction(() => call && !document.getElementById('voice-box').hidden);
   }
+  }
+  await panel.evaluate(() => document.getElementById('theme-modern').click());
   await panel.setViewportSize({width: 390, height: 844});
   await panel.evaluate(() => { stop(); void start(); });
   await panel.waitForFunction(() => call && !document.getElementById('end').disabled);
@@ -159,6 +202,41 @@ try {
   assert(await closedWithFocusOn('menu-toggle'), 'the toggle then closes the panel');
   log('panel-keyboard');
   await panelContext.close();
+
+  const themed = await browser.newContext({viewport: {width: 390, height: 844}, hasTouch: true});
+  await themed.addInitScript(() => {
+    navigator.mediaDevices.getUserMedia = () => new Promise(() => {});
+    document.addEventListener('DOMContentLoaded', () => { window.__themeAtReady = document.documentElement.dataset.theme; });
+  });
+  const look = page => page.evaluate(() => ({theme: document.documentElement.dataset.theme, ready: window.__themeAtReady,
+    meta: document.querySelector('meta[name="theme-color"]').content, checked: document.querySelector('input[name="theme"]:checked')?.value,
+    background: getComputedStyle(document.body).backgroundColor, image: getComputedStyle(document.body).backgroundImage}));
+  const page2 = await open(themed);
+  let seen = await look(page2);
+  assert(seen.theme === 'modern' && seen.ready === 'modern' && seen.meta === '#30302e' && seen.checked === 'modern'
+    && seen.background === 'rgb(48, 48, 46)', `Modern is the default: ${JSON.stringify(seen)}`);
+  await page2.click('#menu-toggle'); await page2.getByText('Retro 95').click();
+  seen = await look(page2);
+  assert(seen.theme === 'typesafe' && seen.meta === '#b9dff8' && seen.checked === 'typesafe' && seen.image.includes('gradient'), `Retro 95 applies at once: ${JSON.stringify(seen)}`);
+  await page2.screenshot({path: `${out}/theme-typesafe-menu.png`});
+  await page2.reload();
+  seen = await look(page2);
+  assert(seen.theme === 'typesafe' && seen.ready === 'typesafe' && seen.checked === 'typesafe' && seen.meta === '#b9dff8', `Retro 95 persists across reload, applied before DOMContentLoaded: ${JSON.stringify(seen)}`);
+  await page2.click('#menu-toggle'); await page2.getByText('Modern').click(); await page2.reload();
+  seen = await look(page2);
+  assert(seen.theme === 'modern' && seen.ready === 'modern' && seen.checked === 'modern', `Modern persists across reload: ${JSON.stringify(seen)}`);
+  await themed.close();
+  const blocked = await browser.newContext({viewport: {width: 390, height: 844}, hasTouch: true});
+  await blocked.addInitScript(() => {
+    navigator.mediaDevices.getUserMedia = () => new Promise(() => {});
+    Object.defineProperty(window, 'localStorage', {get() { throw new DOMException('Synthetic storage block', 'SecurityError'); }});
+  });
+  const page3 = await open(blocked);
+  await page3.click('#menu-toggle'); await page3.getByText('Retro 95').click();
+  seen = await look(page3);
+  assert(seen.theme === 'typesafe' && seen.checked === 'typesafe', 'without storage the choice still applies to the page');
+  await blocked.close();
+  log('theme-persistence');
 
   assert(errors.length === 0, `no uncaught browser errors: ${errors.join('; ')}`);
   log('summary', {failures: 0});
