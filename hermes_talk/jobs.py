@@ -56,12 +56,20 @@ EXTRA = ("parallel", "links", "turn", "unknown")
 FOLLOW_S = 10.0  # how often open T3 work is read
 INTAKE_S = 1.0  # how often a running turn's admissions are picked up
 STOP_RETRY_MIN_S, STOP_RETRY_MAX_S, STOP_RECHECK_S = 1.0, 8.0, 10.0  # gateway stop: retry backoff, re-request
+RELAUNCH_DELAYS_S = (1.0, 2.0, 4.0, 8.0)  # waits before each new launch of a job whose gateway connection dropped
 SPOKEN_STATE = {SUCCEEDED: "finished", FAILED: "failed", CANCELLED: "was cancelled",
                 INTERRUPTED: "was interrupted when Talk restarted; it was not rerun"}
 
 
 class TransitionError(Exception):
     pass
+
+
+@dataclass(frozen=True)
+class Relaunch:
+    """A waiting job's own launch backoff; in memory only, since a restart never reruns a job without a session."""
+    tries: int  # launches that ended in a dropped gateway connection before the job's session was stored
+    not_before: float  # monotonic time of its next launch; no other job waits for it
 
 
 @dataclass(frozen=True)
@@ -250,6 +258,7 @@ class JobBoard:
         self.retry_at = 0.0
         self.interrupts = {}  # link key -> monotonic time of the last T3 interrupt asked for a cancelled job
         self.reaped = set()  # large jobs whose still-running turn is being stopped to keep live turns bounded
+        self.relaunch = {}  # job id -> Relaunch of a waiting job whose gateway connection dropped before a session
         extras = dict(history.list_meta_prefix(WORK_PREFIX))
         for key, raw in history.list_meta_prefix(JOB_PREFIX):
             job = load(raw, extras.get(WORK_PREFIX + key[len(JOB_PREFIX):]))
@@ -281,6 +290,7 @@ class JobBoard:
 
     def _finish(self, job):
         self.handles.pop(job.id, None)
+        self.relaunch.pop(job.id, None)
         return self._save(job)
 
     def reconcile(self):
@@ -355,17 +365,20 @@ class JobBoard:
                 if not waiting:
                     self.coordinating = False
                     return
-                if time.monotonic() < self.retry_at:
-                    continue
+                now = time.monotonic()
+                if now < self.retry_at:
+                    continue  # the host had no room for another process or thread: that holds every launch
+                # A job's own relaunch wait holds only that job: it keeps its place in line and takes no slot.
+                due = [j for j in waiting if j.id not in self.relaunch or self.relaunch[j.id].not_before <= now]
                 held = {j.conversation_id for j in turns if not j.parallel}
                 slots = self.tasks.max_concurrent - sum(not j.large for j in turns)
-                for job in waiting[:max(0, slots)]:
+                for job in due[:max(0, slots)]:
                     running = self._save(job.to(RUNNING, started=self.clock(), parallel=job.conversation_id in held))
                     try:
                         threading.Thread(target=self._run, args=(running.id,), name="talk-task", daemon=True).start()
                     except RuntimeError:
                         self._save(job)
-                        self.retry_at = time.monotonic() + 1
+                        self._hold_launches()
                         break
                     held.add(job.conversation_id)
 
@@ -380,14 +393,35 @@ class JobBoard:
         finally:
             self.pump()
 
+    def _hold_launches(self):
+        """The host had no room for another process or thread: no launch is tried for a second (the lock is held).
+        A later hold never ends an earlier one sooner."""
+        self.retry_at = max(self.retry_at, time.monotonic() + 1)
+
     def _defer(self, job):
+        """Back to waiting, in its place in line and holding no slot; False when a cancel settled it instead."""
         with self.lock:
             current = self.jobs[job.id]
             if current.cancel_requested:
                 self._finish(current.to(CANCELLED, finished=self.clock()))
-            else:
-                self._save(replace(current, state=ACCEPTED, started=None, parallel=False))
-                self.retry_at = time.monotonic() + 1
+                return False
+            self._save(replace(current, state=ACCEPTED, started=None, parallel=False))
+            return True
+
+    def _relaunch(self, job, exc):
+        """True when the job went back to waiting because the gateway connection dropped before its session was
+        stored. No prompt was submitted under its id then, so a new launch cannot admit it twice; a session the
+        gateway created without its answer arriving stays empty. Bounded, so a lasting outage still fails it.
+        The wait is the job's own: every other job is dispatched as if this one were not in line."""
+        lost = getattr(self.agent, "disconnected", None)
+        with self.lock:
+            tries = self.relaunch[job.id].tries if job.id in self.relaunch else 0
+            if lost is None or not lost(exc) or tries >= len(RELAUNCH_DELAYS_S):
+                return False
+            logger.warning("the gateway connection dropped before a task's session existed; launching it again")
+            if self._defer(job):
+                self.relaunch[job.id] = Relaunch(tries + 1, time.monotonic() + RELAUNCH_DELAYS_S[tries])
+            return True
 
     def _reap(self, job):
         """Stop a large job's turn that is still live; its T3 work is followed as before (the lock is held)."""
@@ -438,7 +472,9 @@ class JobBoard:
             process, output = self.agent.start(job.id, prompt, resume)
         except Exception as exc:
             if isinstance(exc, OSError) and exc.errno in (errno.EAGAIN, errno.ENOMEM, errno.EMFILE, errno.ENFILE):
-                self._defer(job)
+                with self.lock:
+                    if self._defer(job):
+                        self._hold_launches()
                 return False
             self._finish(job.to(FAILED, finished=self.clock(),
                                 error=f"The Hermes agent could not start ({type(exc).__name__}). Nothing ran."))
@@ -460,7 +496,7 @@ class JobBoard:
         return prompt, None if job.parallel else resume
 
     def _launch_gateway(self, job):
-        """True when the gateway admitted the job; otherwise it has failed and nothing was admitted."""
+        """True when the gateway admitted the job; otherwise nothing was admitted and it failed or waits again."""
         try:
             prompt, resume = self._prompt(job)
         except Exception as exc:
@@ -474,6 +510,8 @@ class JobBoard:
         except Exception as exc:
             job = self.jobs[job.id]
             submitted = job.native_session_id and job.submission_text
+            if job.admission_id is None and not submitted and self._relaunch(job, exc):
+                return False
             if job.admission_id is None and (getattr(exc, "refused", False) or not submitted):
                 # The gateway refused it, or nothing was submitted (no session stored): nothing ran.
                 self._finish(job.to(FAILED, finished=self.clock(),

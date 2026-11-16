@@ -23,6 +23,9 @@ from HERMES_HOME, never from a request. Talk adds no tool, approval path or poli
   the admission the gateway took, if any. Only the gateway's own refusal (`AdmissionRefused`) fails it.
   The gateway admits a submit only from a connection attached to its session, so a reopened connection
   (after a drop or a Talk restart) first attaches with `session.resume`, as the gateway's own clients do.
+- A connection that drops before the job's session is stored (`disconnected`, e.g. while `session.create` is
+  still answering) submitted nothing under the job id: the job waits and is launched again, a bounded number
+  of times (jobs.RELAUNCH_DELAYS_S), then fails as before.
 - Stop is `prompt.cancel` while queued and `session.interrupt` once started. A job counts as stopped only
   when the receipt is terminal and the session no longer runs, never because a request was accepted or
   the client lost its connection. `stop` says whether its requests reached the gateway, so the watcher
@@ -231,6 +234,15 @@ class GatewayAgent:
                 await self._close()  # a dead connection is reopened once; its outcome stays unknown
                 if attempt:
                     raise
+
+    @staticmethod
+    def disconnected(exc):
+        """Whether exc is the core client's report of a connection that dropped (DISCONNECTED: a request or its
+        answer may be lost; NOT_SENT: the socket was already closed). Not the gateway's own refusal, and not a
+        verdict that a new launch would only meet again: no ready owner (GatewayUnavailableError), a protocol
+        mismatch, an invalid explicit URL or a failed bootstrap."""
+        from hermes_cli.gateway_client import DISCONNECTED, NOT_SENT, GatewayClientError
+        return type(exc) is GatewayClientError and exc.args[:1] in ((DISCONNECTED,), (NOT_SENT,))
 
     def call(self, method, timeout=RPC_TIMEOUT_S, **params):
         future = asyncio.run_coroutine_threadsafe(self._rpc(method, timeout, params), self._ensure_loop())
