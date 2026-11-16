@@ -506,9 +506,17 @@ class FakeBotApi:
                     return
                 raw = reply[1] if isinstance(reply[1], bytes) else json.dumps(reply[1]).encode()
                 self.send_response(reply[0])
+                for name, value in (reply[2] if len(reply) > 2 else {}).items():
+                    self.send_header(name, value)
                 self.send_header("Content-Length", str(len(raw)))
                 self.end_headers()
                 self.wfile.write(raw)
+
+            def do_GET(self):
+                outer.seen.append((self.path, None))
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
 
             def log_message(self, *args):
                 pass
@@ -597,6 +605,66 @@ def telegram_sender_contract():
             "refused_connection": "retried", "telegram_proxy": "honored", "lost_reply_or_timeout": "uncertain, never resent", "hermes_imports": 0}
 
 
+def outage_held_edits_recover():
+    """Edits held because Hermes' own sender broke (core 471537ae3a, 2026-11-16) are retried after a restart;
+    an edit Telegram itself refused stays held."""
+    history, sender = MemoryHistory(), ScriptedSender()
+    desk = desk_for(history, sender)
+    j = walk(desk, job(title="Outage task"), jobs.ACCEPTED, jobs.RUNNING)
+    stored = desk.get(j.id)
+    outage = replace(stored, status="completed", held="completed", stalled=False,
+                     error="Hermes Telegram sender is not installed (ImportError)")
+    refused = replace(stored, job_id="jb_refused_" + "r" * 12, status="completed", held="completed", stalled=False,
+                      error="Telegram editMessageText failed: Bad Request: message to edit not found")
+    for report in (outage, refused):
+        history.set_meta(receipts.report_key(report.job_id), json.dumps(asdict(report)))
+    after = ScriptedSender()
+    desk = desk_for(history, after)
+    desk.reconcile()
+    deadline = time.time() + 5
+    while desk.get(j.id).shown != "completed" and time.time() < deadline:
+        time.sleep(0.01)
+    assert desk.get(j.id).shown == "completed", desk.get(j.id)
+    assert [(c["kind"], c["text"]) for c in after.calls] == [("edit", "✅ Outage task")], after.calls
+    assert desk.get(refused.job_id).held == "completed", "an edit Telegram refused stays held"
+    return {"outage_hold": "edited after restart", "telegram_refusal": "still held"}
+
+
+def connect_failures_are_not_sent():
+    """urllib raises URLError only before Telegram has the whole request, so a non-timeout OSError there means
+    nothing was sent. A redirect is never followed, and an oversized reply is not trusted."""
+    import ssl
+    import urllib.error
+    sender, dest, real_open = receipts.TelegramSender(TOKEN, timeout=1.0), receipts.Destination.private(USER, BOT), \
+        receipts._open
+    outcomes = {}
+    try:
+        for name, reason in (("unreachable", OSError(101, "Network is unreachable")), ("tls_reset", ssl.SSLError("reset")),
+                             ("refused", ConnectionRefusedError()), ("timeout", TimeoutError())):
+            def fail(request, timeout, reason=reason):
+                raise urllib.error.URLError(reason)
+            receipts._open = fail
+            outcomes[name] = receipts.classify(sender.send(dest, "x"))[0]
+    finally:
+        receipts._open = real_open
+    assert outcomes == {"unreachable": receipts.PENDING, "tls_reset": receipts.PENDING, "refused": receipts.PENDING,
+                        "timeout": receipts.UNCERTAIN}, outcomes
+    api, real_api = FakeBotApi(), receipts.BOT_API
+    receipts.BOT_API = api.base
+    os.environ.pop("TELEGRAM_PROXY", None)
+    try:
+        api.replies[:] = [(302, b"", {"Location": api.base + "/elsewhere"})]
+        moved = sender.send(dest, "x")
+        assert not any(path == "/elsewhere" for path, _ in api.seen), api.seen
+        assert receipts.classify(moved)[0] == receipts.UNCERTAIN and TOKEN not in json.dumps(moved), moved
+        api.replies[:] = [(200, b'{"ok": true, "result": {"message_id": 1}, "pad": "' + b"x" * 70000 + b'"}')]
+        assert receipts.classify(sender.send(dest, "x"))[0] == receipts.UNCERTAIN, "an oversized reply is not trusted"
+    finally:
+        receipts.BOT_API = real_api
+        api.close()
+    return {**outcomes, "redirect": "not followed", "oversized_reply": "uncertain"}
+
+
 def no_detail_in_messages():
     history, sender = MemoryHistory(), ScriptedSender()
     desk = desk_for(history, sender)
@@ -611,7 +679,7 @@ def no_detail_in_messages():
 
 CHECKS = (titles, other_language_named_in_english, every_status_survives_naming, naming_survives_a_restart, one_message_lifecycle, coalesced_transitions, uncertain_create_never_resent,
           refused_create_retries_then_fails, edits_converge, restart_recovery, binding_and_since,
-          telegram_sender_contract, no_detail_in_messages)
+          telegram_sender_contract, outage_held_edits_recover, connect_failures_are_not_sent, no_detail_in_messages)
 
 
 def main():
