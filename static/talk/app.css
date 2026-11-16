@@ -102,8 +102,8 @@ button:disabled { opacity: .45; cursor: default; }
 [data-theme="typesafe"] #ring { display: none; }
 [data-theme="typesafe"] .portrait { inset: 0; border-radius: 0; }
 [data-theme="typesafe"] .meter { display: block; position: absolute; top: 0; width: 8px; height: 100%; box-shadow: -1px -1px #5a5d56, 1px 1px #fff, 0 0 0 2px #272d26; }
-[data-theme="typesafe"] #meter-you { right: calc(100% + 7px); }
-[data-theme="typesafe"] #meter-agent { left: calc(100% + 7px); }
+[data-theme="typesafe"] #meter-you { left: calc(100% + 7px); }
+[data-theme="typesafe"] #meter-agent { right: calc(100% + 7px); }
 [data-theme="typesafe"] button, [data-theme="typesafe"] #menu-toggle, [data-theme="typesafe"] #mute { border-radius: 0; box-shadow: var(--raised); }
 [data-theme="typesafe"] button:hover:enabled { filter: brightness(1.06); }
 [data-theme="typesafe"] button:active:enabled, [data-theme="typesafe"] #menu-toggle[aria-expanded="true"], [data-theme="typesafe"] #mute[aria-pressed="true"] { transform: none; box-shadow: var(--inset); }

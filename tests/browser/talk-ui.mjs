@@ -167,8 +167,11 @@ try {
   assert(you && agent && you.hidden === 'true' && agent.hidden === 'true', `two decorative meters, hidden from assistive tech: ${JSON.stringify(meterBoxes)}`);
   const beside = (meter, gap) => gap >= 0 && gap <= 8 && meter.box.width >= 4 && meter.box.width <= 12
     && Math.abs(meter.box.top - meterBoxes.orb.top) < .5 && Math.abs(meter.box.height - meterBoxes.orb.height) < .5;
-  assert(you && agent && beside(you, meterBoxes.orb.left - you.box.right) && beside(agent, agent.box.left - meterBoxes.orb.right),
-    `slim meters stand directly left (you) and right (assistant) of the square: ${JSON.stringify(meterBoxes)}`);
+  assert(you && agent && beside(agent, meterBoxes.orb.left - agent.box.right) && beside(you, you.box.left - meterBoxes.orb.right),
+    `slim meters stand directly left (assistant) and right (you) of the square: ${JSON.stringify(meterBoxes)}`);
+  const sideOf = meter => meter.box.right <= meterBoxes.orb.left ? 'left' : meter.box.left >= meterBoxes.orb.right ? 'right' : 'overlap';
+  const onSide = {left: meterBoxes.meters.find(meter => sideOf(meter) === 'left')?.id, right: meterBoxes.meters.find(meter => sideOf(meter) === 'right')?.id};
+  assert(onSide.left && onSide.right, `one meter renders left of the avatar and one right of it: ${JSON.stringify(meterBoxes)}`);
 
   const lit = () => room.evaluate(() => Object.fromEntries([...document.querySelectorAll('.meter')].map(meter => {
     const paint = meter.getContext('2d'), {width, height} = meter;
@@ -190,7 +193,39 @@ try {
     `the human meter rises at once to the microphone level, the assistant meter stays empty: ${JSON.stringify(shown[0])}`);
   let drawn = await lit();
   assert(Math.abs(drawn['meter-you'] - loud(.05)) < .1 && drawn['meter-agent'] === 0, `drawn segments follow the levels: ${JSON.stringify(drawn)}`);
+  const tint = () => room.evaluate(() => Object.fromEntries([...document.querySelectorAll('.meter')].map(meter => {
+    const {width, height} = meter, column = meter.getContext('2d').getImageData(Math.floor(width / 2), 0, 1, height).data;
+    for (let y = height - 1; y >= 0; y--) {
+      const [r, g, b] = column.slice(y * 4, y * 4 + 3);
+      if (Math.max(r, g, b) > 150) return [meter.id, {r, g, b}];
+    }
+    return [meter.id, null];
+  })));
+  const blue = c => c && c.b > 200 && c.b > c.r + 100, orange = c => c && c.r > 200 && c.r > c.b + 100;
+  await levels(.05, 0);
+  await frames(2);
+  drawn = await lit();
+  let colours = await tint();
+  assert(drawn[onSide.right] > .2 && drawn[onSide.left] === 0 && blue(colours[onSide.right]),
+    `user level alone fills the RIGHT meter in blue and leaves the left empty: ${JSON.stringify({onSide, drawn, colours})}`);
+  await levels(0, .09);
+  await frames(30);
+  drawn = await lit();
+  colours = await tint();
+  assert(drawn[onSide.left] > .2 && drawn[onSide.right] === 0 && orange(colours[onSide.left]),
+    `assistant level alone fills the LEFT meter in orange and leaves the right empty: ${JSON.stringify({onSide, drawn, colours})}`);
+  await room.click('#mute');
+  await frames(30);
+  drawn = await lit();
+  colours = await tint();
+  assert(drawn[onSide.right] === 0 && drawn[onSide.left] > .2 && orange(colours[onSide.left]),
+    `muting empties the RIGHT (user) meter while the LEFT (assistant) meter still follows the assistant: ${JSON.stringify({onSide, drawn, colours})}`);
+  await room.screenshot({path: `${out}/presence-typesafe-meters-muted.png`});
+  await room.click('#mute');
   await levels(.05, .09);
+  await frames(2);
+  colours = await tint();
+  assert(blue(colours[onSide.right]) && orange(colours[onSide.left]), `unmuted, both fill: blue right, orange left: ${JSON.stringify(colours)}`);
   shown = await frames(2);
   assert(Math.abs(shown[1]['meter-you']?.[0] - loud(.05)) < .002 && Math.abs(shown[1]['meter-agent']?.[0] - loud(.09)) < .002,
     `both sides at once drawn independently: ${JSON.stringify(shown[1])}`);
@@ -214,7 +249,7 @@ try {
   await room.evaluate(() => stop());
   shown = await frames(1);
   drawn = await lit();
-  assert(JSON.stringify(shown[0]) === JSON.stringify({'meter-you': [0, 0], 'meter-agent': [0, 0]}) && drawn['meter-you'] === 0 && drawn['meter-agent'] === 0,
+  assert(JSON.stringify(shown[0]) === JSON.stringify({'meter-agent': [0, 0], 'meter-you': [0, 0]}) && drawn['meter-you'] === 0 && drawn['meter-agent'] === 0,
     `stop empties both meters: ${JSON.stringify({shown, drawn})}`);
   await room.evaluate(() => document.getElementById('theme-modern').click());
   assert(await room.evaluate(() => [...document.querySelectorAll('.meter')].every(meter => !meter.getClientRects().length)), 'Modern shows no meters');
