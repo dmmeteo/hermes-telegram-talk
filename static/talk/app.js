@@ -71,6 +71,8 @@ function initData() {
 }
 
 function showError(message = "") {
+  // The alert speaks only when its text changes, so a repeated failure clears it first to be announced again.
+  if (message && errorBox.textContent === message) errorBox.textContent = "";
   errorText = message;
   render();
 }

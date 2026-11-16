@@ -187,6 +187,16 @@ test('exhausted saving retries expose a usable retry without reopening media',as
 const SAVE_FAILED='Conversation could not be saved. Tap Retry saving.';
 const shownNotice=f=>{const n=id=>f.run(`document.getElementById('${id}')`);return n('notice').hidden?null:{kind:n('notice').dataset.kind,title:n('notice-title').textContent,
  message:n('error').hidden?'':n('error').textContent,action:n('start').hidden?null:n('start').textContent};};
+test('a repeated failure rewrites the alert text so it is announced again, while frames leave it alone',()=>{
+ const f=fixture();
+ f.run(`current.phase='ready';showError();const box=document.getElementById('error');let text='';globalThis.writes=[];
+ Object.defineProperty(box,'textContent',{get:()=>text,set:v=>{text=v;writes.push(v);}});`);
+ f.run(`showError('Synthetic failure.')`);f.run('render();render();');
+ assert.equal(f.run('writes.filter(w=>w).length'),1,'frames do not rewrite an unchanged alert');
+ f.run(`showError('Synthetic failure.')`);
+ assert.equal(f.run('writes.filter(w=>w).length'),2,'the same failure reported again is written again');
+ assert.equal(f.run(`document.getElementById('error').textContent`),'Synthetic failure.');
+});
 test('the notice follows the call phase, the save state and the error text, and its button runs the real action',async()=>{
  const f=fixture();
  f.run(`current.phase='ready';showError();`);
