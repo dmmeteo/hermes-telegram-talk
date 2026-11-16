@@ -715,6 +715,27 @@ def a_ukrainian_profile_opens_in_ukrainian_and_speaks_last_rule_last(h):
 
 
 @check
+def a_configured_opening_line_is_said_verbatim_then_the_language_rule_applies(h):
+    line = "Hey, Vsauce, Michael here"
+    lit = Harness(h.native, fx.config_data(voice={"language": "uk", "language_hint": "Speak Ukrainian unless the "
+                                                  "user switches language."},
+                                           greeting={"enabled": True, "text": "Greet the user in one short sentence.",
+                                                     "phrases": [line]}))
+    try:
+        for _ in range(2):  # a single configured line is said on every call, not swapped for the language default
+            _, instructions = lit.call()
+            head, opening = instructions.rsplit("\n\n", 1)
+            assert opening.startswith("## Greeting\nOpening policy: speak first.") and f'"{line}"' in opening, opening
+            assert "exactly as written" in opening and "without translating" in opening, opening
+            assert "in Ukrainian" not in opening and "Привіт" not in instructions and "Greet the user" not in opening
+            assert "after the configured opening line" in head.split("## Persona", 1)[0], "uk applies after it"
+            assert opening.endswith("This applies whatever the persona above says.")
+            assert 'Your name is "Synthetic Talk"' in head and "never introduce yourself as ChatGPT" in head
+    finally:
+        lit.close()
+
+
+@check
 def a_configured_voice_persona_replaces_the_default(h):
     custom = Harness(h.native, fx.config_data(persona={"text": "Synthetic voice persona: warm, dry humour."}))
     try:
