@@ -12,6 +12,8 @@ the result T3 would give, against the synthetic T3 store in $TALK_WORK_DIR/t3. T
   lostnothread K         a t3 start whose answer was lost before any thread id came back
   refused K              a t3 start T3 refused
   look THREAD K          a t3 read of THREAD (a status read), then end the turn
+  ... intent K           (the request's last two words, after any speech) the admission scripted in
+                         $TALK_WORK_DIR/intents/K.json: {"action": "start"|"send", "thread", "title"?, "message"}
 """
 import json
 import os
@@ -35,6 +37,8 @@ resume = args[args.index("--resume") + 1] if "--resume" in args else ""
 prompt = sys.stdin.read()
 words = [line[5:].strip() for line in prompt.splitlines() if line.startswith("TASK:")][-1].split()
 verb, key = words[0], words[-1]
+if len(words) >= 2 and words[-2] == "intent":
+    verb = "intent"
 session = resume or "syn_" + secrets.token_hex(6)
 
 
@@ -79,6 +83,17 @@ try:
         tool("send", {"ok": True, "action": "send", **t3.send(words[1])}, thread_id=words[1], message=key)
         log("t3", thread=words[1])
         text = f"Sent to {words[1]}."
+    elif verb == "intent":
+        spec = json.loads((root / "intents" / f"{key}.json").read_text())
+        extra = {k: spec[k] for k in ("title",) if k in spec}
+        if spec["action"] == "start":
+            tool("start", {"ok": True, "action": "start", **t3.start(spec["thread"])}, cwd="/synthetic",
+                 message=spec["message"], **extra)
+        else:
+            tool("send", {"ok": True, "action": "send", **t3.send(spec["thread"])}, thread_id=spec["thread"],
+                 message=spec["message"])
+        log("t3", thread=spec["thread"])
+        text = f"Admitted T3 work on {spec['thread']}."
     elif verb == "lost":
         t3.start(f"th-{key}")
         tool("start", {"ok": False, "error": "transport_error", "outcome_unknown": True, "thread_id": f"th-{key}"},

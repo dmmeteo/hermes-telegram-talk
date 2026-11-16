@@ -1,7 +1,8 @@
 # 0009 Telegram task status titles: an English sentence from the host model for other languages
 
 Status: accepted for the source branch `default/talk-english-labels-1114` (2026-11-14). Supersedes "Nothing is
-translated" and the "Hermes task N" fallback in README "Task reports in Telegram".
+translated" and the "Hermes task N" fallback in README "Task reports in Telegram". Its fallback to the request's own
+words, its single attempt and its "never changes" rule are superseded by 0013 (2026-11-16).
 
 ## Context
 

@@ -1005,6 +1005,7 @@ def bind_host_model(e):
 
 def telegram_default_receipt(model):
     from scripted_model import task_title_request
+    from hermes_talk import receipts
     TELEGRAM.reset()
     e = Env(model, profile_extra=PLUGIN_ENABLED)
     try:
@@ -1058,7 +1059,7 @@ def telegram_default_receipt(model):
         e.wait(big_body["job"]["id"], conv, vs)
         big = settled_report(e, big_body["job"]["id"])
         assert shown_texts(big.message_id)[-1] == "✅ Build big synthetic result"
-        assert not any(c.get("media") for c in TELEGRAM.calls) and max(len(c["text"]) for c in TELEGRAM.calls) <= 64
+        assert not any(c.get("media") for c in TELEGRAM.calls) and max(len(c["text"]) for c in TELEGRAM.calls) <= 3 + receipts.TITLE_CHARS
         assert not (e.home / "plugin-data" / "hermes-talk" / "reports").exists(), "no result document is written"
         assert len(TELEGRAM.sent()) == 5, "one message per task"
         from hermes_talk import receipts
@@ -1546,6 +1547,59 @@ def t3_admission_real_hook(model):
         pulse_model.bind(None)
 
 
+def t3_objective_title_real_hook(model):
+    """A real turn's t3_control start carries the work's own objective (title and message). The real post_tool_call hook
+    records it, and the large task's one status message is named from it and the whole speech through the real host
+    PluginLlm (scripted model), never from the filler that opens the speech."""
+    sys.path.insert(0, str(ROOT / "tests" / "agent"))
+    import fake_t3_plugin
+    from scripted_model import T3_GOALS, task_title_request
+    sys.path.insert(0, str(ROOT / "tests" / "work"))
+    from fake_t3 import FakeT3
+    TELEGRAM.reset()
+    root = Path(tempfile.mkdtemp(prefix="talk-agent-title-"))
+    home = root / "home"
+    fx.write_home(home)
+    (home / "config.yaml").write_text(model_config(model, "plugins:\n  enabled:\n    - hermes-telegram-talk\n"
+                                                         "    - t3-bridge\n"))
+    store = FakeT3(root / "t3")
+    fake_t3_plugin.install(home, ROOT, root / "t3")
+    e = Env(model, root=root, toolsets=["file", "t3_bridge"], receipts={"micro_tasks": False})
+    try:
+        bind_host_model(e)
+        e.talk.board.follow_s = 0.5
+        earlier = len(model.requests)  # the scripted model serves every check
+        conv, vs = e.call()
+        speech = ("t3goal mute Так... Нє, ну загалом оця от типу апка в принципі працює, ну я подивився, все норм, "
+                  "але от що я хотів сказати: на аватарці асистента досі видно індикатор мюту, його треба прибрати.")
+        _, body = e.task(conv, vs, speech, "del_t3goal")
+        big = body["job"]["id"]
+        deadline = time.time() + 120
+        while time.time() < deadline and not (e.native(big).large and e.native(big).turn):
+            time.sleep(0.3)
+        job = e.native(big)
+        assert job.large and [l.thread_id for l in job.links] == ["th-mute"], job.links
+        store.finish("th-mute", "completed", "MUTE-DONE")
+        done = e.wait(big, conv, vs)
+        assert done["state"] == "succeeded" and done["kind"] == "large", done
+        report = settled_report(e, big)
+        texts = shown_texts(report.message_id)
+        title = "Remove the mute indicator from the assistant avatar."
+        assert texts and texts[-1] == "✅ " + title and all(t[2:] == title for t in texts), texts
+        assert len(TELEGRAM.sent()) == 1, "one message for the one large task"
+        assert [(l.intent_title, l.intent) for l in job.links] == \
+            [(T3_GOALS["mute"]["title"], T3_GOALS["mute"]["message"])], ("the real hook recorded the intent", job.links)
+        asked = [task_title_request(r) for r in model.requests[earlier:] if task_title_request(r)]
+        assert len(asked) == 1 and speech in asked[0] and T3_GOALS["mute"]["message"] in asked[0], asked
+        assert not report.naming and report.name_input == "", report
+        return {"transport": TRANSPORT, "speech": speech, "intent": T3_GOALS["mute"], "shown": texts,
+                "title_calls": len(asked)}
+    finally:
+        e.close()
+        from hermes_talk import pulse_model
+        pulse_model.bind(None)
+
+
 UNAVAILABLE = ("does not exist", "not available", "could not be resolved", "unknown tool", "not in this session")
 
 
@@ -1670,6 +1724,7 @@ COMMON = (native_tool_roundtrip, background_result_delivery, context_update_inje
           limits_and_approvals, smart_approval_profile, receipt_ack_no_double_speech, telegram_default_receipt,
           telegram_alternate_destination, telegram_closed_call_delivery, telegram_ambiguous_send,
           telegram_restart_dedup, queue_start_failure, large_old_unread_result, ambiguous_task_submission,
+          t3_objective_title_real_hook,
           partial_append_recovery, bounded_native_spool)
 
 

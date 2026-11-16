@@ -79,7 +79,7 @@ class Posts:
 
 
 class World:
-    def __init__(self, root=None, max_concurrent=1, history=None):
+    def __init__(self, root=None, max_concurrent=1, history=None, model=None):
         self.root = Path(root or tempfile.mkdtemp(prefix="talk-work-"))
         self.home = self.root / "home"
         if not self.home.exists():
@@ -97,10 +97,12 @@ class World:
         self.posts = Posts()
         self.fake = fx.FakeUpstream()
         self.talk = self.httpd = None
+        self.model = model  # the host ctx.llm route as TalkRuntime sees it (pulse_model.PulseModel); None: unbound
 
     def serve(self):
         self.talk = TalkRuntime(self.config, fx.BOT_TOKEN, self.history, home=self.home, agent=self.agent,
-                                sender=self.posts, skill=fx.file_skill(self.home), t3=work.T3(self.t3.dispatch))
+                                sender=self.posts, skill=fx.file_skill(self.home), t3=work.T3(self.t3.dispatch),
+                                model=self.model)
         self.talk.board.follow_s = 0.2
         app = server.VoiceApp(fx.BOT_TOKEN, {fx.USER_ID, fx.OTHER_USER_ID}, fx.ORIGIN, resolve=self.fake.resolve,
                               post=self.fake.post, talk=self.talk)

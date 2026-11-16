@@ -4,7 +4,8 @@ It stands in for the profile's inference provider only: Hermes' own AIAgent, too
 execution and SessionDB run unchanged against it. Nothing here is a real model, and no paid or live
 provider is ever called.
 
-Talk's task-title call (receipts.TITLE_INSTRUCTIONS) gets {"title": ...} from TASK_TITLES, a fixed table.
+Talk's task-title call (receipts.TITLE_INSTRUCTIONS) gets {"title": ...} from TASK_TITLES, a fixed table keyed by a
+phrase its input (receipts.name_source: admitted work, then the request) contains; nothing else: an empty title.
 
 Script, keyed on the newest user message:
   "read <path>"   -> a read_file tool call for <path>, then the tool's own output quoted back
@@ -14,6 +15,7 @@ Script, keyed on the newest user message:
   "slowshell <s> <cmd>" -> wait <s> seconds, then a terminal tool call (no late side effect after a stop)
   "big <n>"       -> a result of about <n> characters between BIG-START and BIG-END markers
   "t3start <name>" / "t3read <name>" -> a t3_control start of thread th-<name> / a read of it
+  "t3goal <name> ..." -> a t3_control start of thread th-<name> with T3_GOALS[name] (its title and message)
   "t3status" / "skill <name>" -> a t3_control status call / a skill_view of <name>
 A tool the request does not offer directly but that sits behind Hermes' Tool Search bridge is called via tool_call.
   anything else   -> "SCRIPTED-ANSWER: <request>"
@@ -50,14 +52,22 @@ def is_title_request(messages):
     return isinstance(first, str) and first.startswith("You name chat sessions")
 
 
-TASK_TITLES = {"перевір синтетичну збірку": "Check the synthetic build"}
+TASK_TITLES = {"перевір синтетичну збірку": "Check the synthetic build",
+               "SYN-MUTE": "Remove the mute indicator from the assistant avatar."}
+T3_GOALS = {"mute": {"title": "Avatar mute indicator",
+                     "message": "Remove the mute indicator from the assistant avatar in the Talk Mini App. [SYN-MUTE]"}}
 
 
 def task_title_request(messages):
-    """Talk's task-title call through the host ctx.llm (instructions, then the request): the request, else None."""
+    """Talk's task-title call through the host ctx.llm (instructions, then name_source): that input, else None."""
     content = messages[-1].get("content") if messages else None
     texts = [p.get("text", "") for p in content if isinstance(p, dict)] if isinstance(content, list) else []
-    return texts[1].strip() if len(texts) == 2 and texts[0].startswith("You name a background task") else None
+    return texts[1].strip() if len(texts) == 2 and texts[0].startswith("You write the title of a background task") \
+        else None
+
+
+def task_title(source):
+    return next((title for phrase, title in TASK_TITLES.items() if phrase in source), "")
 
 
 def plan(messages):
@@ -65,7 +75,7 @@ def plan(messages):
     if is_title_request(messages):
         return ("text", "Synthetic voice task")
     if task_title_request(messages) is not None:
-        return ("text", json.dumps({"title": TASK_TITLES.get(task_title_request(messages), "")}))
+        return ("text", json.dumps({"title": task_title(task_title_request(messages))}))
     if messages and messages[-1].get("role") == "tool":
         result = messages[-1].get("content") or ""
         if isinstance(result, list):
@@ -90,6 +100,10 @@ def plan(messages):
         call = {"action": "start", "cwd": "/synthetic", "message": name, "request_id": f"req-start-{name}"} \
             if word == "t3start" else {"action": "read", "thread_id": f"th-{name}"}
         return ("tool", "t3_control", call)
+    if word == "t3goal" and rest.split()[0] in T3_GOALS:
+        name = rest.split()[0]
+        return ("tool", "t3_control", {"action": "start", "cwd": "/synthetic", "request_id": f"req-start-{name}",
+                                       **T3_GOALS[name]})
     if word == "slow":
         time.sleep(float(rest or "5"))
         return ("text", "SCRIPTED-SLOW-DONE")

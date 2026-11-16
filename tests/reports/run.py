@@ -24,7 +24,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from hermes_talk import jobs, receipts  # noqa: E402
+from hermes_talk import jobs, receipts, work  # noqa: E402
 from hermes_talk.history import MemoryHistory  # noqa: E402
 from hermes_talk.pulse_model import PulseModel  # noqa: E402
 
@@ -90,7 +90,8 @@ def job(number=1, request="check the synthetic build", title="", created=None, r
 
 
 def desk_for(history, sender, clock=None, **kw):
-    return receipts.ReportDesk(history, sender, clock or Clock(), **{"attempts": 3, "backoff": (0.0, 0.0), **kw})
+    return receipts.ReportDesk(history, sender, clock or Clock(), **{"attempts": 3, "backoff": (0.0, 0.0),
+                                                                     "name_backoff": (0.0,), **kw})
 
 
 def settle(desk, job_id, timeout=5):
@@ -124,26 +125,38 @@ def titles():
     assert take("x\nTITLE: " + "word " * 12) == ("x", ""), "more than a few words is not a title"
     assert take("x\nTITLE: Fix *bold* `code` [link]") == ("x", "Fix bold code link")
     assert take("no directive here") == ("no directive here", "")
-    # Conduit VoiceBackgroundJobs.title(for:): collapse whitespace; over 60 characters, cut at the last
-    # space past the midpoint, else hard, and end with an ellipsis.
-    conduit = receipts.conduit_title
-    assert conduit("  Check   the\nbuild ") == "Check the build"
-    long = "Summarize the quarterly synthetic infrastructure cost report for the operations team"
-    # The 60-character prefix ends exactly at "report"; Swift's lastIndex(of: " ") still cuts before it.
-    assert conduit(long) == "Summarize the quarterly synthetic infrastructure cost…", conduit(long)
-    assert conduit("Summarize the quarterly synthetic infrastructure costs and emails") == \
-        "Summarize the quarterly synthetic infrastructure costs and…"
-    assert conduit("x" * 70) == "x" * 60 + "…"
+    usable = receipts.usable_title
+    assert usable("Add separate voice-level bars to the Retro 95 avatar.") == \
+        "Add separate voice-level bars to the Retro 95 avatar.", "a whole sentence with a name and a number"
+    assert usable('"Remove the mute indicator from the assistant avatar ."') == \
+        "Remove the mute indicator from the assistant avatar.", "quotes and a space before the period go"
+    assert usable("Summarize the quarterly synthetic infrastructure cost report for the operations team") == "", \
+        "past ten words it is not a title, and it is never cut into one"
+    assert usable("Synchronize " + "x" * 75) == "", "past 80 characters it is not a title"
+    assert usable("Перевірити збірку") == usable("") == usable(None) == ""
     fallback = receipts.job_title
     assert fallback(job(title="Check build"), str) == ("Check build", True)
     assert fallback(job(request="check the synthetic build"), str) == ("check the synthetic build", True)
-    assert fallback(job(number=4, request="перевір збірку"), str) == ("перевір збірку", False), \
-        "another language keeps its own words until the host model names it, never 'Hermes task N'"
+    assert fallback(job(number=4, request="перевір збірку"), str) == ("Hermes task 4", False), \
+        "until the host model names it, another language shows the task number, never the speech"
+    filler = "Okay, okay, so, um, now about that thing, you know, the avatar should not show the mute badge any more"
+    assert fallback(job(number=5, request=filler), str) == ("Hermes task 5", False), "long English speech too"
+    start = work.Link(key="k1", thread_id="th-1", via="start", confirmed=True, intent="Remove the badge.",
+                      intent_title="Avatar mute badge")
+    send = work.Link(key="k2", thread_id="th-1", via="send", confirmed=True, intent="New objective: add bars.")
+    assert fallback(replace(job(number=6, request=filler), links=(start,)), str) == ("Avatar mute badge", False), \
+        "the admitted start's own title meanwhile"
+    source = receipts.name_source(replace(job(number=6, request=filler), links=(start, send)), str)
+    assert source.index("Avatar mute badge") < source.index("New objective: add bars.") < source.index(filler), source
+    assert source.count("Avatar mute badge") == 1, "a send's own message is its intent, not the thread's old title"
     secret = "sk-" + "s" * 24
     redact = lambda t: t.replace(secret, "[redacted]")
     assert secret not in fallback(job(request=f"rotate {secret}"), redact)[0]
-    return {"directive": "TITLE: <few English words>", "fallback": "Conduit title(for:) on an English request, "
-            "else the host model's English sentence", "max_chars": receipts.TITLE_CHARS}
+    assert secret not in receipts.name_source(replace(job(request=f"ротація {secret}"), links=(
+        replace(start, intent=f"Rotate {secret}."),)), redact)
+    return {"directive": "TITLE: <few English words>", "final": "a usable TITLE line or a short English request",
+            "provisional": "the admitted T3 start's title, else Hermes task N", "max_words": receipts.TITLE_WORDS,
+            "max_chars": receipts.TITLE_CHARS}
 
 
 class HostModel:
@@ -171,8 +184,9 @@ def other_language_named_in_english():
     j = walk(desk, job(number=4, request=ukrainian), jobs.ACCEPTED, jobs.RUNNING, jobs.SUCCEEDED)
     assert [c["text"] for c in sender.calls] == ["🕓 Check the synthetic build", "⏳ Check the synthetic build",
                                                   "✅ Check the synthetic build"], sender.calls
-    assert [(a["text"], a["purpose"]) for a in host.asked] == [(ukrainian, receipts.TITLE_PURPOSE)], \
+    assert [(a["text"], a["purpose"]) for a in host.asked] == [(receipts.name_source(j, str), receipts.TITLE_PURPOSE)], \
         "the host model is asked once, before the only send"
+    assert ukrainian in host.asked[0]["text"], "with the whole request"
     assert receipts.load(history.get_meta(receipts.report_key(j.id))).title == "Check the synthetic build"
     sender.calls.clear()
     walk(desk, job(number=5, request="перевір інше"), jobs.ACCEPTED, jobs.RUNNING, jobs.FAILED)
@@ -191,14 +205,25 @@ def other_language_named_in_english():
         history, sender, host = MemoryHistory(), ScriptedSender(), HostModel(answer)
         desk = desk_for(history, sender, namer=namer(host), redact=redact)
         walk(desk, job(number=n, request=f"перевір {name}"), jobs.ACCEPTED)
-        shown[name] = sender.calls[0]["text"]
-        assert shown[name] == f"🕓 перевір {name}", (name, sender.calls)
+        shown[name] = [c["text"] for c in sender.calls]
+        assert shown[name] == [f"🕓 Hermes task {n}", "🕓 Check the synthetic build"] and \
+            sender.kinds() == ["send", "edit"] and len(host.asked) == 2, \
+            ("an unusable first answer: the number is sent, then the retry's title renames it", name, sender.calls)
+    history, sender, host = MemoryHistory(), ScriptedSender(), HostModel(*[TimeoutError("down")] * 9)
+    desk = desk_for(history, sender, namer=namer(host))
+    j = walk(desk, job(number=30, request="перевір завжди недоступне"), jobs.ACCEPTED, jobs.RUNNING)
+    report = receipts.load(history.get_meta(receipts.report_key(j.id)))
+    assert [c["text"] for c in sender.calls] == ["🕓 Hermes task 30", "⏳ Hermes task 30"] and \
+        len(host.asked) == receipts.TITLE_ATTEMPTS and not report.naming and report.notes[-1].startswith(
+            "title not named"), ("a lasting outage: bounded attempts, the number stays, a note says why", sender.calls,
+                                 len(host.asked), report)
     history, sender, host = MemoryHistory(), ScriptedSender(), HostModel({"title": f"Rotate *key* {secret}"})
     desk = desk_for(history, sender, namer=namer(host), redact=redact)
     walk(desk, job(number=20, request=f"зміни ключ {secret}"), jobs.ACCEPTED)
     assert secret not in host.asked[0]["text"] and sender.calls[0]["text"] == "🕓 Rotate key redacted", \
         (host.asked, sender.calls)
-    return {"named": "Check the synthetic build", "model_calls_per_task": 1, "fallbacks": shown}
+    return {"named": "Check the synthetic build", "model_calls_per_task": 1, "retried": shown,
+            "lasting_outage": {"attempts": len(host.asked), "shown": sender.calls[-1]["text"]}}
 
 
 class GatedHost(HostModel):
@@ -262,7 +287,8 @@ def naming_survives_a_restart():
     desk.reconcile()
     settle(desk, j.id)
     assert [c["text"] for c in sender.calls] == ["🕓 Check the synthetic build"], sender.calls
-    assert [a["text"] for a in host.asked] == [ukrainian], host.asked
+    assert [a["text"] for a in host.asked] == [receipts.name_source(j, str)] and ukrainian in host.asked[0]["text"], \
+        ("a record stored before the naming input was: the input is rebuilt from the job", host.asked)
     again = ScriptedSender()
     desk = desk_for(history, again, namer=namer(HostModel()))
     desk.reconcile()

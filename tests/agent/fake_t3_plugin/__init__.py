@@ -28,7 +28,8 @@ def register(ctx):
     def handle(args, **_):
         action = args.get("action")
         if action == "start":
-            return json.dumps({"ok": True, "action": "start", **store.start("th-" + str(args.get("message")))})
+            name = str(args.get("request_id") or "").removeprefix("req-start-") or str(args.get("message"))
+            return json.dumps({"ok": True, "action": "start", **store.start("th-" + name)})
         if action == "send":
             return json.dumps({"ok": True, "action": "send", **store.send(str(args.get("thread_id")))})
         return store.dispatch(args)
@@ -36,6 +37,7 @@ def register(ctx):
     schema = {"name": "t3_control", "description": "Synthetic T3 threads for offline checks.",
               "parameters": {"type": "object", "properties": {
                   "action": {"type": "string"}, "thread_id": {"type": "string"}, "message": {"type": "string"},
-                  "cwd": {"type": "string"}, "request_id": {"type": "string"}}, "required": ["action"]}}
+                  "cwd": {"type": "string"}, "request_id": {"type": "string"}, "title": {"type": "string"}},
+                  "required": ["action"]}}
     ctx.register_tool(name="t3_control", toolset="t3_bridge", schema=schema, handler=handle,
                       description=schema["description"], emoji="🧵")
