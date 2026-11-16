@@ -227,6 +227,17 @@ test('reply voice: hidden for one voice, a live change asks for an explicit reco
  assert.equal(f.nodes.get('voice-note').hidden,false);
  assert.equal(f.run('call===current'),true,'choosing a voice never drops the call by itself');
 });
+test('a second voice pick made while the first one saves is saved too',async()=>{
+ const f=fixture();
+ f.run(`voiceState={current:'cove',default:'cove',choices:[{id:'cove',label:'Cove'},{id:'marin',label:'Marin'},{id:'sol',label:'Sol'}],applies:'next_connection'};current.voice='cove';renderVoice(current);
+ globalThis.posted=[];globalThis.release=[];post=(route,body)=>{posted.push(body.voice);return new Promise(done=>release.push(()=>done({voice:{...voiceState,current:body.voice}})));};
+ document.getElementById('voice').value='marin';globalThis.first=chooseVoice();document.getElementById('voice').value='sol';`);
+ await f.run('chooseVoice()');
+ f.run('release.shift()()');await f.run('first');
+ assert.equal(f.run('JSON.stringify(posted)'),JSON.stringify(['marin','sol']),'the later pick is posted after the first save');
+ f.run('release.shift()()');await f.run('new Promise(r=>setTimeout(r,0))');
+ assert.equal(f.run('voiceState.current'),'sol');
+});
 test('silent media is neutral and only enabled microphone energy means listening',()=>{
  const f=fixture();f.run(`current.phase='ready';current.handshake=true;updateMic(current);render();`);
  assert.equal(f.nodes.get('orb').dataset.state,'silent');

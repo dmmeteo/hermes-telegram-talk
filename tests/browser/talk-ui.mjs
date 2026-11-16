@@ -182,7 +182,14 @@ try {
   assert(await closedWithFocusOn(null), 'an outside pointer dismisses');
   await panel.click('#menu-toggle');
   await panel.focus('#end'); await panel.keyboard.press('Tab');
-  assert(await closedWithFocusOn(null), 'Tab from the last control leaves the panel and closes it');
+  assert(await panel.evaluate(() => !document.getElementById('call-menu').hidden), 'focus leaving the page keeps the panel open');
+  await panel.keyboard.press('Escape');
+  assert(await closedWithFocusOn('menu-toggle'), 'Escape after focus left the page closes the panel');
+  await panel.click('#menu-toggle');
+  await panel.evaluate(() => document.getElementById('call-menu').dispatchEvent(new FocusEvent('focusout', {relatedTarget: null})));
+  assert(await panel.evaluate(() => !document.getElementById('call-menu').hidden), 'a focusout with no new target, as WebKit sends for a tapped button, keeps the panel open');
+  await panel.click('#menu-toggle');
+  assert(await closedWithFocusOn('menu-toggle'), 'the toggle then closes it instead of reopening');
   await panel.evaluate(() => { call.phase = 'ready'; render(); });
   await panel.click('#menu-toggle');
   await panel.focus('#end'); await panel.keyboard.press('Tab');

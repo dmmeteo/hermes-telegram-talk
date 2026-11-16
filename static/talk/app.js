@@ -15,6 +15,8 @@ function chooseTheme(event) {
   if (!Object.keys(THEMES).includes(event.target.value)) return;
   applyTheme(event.target.value);
   try { localStorage.setItem(THEME_KEY, theme); } catch (_) { /* Storage can be off; the choice still applies to this page. */ }
+  // The ring animates only during a call; an idle ring keeps the old theme's colours until repainted.
+  render();
 }
 try {
   const stored = localStorage.getItem(THEME_KEY);
@@ -404,15 +406,17 @@ async function chooseVoice() {
   const auth = current?.auth || initData();
   if (!auth || choosingVoice || !voiceSelect.value || voiceSelect.value === voiceState?.current) return;
   choosingVoice = true;
+  const picked = voiceSelect.value;
   try {
-    const data = await post("voice", {initData: auth, voice: voiceSelect.value});
+    const data = await post("voice", {initData: auth, voice: picked});
     voiceState = data.voice;
     showError();
   } catch (error) {
     showError(error.status === 400 ? "That voice is not available." : error.message);
   } finally {
     choosingVoice = false;
-    renderVoice(call);
+    if (voiceSelect.value !== picked && voiceSelect.value !== voiceState?.current) void chooseVoice();
+    else renderVoice(call);
   }
 }
 
@@ -1018,6 +1022,9 @@ function closeMenu(event) {
     if (event.key === "Escape") { event.preventDefault(); toggleMenu(); }
     return;
   }
+  // WebKit leaves relatedTarget null when a tap lands on a button it does not focus, and on an app switch;
+  // closing then would let the same tap on the toggle reopen the panel.
+  if (event.type === "focusout" && !event.relatedTarget) return;
   const target = event.type === "focusout" ? event.relatedTarget : event.target;
   if (callMenu.contains(target) || menuButton.contains(target)) return;
   callMenu.hidden = true;

@@ -583,7 +583,7 @@ the package's SVG avatar. All identities and text remain synthetic.
 | Delegation wiring in the Talk UI (Chromium, local peers) | yes | n/a | yes (real tasks in the browser job) | n/a | no |
 | Telegram task reports | yes (on with tasks) | n/a | yes (Hermes sender, synthetic Telegram transport) | default on, no egress | no |
 | Exact-thread chat input (text, text files; truthful notes otherwise) | yes | yes | yes (registered gateway hook, adapter-built events, real SessionDB) | in fixture | no |
-| `/talk` launch handle binding the exact chat/topic; visible unbound state | yes | yes | yes (real PTB Application dispatch, recording sender; real routes) | no (needs a gateway restart with this plugin) | no |
+| `/talk` launch handle binding the exact chat/topic; no unbound note in the app | yes | yes | yes (real PTB Application dispatch, recording sender; real routes) | no (needs a gateway restart with this plugin) | no |
 | Chat agent's reply about a photo or file carried into the same call | yes | yes | yes (real turn finalizer and `post_llm_call`, real SessionStore, native image payload; scripted reply) | no | no |
 | Transcript and reply-voice selector in the Mini App | yes | yes (unit) | n/a | n/a | no |
 | Shopy female/restrained source example | yes | yes | n/a | no | no |
