@@ -11,7 +11,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 CONFIG = HERE / "store.json"
-HANG_S = 20.0
+HANG_S = 30.0
 
 
 def install(home, root, store):

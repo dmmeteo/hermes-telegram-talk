@@ -1557,20 +1557,22 @@ def t3_cut_call_real_core(model):
     from fake_t3 import FakeT3
     from hermes_talk import work
     TELEGRAM.reset()
+    root = Path(tempfile.mkdtemp(prefix="talk-agent-cut-"))
+    home = root / "home"
+    fx.write_home(home)
+    # The deadline is long enough for a stop to cut the first call first (1 s poll and 3 s grace in the core).
+    (home / "config.yaml").write_text(model_config(
+        model, "plugins:\n  enabled:\n    - hermes-telegram-talk\n    - t3-bridge\n"
+               "timeouts:\n  tools:\n    sequential_call: 12\n"))
+    store = FakeT3(root / "t3")
+    fake_t3_plugin.install(home, ROOT, root / "t3")
+    e = Env(model, root=root, toolsets=["file", "t3_bridge"], receipts={"micro_tasks": False})
     seen = {}
-    for path, extra in (("stop", ""), ("deadline", "timeouts:\n  tools:\n    sequential_call: 3\n")):
-        root = Path(tempfile.mkdtemp(prefix="talk-agent-cut-"))
-        home = root / "home"
-        fx.write_home(home)
-        (home / "config.yaml").write_text(model_config(
-            model, "plugins:\n  enabled:\n    - hermes-telegram-talk\n    - t3-bridge\n" + extra))
-        store = FakeT3(root / "t3")
-        fake_t3_plugin.install(home, ROOT, root / "t3")
-        e = Env(model, root=root, toolsets=["file", "t3_bridge"])
-        try:
-            bind_host_model(e)
-            e.talk.board.follow_s = 0.5
-            conv, vs = e.call()
+    try:
+        bind_host_model(e)
+        e.talk.board.follow_s = 0.5
+        conv, vs = e.call()
+        for path in ("stop", "deadline"):
             _, body = e.task(conv, vs, f"t3hang {path}", "del_t3cut_" + path)
             job_id, thread = body["job"]["id"], f"th-hang-{path}"
             deadline = time.time() + 120
@@ -1597,11 +1599,11 @@ def t3_cut_call_real_core(model):
             assert now["count"] == 1 and not now.get("reads") and not now.get("interrupts"), \
                 ("a run Talk cannot single out is neither followed, resent nor interrupted", now)
             seen[path] = {"state": done["state"], "hook_status": records[0]["cut"], "note": job.links[0].error}
-        finally:
-            e.close()
-            from hermes_talk import pulse_model
-            pulse_model.bind(None)
-    return {"transport": TRANSPORT, **seen}
+        return {"transport": TRANSPORT, **seen}
+    finally:
+        e.close()
+        from hermes_talk import pulse_model
+        pulse_model.bind(None)
 
 
 UNAVAILABLE = ("does not exist", "not available", "could not be resolved", "unknown tool", "not in this session")
