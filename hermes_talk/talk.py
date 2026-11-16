@@ -29,7 +29,7 @@ logger = logging.getLogger("tg-voice")
 
 SECRETS = [re.compile(p) for p in (
     r"\bsk-[A-Za-z0-9_-]{16,}",
-    r"\b\d{6,12}:[A-Za-z0-9_-]{30,}\b",
+    r"(?<!\d)\d{6,12}:[A-Za-z0-9_-]{30,}",  # also inside a Bot API URL, where "bot" precedes the digits
     r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}",
     r"(?i)\b(api[_-]?key|token|secret|password|bearer)\b\s*[:=]?\s*[A-Za-z0-9_\-./+]{12,}",
 )]
