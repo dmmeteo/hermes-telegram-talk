@@ -18,8 +18,9 @@ Boundaries:
 
 Before committing: `python3 tests/e2e/run-integrated.py --offline --require-host` must print
 `TALK_INTEGRATED_OFFLINE_OK`. It includes `tests/e2e/run-backend.py --offline` (`BACKEND OK`, with `tests/e2e/run-legacy.py --offline`
-at `26/26`), `tests/e2e/run-frontend.py --offline`, `tests/e2e/run-pulse.py --offline` (`TALK_PULSE_OK`, memory and host) and
-`tests/e2e/run-pulse-engine.py --offline` (`TALK_PULSE_ENGINE_PARITY_OK`; TMPDIR must not be under `~/.hermes/profiles/`).
+at `26/26`), `tests/e2e/run-frontend.py --offline`, `tests/e2e/run-pulse.py --offline` (`TALK_PULSE_OK`, memory and host),
+`tests/e2e/run-pulse-engine.py --offline` (`TALK_PULSE_ENGINE_PARITY_OK`; TMPDIR must not be under `~/.hermes/profiles/`) and
+`tests/logsecrets/run.py` (`TALK_LOG_SECRETS_OK`: no bot token in logs or stored errors).
 For chat-input, transcript or reply-voice changes, `python3 tests/e2e/run-thread.py --offline --require-host` must print
 `TALK_THREAD_OK` (real gateway hook, adapter events and SessionDB; see `docs/adr/0004-exact-thread-chat-input.md`).
 For opening, turn-taking or result-delivery changes in `static/talk/app.js` (its `Dialogue`), `python3 tests/e2e/run-dialogue.py`

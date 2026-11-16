@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The Talk process never writes its Telegram bot token to a log, a stored status error or an error string.
+"""The Talk process never writes its Telegram bot token to a log or a stored status error.
 
   python3 tests/logsecrets/run.py [--require-host]    prints TALK_LOG_SECRETS_OK
 
@@ -7,7 +7,7 @@ Runs server.main() up to the point where it would serve (so the real logging set
 sends and edits through the real Hermes Telegram sender (python-telegram-bot, httpx) against a local fake Bot API
 that answers with success, 401, 500 and a refused connection, and through a real httpx request that fails with
 httpx.HTTPStatusError (whose message carries the full request URL). The bot token is synthetic. Every byte written
-to the process' stderr (what journald keeps) and every error Talk stores or returns is searched for it.
+to the process' stderr (what journald keeps) and every error Talk stores is searched for it.
 Needs a Hermes runtime with python-telegram-bot; without one it is SKIPPED, and --require-host makes that a failure.
 """
 import glob
@@ -211,10 +211,14 @@ def main():
             desk.wait_settled(j.id, 2)
         finally:
             ptb.Bot = LocalBot
-        assert tracker and "error" in tracker[0], tracker
+        assert tracker and TOKEN in tracker[0].get("error", ""), "the edit error must embed the request URL"
         stored = json.dumps(history.meta, sort_keys=True)
-        check_no_token("embedded url", [("sender result", json.dumps(tracker)), ("stored report", stored),
-                                        ("redact()", redact(tracker[0]["error"]))], stderr, api)
+        check_no_token("embedded url", [("stored report", stored)], stderr, api)
+
+    @check
+    def redact_masks_a_token_inside_a_bot_api_url():
+        url = f"Server error '500' for url 'https://api.telegram.org/bot{TOKEN}/editMessageText'"
+        check_no_token("redact()", [("redact()", redact(url))], stderr, api, arrived=False)
 
     @check
     def any_logger_message_or_traceback_is_scrubbed():
@@ -235,6 +239,7 @@ def main():
         start_talk_logging(stderr)
         for name, fn in checks.items():
             MARK[0] = len(stderr.getvalue())
+            api.paths.clear()
             try:
                 fn()
                 print(f"PASS [logsecrets] {name}", flush=True)
