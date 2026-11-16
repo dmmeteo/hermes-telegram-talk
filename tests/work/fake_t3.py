@@ -92,7 +92,14 @@ class FakeT3:
             return {"outcome": outcome, "messages": messages}
         return self.update(thread_id, change)
 
+    def outage(self, on):
+        """While on, every call answers as the bridge does when the T3 server cannot be reached."""
+        (self.root / ".down").touch() if on else (self.root / ".down").unlink(missing_ok=True)
+
     def dispatch(self, args):
+        if (self.root / ".down").exists():
+            return json.dumps({"ok": False, "error": "server_unreachable", "message": "synthetic outage",
+                               "retryable": True, "outcome_unknown": False})
         thread_id = args.get("thread_id")
         if self.get(thread_id) is None:
             return json.dumps({"ok": False, "error": "not_found", "message": "no such thread"})

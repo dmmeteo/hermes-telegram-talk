@@ -1,8 +1,9 @@
 """A bounded stand-in for `hermes chat` in the work gate. No model, provider, Hermes core or T3.
 
 Talk starts it exactly as it starts Hermes (agent.NativeAgent behind spool.py, its own process group, with
-HERMES_TALK_JOB). Where a real turn would call t3_control, it runs the post_tool_call hook body (work.observe) with
-the result T3 would give, against the synthetic T3 store in $TALK_WORK_DIR/t3. TASK words:
+HERMES_TALK_JOB). Where a real turn would call t3_control, it runs the pre_tool_call hook body (work.intend), then
+the post_tool_call hook body (work.observe) with the result T3 would give, against the synthetic T3 store in
+$TALK_WORK_DIR/t3. TASK words:
 
   hold K                 a micro request: hold until release/K
   code K                 t3 start of thread th-K, then end the turn
@@ -12,6 +13,9 @@ the result T3 would give, against the synthetic T3 store in $TALK_WORK_DIR/t3. T
   lostnothread K         a t3 start whose answer was lost before any thread id came back
   refused K              a t3 start T3 refused
   look THREAD K          a t3 read of THREAD (a status read), then end the turn
+  cutstart K             T3 accepts a start of th-K, but the turn is stopped before the post hook records it
+  cutsend THREAD K       T3 accepts a send to THREAD, but the turn is stopped before the post hook records it
+  blocked K              a t3 start that never reached T3 and got no post hook (blocked), then the turn ends itself
 """
 import json
 import os
@@ -22,7 +26,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from hermes_talk.work import observe  # noqa: E402
+from hermes_talk import work  # noqa: E402
 from fake_t3 import FakeT3  # noqa: E402
 
 HOLD_MAX_S = 120
@@ -49,8 +53,11 @@ def log(kind, **extra):
 
 
 def tool(action, result, **call):
-    observe(tool_name="t3_control", args={"action": action, "request_id": f"req-{key}-{action}", **call},
-            result=json.dumps(result), session_id=session, home=home)
+    """One t3_control call as the hooks see it; result None is a call whose post hook never ran."""
+    call = {"action": action, "request_id": f"req-{key}-{action}", **call}
+    work.intend(tool_name="t3_control", args=call, session_id=session, home=home)
+    if result is not None:
+        work.observe(tool_name="t3_control", args=call, result=json.dumps(result), session_id=session, home=home)
 
 
 def stop(*_):
@@ -93,7 +100,17 @@ try:
         tool("start", {"ok": False, "error": "rejected", "outcome_unknown": False}, cwd="/synthetic", message=key)
     elif verb == "look":
         tool("read", {"ok": True, "action": "read", "state": t3.state(words[1])}, thread_id=words[1])
-    if verb in ("hold", "codewait"):
+    elif verb == "cutstart":
+        tool("start", None, cwd="/synthetic", message=key)
+        t3.start(f"th-{key}")
+        log("t3", thread=f"th-{key}")
+    elif verb == "cutsend":
+        tool("send", None, thread_id=words[1], message=key)
+        t3.send(words[1])
+        log("t3", thread=words[1])
+    elif verb == "blocked":
+        tool("start", None, cwd="/synthetic", message=key)
+    if verb in ("hold", "codewait", "cutstart", "cutsend"):
         hold()
     log("end")
     emit({"type": "result", "exit_code": 0, "text": text, "session_id": session})
