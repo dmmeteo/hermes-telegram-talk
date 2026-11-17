@@ -24,9 +24,24 @@ async function serve() {
     destination.stream.getTracks().forEach(track => peer.addTrack(track, destination.stream));
     peer.ondatachannel = ({channel}) => {
       entry.channel = channel;
-      channel.onopen = () => {
-        if (entry.behavior.handshake) entry.send({type:'session.started',session:{id:'synthetic'}});
+      // Blink can report open before the native SCTP channel accepts sends.
+      const hello = async () => {
+        if (!entry.behavior.handshake || entry.greetingPending) return;
+        entry.greetingPending = true;
+        while (channel.readyState === 'open') {
+          const stats = await peer.getStats();
+          const native = [...stats.values()].find(stat => stat.type === 'data-channel' && stat.dataChannelIdentifier === channel.id);
+          if (channel.readyState !== 'open') return;
+          if (native?.state === 'open') {
+            entry.send({type:'session.started',session:{id:'synthetic'}});
+            entry.greeted = true;
+            return;
+          }
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }
       };
+      channel.onopen = hello;
+      if (channel.readyState === 'open') hello();
       channel.onmessage = message => {
         const event = JSON.parse(message.data);
         entry.got.push(event);

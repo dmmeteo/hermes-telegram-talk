@@ -467,7 +467,8 @@ test('a stored theme applies at load, and an unknown or unreadable value falls b
  assert.equal(fixture().nodes.get('html').dataset.theme,'modern','no storage');
 });
 test('synthetic provider waits for native channel readiness and sends one handshake',async()=>{
- const html=readFileSync('tests/browser/provider.html','utf8');
+ for(const provider of ['tests/browser/provider.html','tests/agent/provider.html']) {
+ const html=readFileSync(provider,'utf8');
  const sent=[],timers=[];let peer,releaseStats;
  const channel={id:0,readyState:'open',send:data=>sent.push(JSON.parse(data))};
  const audioNode=()=>({frequency:{},gain:{},connect(){return this;},start(){},stop(){},stream:{getTracks:()=>[]}});
@@ -495,6 +496,7 @@ test('synthetic provider waits for native channel readiness and sends one handsh
  assert.equal(sent.length,1,'duplicate open notifications must not send twice');
  assert.equal(sent[0].type,'session.started');
  assert.equal(context.window.peers[0].peer,peer);
+ }
 });
 let failed=0;
 for(const {name,run} of tests){try{await run();console.log('PASS',name);}catch(e){failed++;console.error('FAIL',name,e.message);}}
