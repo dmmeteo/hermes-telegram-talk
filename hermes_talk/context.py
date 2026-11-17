@@ -4,19 +4,23 @@ The frame (voice limits) comes first and the opening policy last; room for both 
 else. The other sections fill the remaining room in priority order, each within its own character budget,
 headers and the "[clipped]" marker included. Skills are guidance text only. They register no tools.
 """
+import re
+
 from . import resume
-from .config import SELF_REFERENCE
+from .config import DEFAULT_PERSONA, PERSONA_CHARS, SELF_REFERENCE
 
 FRAME = (
     "You are the realtime voice of the Hermes profile \"{name}\" in Hermes Telegram Talk, a Telegram Mini App. "
-    "Speak naturally and briefly. When interrupted, stop and listen.\n"
+    "Your name is \"{name}\": if asked who you are, you are {name}; never introduce yourself as ChatGPT or a "
+    "generic assistant. Speak naturally and briefly. When interrupted, stop and listen.\n"
     "Voice limits in this build: you cannot run tools, start or cancel Hermes work, read files or "
     "browse. If asked to do something, say plainly that Talk cannot start work yet and that nothing "
     "was executed. Never claim a task ran, finished or was sent. Ending this call cancels nothing."
 )
 TASKS_FRAME = (
     "You are the realtime voice of the Hermes profile \"{name}\" in Hermes Telegram Talk, a Telegram Mini App. "
-    "Speak naturally and briefly. When interrupted, stop and listen.\n"
+    "Your name is \"{name}\": if asked who you are, you are {name}; never introduce yourself as ChatGPT or a "
+    "generic assistant. Speak naturally and briefly. When interrupted, stop and listen.\n"
     "You can hand work to Hermes, this profile's own agent with its tools. When the user asks for something this "
     "context cannot answer (look something up, read or check something, research), delegate it. A delegated task "
     "runs in the background: say you handed it to Hermes and keep talking. Its result arrives later on that "
@@ -35,6 +39,10 @@ PERSONA = ("Speak with the personality below. It shapes how you sound, not how m
 GREET_FIRST = ("Opening policy: speak first. As soon as the call starts, greet the user{language} in one short "
                "sentence so they know you're there and listening.{say} Then wait for them. Do not list updates in "
                "the greeting; bring them up once the user has spoken. This applies whatever the persona above says.")
+SAY_LINE = ("Opening policy: speak first. As soon as the call starts, say this configured opening line exactly as "
+            "written, word for word and in the language it is written in, without translating or adding to it: "
+            "\"{line}\" Then wait for them. Do not list updates in the greeting; bring them up once the user has "
+            "spoken. This applies whatever the persona above says.")
 WAIT_FOR_USER = ("Opening policy: do not speak first. When the call starts, stay silent until the user speaks, then "
                  "answer what they said. This applies whatever the persona above says.")
 SUMMARY_HEADER = "## Earlier in this conversation\n"
@@ -146,24 +154,39 @@ def _inside(make, text, limit):
     return make(_fit(text.strip(), room)) if text.strip() and room >= MIN_SECTION else ""
 
 
+def soul_persona(soul):
+    """The part of a profile's SOUL a voice carries: its lead (identity, before the first "## " section) and its
+    "## Voice" section when that still fits whole. Operational sections never reach the call."""
+    sections = re.split(r"(?m)^(?=## )", (soul or "").strip())
+    lead = "" if sections[0].startswith("## ") else _fit(sections[0].strip(), PERSONA_CHARS)
+    voice = next((s.strip() for s in sections if s.split("\n", 1)[0].strip().lower() == "## voice"), "")
+    if voice and len(lead) + 2 + len(voice) <= PERSONA_CHARS:
+        return "\n\n".join(filter(None, (lead, voice)))
+    return lead
+
+
 def opening(config, greeting_line):
     if not config.greeting_enabled:
         return WAIT_FOR_USER
+    if greeting_line:
+        return SAY_LINE.format(line=greeting_line.replace(chr(34), chr(39)))
     language = config.language
-    line = greeting_line or (language.greeting if language else None)
-    say = f' Say: "{line.replace(chr(34), chr(39))}"' if line else f" {config.greeting}"
+    line = language.greeting if language else None
+    say = f' Say: "{line}"' if line else f" {config.greeting}"
     return GREET_FIRST.format(language=f" in {language.name}" if language else "", say=say)
 
 
 def language_rule(config):
     language = config.language
-    rule = (f"Speak {language.name}: open the call in {language.name} and keep speaking it unless the user switches "
+    start = ("after the configured opening line, speak" if config.greeting_enabled and config.greeting_phrases
+             else "open the call in")
+    rule = (f"Speak {language.name}: {start} {language.name} and keep speaking it unless the user switches "
             "language." if language else "")
     return " ".join(filter(None, (rule, config.language_hint, SELF_REFERENCE.get(config.self_reference, ""))))
 
 
 def compose(config, skills, summary, activity_lines, activity_total, activity_note,
-            tasks_ready=False, job_items=(), reports_note="", greeting_line=None):
+            tasks_ready=False, job_items=(), reports_note="", greeting_line=None, persona=None):
     """Instruction text plus a per-section report of what was included (names and sizes only).
 
     report["activity_items"] is how many of activity_lines the text carries whole; only those count
@@ -182,7 +205,7 @@ def compose(config, skills, summary, activity_lines, activity_total, activity_no
     middle = [
         ("language", lambda room: _fit(_section("Language", language_rule(config), 800), room)),
         ("persona", lambda room: _inside(lambda text: "## Persona\n" + PERSONA + resume.fenced("hermes_persona", text),
-                                         config.persona_text, room)),
+                                         persona or config.persona_text or DEFAULT_PERSONA, room)),
         ("skills", lambda room: _fit("\n\n".join(part for _, part in skill_parts), room)),
         ("summary", lambda room: _inside(lambda text: SUMMARY_HEADER + resume.summary_block(text), summary,
                                          min(room, b.summary_chars + len(SUMMARY_HEADER + resume.summary_block(""))))),

@@ -106,8 +106,11 @@ section ends with `[clipped]`.
 1. A fixed frame. It covers the profile name, the voice limits, and "nothing was executed" when
    asked to do work. It also says ending the call cancels nothing.
 2. The language rule: `voice.language` (`en` or `uk`), then `voice.language_hint` and `persona.self_reference`.
-3. The voice persona: `persona.text`, else a short default, inside Conduit's `<hermes_persona>` framing. Talk does
-   not read the profile's SOUL.
+3. The voice persona inside Conduit's `<hermes_persona>` framing: `persona.text` if set, else the identity of the
+   profile's own SOUL.md (its lead before the first `## ` section, plus its `## Voice` section when that fits, at
+   most 1200 characters, redacted; read per call through the core `load_soul_md` pinned to the profile home), else a
+   short default. The frame names the voice by `profile.display_name`. See
+   [ADR 0015](docs/adr/0015-voice-persona-from-soul-identity.md).
 4. Skills named in `context.skills`, read through `tools.skills_tool.skill_view`. These are guidance
    text only and register no tools. Skills not on the list are never read.
 5. The summary of the earlier conversation, inside a `<previous_conversation>` data block, when one serves.
@@ -120,9 +123,10 @@ section ends with `[clipped]`.
    visit. If more changed, the briefing says older updates were not read, rather than claiming it saw everything.
    When room allows, a short "Pulse updates" section tells the model to name updates by title and how to delegate
    feedback.
-7. The opening policy, last so no section above overrides it. With the greeting on, the model speaks first in the
-   configured language and says one line: one of `greeting.phrases` (chosen locally, never the account's previous
-   one), else the language's own line, else it follows `greeting.text`. It leaves updates for later. With the
+7. The opening policy, last so no section above overrides it. With the greeting on, the model speaks first and says
+   one line: one of `greeting.phrases` (chosen locally, never the account's previous one) exactly as written, in its
+   own language and untranslated, after which the language rule applies; else the language's own line; else it
+   follows `greeting.text`. It leaves updates for later. With the
    greeting off, it waits for the user to speak first.
 
 ### Fast start and in-call catch-up
@@ -481,7 +485,8 @@ See [talk.example.yaml](talk.example.yaml). It sets:
 
 Typical changes:
 - **Add a voice skill.** Put its name in `context.skills`.
-- **Change the persona.** Edit `persona.text` (up to 1200 characters). Talk does not read the profile's SOUL.
+- **Change the persona.** Edit the lead or `## Voice` section of the profile's SOUL.md (next call), or set
+  `persona.text` (up to 1200 characters) to replace it for Talk only.
 - **Change the language.** Set `voice.language`; the call opens and speaks in it.
 - **Change colors or the avatar.** Edit `appearance.*` or `profile.avatar`.
 - **Change budgets.** Edit `context.budgets.*`.
