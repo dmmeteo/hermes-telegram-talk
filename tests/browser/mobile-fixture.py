@@ -44,13 +44,13 @@ class Handler(Base):
         if path == BASE + "telegram.js":
             return self._send(200, b"window.Telegram={WebApp:{ready(){},expand(){}}};", "text/javascript")
         if path == BASE:
-            folder = ROOT / "static" if mode == "legacy" else ROOT / "static/talk"
-            html = (folder / "index.html").read_text().replace("https://telegram.org/js/telegram-web-app.js", "telegram.js")
+            folder = ROOT / "static/talk"
+            html = ('<html><button id="stale-fixture">Synthetic stale page</button><script src="app.js"></script><link rel="stylesheet" href="app.css"></html>' if mode == "stale" else (folder / "index.html").read_text()).replace("https://telegram.org/js/telegram-web-app.js", "telegram.js")
             return self._send(200, html.encode(), "text/html", {"Cache-Control": "no-store"})
         if path in (BASE + "app.js", BASE + "app.css"):
-            folder = ROOT / "static" if mode == "legacy" else ROOT / "static/talk"
+            folder = ROOT / "static/talk"
             kind = "text/javascript" if path.endswith(".js") else "text/css"
-            return self._send(200, (folder / Path(path).name).read_bytes(), kind,
+            return self._send(200, (b"/* synthetic cached stale asset */" if mode == "stale" else (folder / Path(path).name).read_bytes()), kind,
                               {"Cache-Control": "public, max-age=14400"})
         return super().do_GET()
 
@@ -59,7 +59,7 @@ class Handler(Base):
         requests.append(self.path)
         if self.path == "/fixture/mode":
             payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
-            assert payload["mode"] in ("legacy", "current")
+            assert payload["mode"] in ("stale", "current")
             mode = payload["mode"]
             return self._json(200, {"ok": True})
         return super().do_POST()

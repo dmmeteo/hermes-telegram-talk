@@ -167,8 +167,11 @@ try {
   assert(you && agent && you.hidden === 'true' && agent.hidden === 'true', `two decorative meters, hidden from assistive tech: ${JSON.stringify(meterBoxes)}`);
   const beside = (meter, gap) => gap >= 0 && gap <= 8 && meter.box.width >= 4 && meter.box.width <= 12
     && Math.abs(meter.box.top - meterBoxes.orb.top) < .5 && Math.abs(meter.box.height - meterBoxes.orb.height) < .5;
-  assert(you && agent && beside(you, meterBoxes.orb.left - you.box.right) && beside(agent, agent.box.left - meterBoxes.orb.right),
-    `slim meters stand directly left (you) and right (assistant) of the square: ${JSON.stringify(meterBoxes)}`);
+  assert(you && agent && beside(agent, meterBoxes.orb.left - agent.box.right) && beside(you, you.box.left - meterBoxes.orb.right),
+    `slim meters stand directly left (assistant) and right (you) of the square: ${JSON.stringify(meterBoxes)}`);
+  const sideOf = meter => meter.box.right <= meterBoxes.orb.left ? 'left' : meter.box.left >= meterBoxes.orb.right ? 'right' : 'overlap';
+  const onSide = {left: meterBoxes.meters.find(meter => sideOf(meter) === 'left')?.id, right: meterBoxes.meters.find(meter => sideOf(meter) === 'right')?.id};
+  assert(onSide.left && onSide.right, `one meter renders left of the avatar and one right of it: ${JSON.stringify(meterBoxes)}`);
 
   const lit = () => room.evaluate(() => Object.fromEntries([...document.querySelectorAll('.meter')].map(meter => {
     const paint = meter.getContext('2d'), {width, height} = meter;
@@ -190,7 +193,39 @@ try {
     `the human meter rises at once to the microphone level, the assistant meter stays empty: ${JSON.stringify(shown[0])}`);
   let drawn = await lit();
   assert(Math.abs(drawn['meter-you'] - loud(.05)) < .1 && drawn['meter-agent'] === 0, `drawn segments follow the levels: ${JSON.stringify(drawn)}`);
+  const tint = () => room.evaluate(() => Object.fromEntries([...document.querySelectorAll('.meter')].map(meter => {
+    const {width, height} = meter, column = meter.getContext('2d').getImageData(Math.floor(width / 2), 0, 1, height).data;
+    for (let y = height - 1; y >= 0; y--) {
+      const [r, g, b] = column.slice(y * 4, y * 4 + 3);
+      if (Math.max(r, g, b) > 150) return [meter.id, {r, g, b}];
+    }
+    return [meter.id, null];
+  })));
+  const blue = c => c && c.b > 200 && c.b > c.r + 100, orange = c => c && c.r > 200 && c.r > c.b + 100;
+  await levels(.05, 0);
+  await frames(2);
+  drawn = await lit();
+  let colours = await tint();
+  assert(drawn[onSide.right] > .2 && drawn[onSide.left] === 0 && blue(colours[onSide.right]),
+    `user level alone fills the RIGHT meter in blue and leaves the left empty: ${JSON.stringify({onSide, drawn, colours})}`);
+  await levels(0, .09);
+  await frames(30);
+  drawn = await lit();
+  colours = await tint();
+  assert(drawn[onSide.left] > .2 && drawn[onSide.right] === 0 && orange(colours[onSide.left]),
+    `assistant level alone fills the LEFT meter in orange and leaves the right empty: ${JSON.stringify({onSide, drawn, colours})}`);
+  await room.click('#mute');
+  await frames(30);
+  drawn = await lit();
+  colours = await tint();
+  assert(drawn[onSide.right] === 0 && drawn[onSide.left] > .2 && orange(colours[onSide.left]),
+    `muting empties the RIGHT (user) meter while the LEFT (assistant) meter still follows the assistant: ${JSON.stringify({onSide, drawn, colours})}`);
+  await room.screenshot({path: `${out}/presence-typesafe-meters-muted.png`});
+  await room.click('#mute');
   await levels(.05, .09);
+  await frames(2);
+  colours = await tint();
+  assert(blue(colours[onSide.right]) && orange(colours[onSide.left]), `unmuted, both fill: blue right, orange left: ${JSON.stringify(colours)}`);
   shown = await frames(2);
   assert(Math.abs(shown[1]['meter-you']?.[0] - loud(.05)) < .002 && Math.abs(shown[1]['meter-agent']?.[0] - loud(.09)) < .002,
     `both sides at once drawn independently: ${JSON.stringify(shown[1])}`);
@@ -214,7 +249,7 @@ try {
   await room.evaluate(() => stop());
   shown = await frames(1);
   drawn = await lit();
-  assert(JSON.stringify(shown[0]) === JSON.stringify({'meter-you': [0, 0], 'meter-agent': [0, 0]}) && drawn['meter-you'] === 0 && drawn['meter-agent'] === 0,
+  assert(JSON.stringify(shown[0]) === JSON.stringify({'meter-agent': [0, 0], 'meter-you': [0, 0]}) && drawn['meter-you'] === 0 && drawn['meter-agent'] === 0,
     `stop empties both meters: ${JSON.stringify({shown, drawn})}`);
   await room.evaluate(() => document.getElementById('theme-modern').click());
   assert(await room.evaluate(() => [...document.querySelectorAll('.meter')].every(meter => !meter.getClientRects().length)), 'Modern shows no meters');
@@ -286,12 +321,16 @@ try {
           overflow: document.documentElement.scrollWidth > innerWidth, status: !document.getElementById('call-status').hidden,
           meters: [...document.querySelectorAll('.meter')].filter(element => element.getClientRects().length).map(box),
           buttons: ['menu-toggle', 'mute'].map(id => box(document.getElementById(id))),
-          lines: ['error', 'start'].filter(id => !document.getElementById(id).hidden)};
+          lines: ['error', 'start'].filter(id => !document.getElementById(id).hidden),
+          notice: ['notice', 'notice-title', 'notice-message', 'error', 'start'].map(id => document.getElementById(id))
+            .filter(element => element?.getClientRects().length).map(box)};
       });
       const where = `${theme} ${state} ${width}x${height}`;
       assert(g.panel.top >= 0 && g.panel.bottom <= height && g.panel.left >= 0 && g.panel.right <= width && !g.overflow, `panel fits the viewport (${where})`);
       assert(g.heading.top >= g.panel.top && g.heading.top >= 0, `panel heading is not clipped (${where})`);
       assert(g.panel.bottom <= g.row.top, `panel sits above the control row (${where})`);
+      assert(g.notice.every(n => n.left >= 0 && n.right <= width && n.top >= 0 && n.bottom <= g.row.top),
+        `with the panel open the notice stays inside the viewport and above the control row (${where}): ${JSON.stringify(g.notice)}`);
       assert(g.order[0] < g.order[1] && g.order[1] < g.order[2], `menu left, avatar center, microphone right (${where})`);
       const apart = (a, b) => a.right <= b.left || b.right <= a.left || a.bottom <= b.top || b.bottom <= a.top;
       assert(g.meters.length === (theme === 'typesafe' ? 2 : 0) && g.meters.every(m => m.left >= 0 && m.right <= width && m.top >= 0 && m.bottom <= height
@@ -345,6 +384,16 @@ try {
   await panel.locator('#reconnect').waitFor({state: 'visible', timeout: 10000}).catch(() => {});
   assert(await panel.evaluate(() => !document.getElementById('call-menu').hidden) && await panel.locator('#reconnect').isVisible(),
     'choosing a voice keeps the panel open and shows Reconnect');
+  const reconnectLook = () => panel.evaluate(() => { const style = getComputedStyle(document.getElementById('reconnect'));
+    return {face: style.backgroundColor, ink: style.color, shadow: style.boxShadow, note: !document.getElementById('voice-note').hidden}; });
+  let reconnect = await reconnectLook();
+  assert(reconnect.face === 'rgb(217, 119, 87)' && reconnect.note, `Modern keeps the orange Reconnect beside its note: ${JSON.stringify(reconnect)}`);
+  await panel.evaluate(() => document.getElementById('theme-typesafe').click());
+  reconnect = await reconnectLook();
+  assert(reconnect.face === 'rgb(201, 202, 196)' && reconnect.ink === 'rgb(23, 27, 24)' && reconnect.shadow.startsWith('rgb(23, 27, 24) 0px 0px 0px 1px') && reconnect.note,
+    `in Retro 95 Reconnect is the Call settings window's grey default button: ${JSON.stringify(reconnect)}`);
+  await panel.screenshot({path: `${out}/menu-typesafe-reconnect.png`});
+  await panel.evaluate(() => document.getElementById('theme-modern').click());
   await panel.keyboard.press('Escape');
   await panel.click('#menu-toggle');
   await panel.focus('#menu-close'); await panel.keyboard.press('Shift+Tab');
@@ -385,14 +434,26 @@ try {
     const notice = document.getElementById('notice');
     const box = element => element?.getClientRects().length ? element.getBoundingClientRect().toJSON() : null;
     const style = notice ? getComputedStyle(notice) : {};
+    const status = document.getElementById('call-status'), alert = document.getElementById('error');
+    // The message the window shows: the alert for an error, the silent copy of the status line for a prompt.
+    const said = [alert, document.getElementById('notice-message')].find(element => box(element));
+    const seen = element => { const r = box(element); return Boolean(r && r.width > 1 && r.height > 1 && getComputedStyle(element).clipPath === 'none'); };
+    const start = document.getElementById('start'), face = getComputedStyle(start);
     return {hidden: notice?.hidden, kind: notice?.dataset.kind, display: style.display, border: style.borderTopWidth, shadow: style.boxShadow ?? '',
       window: box(notice), title: box(document.getElementById('notice-title')), titleText: document.getElementById('notice-title')?.textContent,
-      symbol: box(notice?.querySelector('.notice-symbol')), message: box(document.getElementById('error')),
-      button: box(document.getElementById('start')), action: document.getElementById('start').textContent,
-      inside: Boolean(notice) && ['notice-title', 'error', 'start'].every(id => notice.contains(document.getElementById(id))),
-      messageLook: [getComputedStyle(document.getElementById('error')).color, getComputedStyle(document.getElementById('error')).textAlign],
-      buttonFace: getComputedStyle(document.getElementById('start')).backgroundColor,
-      status: box(document.getElementById('call-status')), row: box(document.querySelector('.control-row')),
+      symbols: [...(notice?.querySelectorAll('.notice-symbol') ?? [])].filter(box).map(symbol => symbol.dataset.kind ?? 'error'),
+      symbol: box([...(notice?.querySelectorAll('.notice-symbol') ?? [])].find(box)), message: box(said), said: said?.textContent ?? '',
+      silentCopy: said?.closest('[aria-hidden="true"]') !== null,
+      alertText: !alert.hidden && alert.getAttribute('role') === 'alert' ? alert.textContent : '',
+      copyText: document.getElementById('notice-message')?.textContent ?? '', copy: box(document.getElementById('notice-message')),
+      button: box(start), action: start.textContent,
+      inside: Boolean(notice) && ['notice-title', 'error', 'start'].every(id => notice.contains(document.getElementById(id)))
+        && (!said || notice.contains(said)),
+      messageLook: [getComputedStyle(alert).color, getComputedStyle(alert).textAlign],
+      buttonFace: face.backgroundColor, buttonLook: {ink: face.color, border: face.borderTopColor, shadow: face.boxShadow},
+      status: box(status), statusSeen: seen(status), statusText: status.textContent,
+      statusSpeaks: status.getAttribute('role') === 'status' && getComputedStyle(status).display !== 'none' && !status.closest('[aria-hidden="true"]'),
+      row: box(document.querySelector('.control-row')),
       transcript: box(document.getElementById('transcript')),
       fixed: [...document.querySelectorAll('.meter, #menu-toggle, #orb, #mute, #name')].map(box).filter(Boolean),
       overflow: document.documentElement.scrollWidth > innerWidth};
@@ -438,27 +499,48 @@ try {
         const shown = [g.window, g.message, g.button].filter(Boolean);
         assert(!g.overflow && shown.every(box => box.left >= 0 && box.right <= width && box.top >= 0 && box.bottom <= height),
           `the notice stays inside the viewport (${where}): ${JSON.stringify(shown)}`);
-        assert(g.status && shown.every(box => g.status.bottom <= box.top) && g.transcript.bottom <= g.status.top,
-          `transcript, status line and notice stack without overlap (${where}): ${JSON.stringify({transcript: g.transcript, status: g.status, shown})}`);
+        const above = g.statusSeen ? g.status : g.transcript;
+        assert(g.status && g.transcript.bottom <= (g.statusSeen ? g.status.top : Infinity) && shown.every(box => above.bottom <= box.top),
+          `transcript, the visible status line and notice stack without overlap (${where}): ${JSON.stringify({transcript: g.transcript, status: g.status, shown})}`);
+        assert(!g.said || !g.statusSeen || g.statusText !== g.said,
+          `the status line never repeats the window's message on screen (${where}): ${JSON.stringify({status: g.statusText, said: g.said})}`);
+        assert(g.statusSpeaks && (kind === 'error'
+          ? g.alertText === g.said && g.said && g.statusText !== g.alertText && !g.copyText
+          : !g.alertText && (!g.said || (g.said === g.statusText && g.silentCopy))),
+          `the message speaks once: an error through its alert, a prompt through the status line it repeats (${where}): ${JSON.stringify(g)}`);
         assert(shown.every(box => box.bottom <= g.row.top && g.fixed.every(fixed => apart(box, fixed))),
           `the notice never covers the control row, the portrait or the meters (${where})`);
-        if (theme === 'typesafe' && kind === 'error') {
+        if (theme === 'typesafe') {
           const pieces = [g.title, g.symbol, g.message, g.button];
-          assert(g.display === 'grid' && g.border === '1px' && g.shadow.includes('4px 4px') && g.titleText === 'Error'
-            && pieces.every(piece => piece && within(piece, g.window)),
-            `Retro 95 frames the title, symbol, message and button in one raised window (${where}): ${JSON.stringify(g)}`);
+          assert(g.display === 'grid' && g.border === '1px' && g.shadow.includes('4px 4px') && g.titleText === (kind === 'error' ? 'Error' : 'Information')
+            && JSON.stringify(g.symbols) === JSON.stringify([kind]) && g.said && pieces.every(piece => piece && within(piece, g.window)),
+            `Retro 95 frames the title, the ${kind} symbol, the message and the button in one raised window (${where}): ${JSON.stringify(g)}`);
           assert(pieces.every(Boolean) && g.title.top - g.window.top <= 4 && g.title.width >= g.window.width - 8.5 && g.symbol.right <= g.message.left
             && pieces.every((a, i) => pieces.slice(i + 1).every(b => apart(a, b))),
             `the title bar spans the top and the symbol, message and button do not overlap (${where}): ${JSON.stringify(pieces)}`);
+          assert(kind === 'error' ? g.statusSeen : !g.statusSeen && g.said === g.statusText,
+            `a Retro 95 ${kind} window ${kind === 'error' ? 'sits under the visible status line' : 'shows the status text in place of the line'} (${where}): ${JSON.stringify({status: g.statusText, seen: g.statusSeen, said: g.said})}`);
+          assert(g.buttonFace === 'rgb(201, 202, 196)' && g.buttonLook.ink === 'rgb(23, 27, 24)' && g.buttonLook.border === 'rgb(23, 27, 24)'
+            && g.buttonLook.shadow.startsWith('rgb(23, 27, 24) 0px 0px 0px 1px') && g.buttonLook.shadow.includes('inset'),
+            `the window's ${action} is a grey bevelled default button with a heavy dark outline (${where}): ${JSON.stringify([g.buttonFace, g.buttonLook])}`);
         } else {
-          assert(g.display === 'contents' && !g.title && !g.symbol,
-            `${theme === 'modern' ? 'Modern' : 'a Retro 95 prompt'} keeps the bare line and button, with no window (${where}): ${JSON.stringify(g)}`);
+          assert(g.display === 'contents' && !g.title && !g.symbol && !g.copy && g.statusSeen,
+            `Modern keeps the visible status line and the bare line and button, with no window (${where}): ${JSON.stringify(g)}`);
         }
         if (theme === 'modern') {
           assert(g.buttonFace === 'rgb(217, 119, 87)' && (!g.message || (g.messageLook[0] === 'rgb(238, 136, 132)' && g.messageLook[1] === 'center')),
             `Modern keeps its red centered line and orange button (${where}): ${JSON.stringify([g.messageLook, g.buttonFace])}`);
         }
         if (width === 390 || width === 844) await desk.screenshot({path: `${out}/notice-${theme}-${scene}-${width}x${height}.png`});
+        if (width === 390) {
+          await desk.focus('#transcript');
+          await desk.keyboard.press('Tab');
+          const ring = await desk.evaluate(() => { const start = document.activeElement, style = getComputedStyle(start);
+            return {id: start.id, visible: start.matches(':focus-visible'), outline: `${style.outlineStyle} ${style.outlineWidth} ${style.outlineColor}`, face: style.backgroundColor}; });
+          await desk.evaluate(() => document.activeElement.blur());
+          assert(ring.id === 'start' && ring.visible && ring.outline === (theme === 'typesafe' ? 'solid 3px rgb(239, 101, 173)' : 'solid 3px rgba(250, 249, 245, 0.7)')
+            && ring.face === g.buttonFace, `keyboard focus on ${action} draws the ${theme === 'typesafe' ? 'pink' : 'Modern'} ring and keeps the face (${where}): ${JSON.stringify(ring)}`);
+        }
       }
       await desk.setViewportSize({width: 390, height: 844});
       const cleared = await act(() => desk.locator('#notice #start').click({timeout: 5000}).then(() => true, () => false));

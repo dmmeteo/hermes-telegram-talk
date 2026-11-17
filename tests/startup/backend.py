@@ -303,7 +303,7 @@ def the_served_cli_publishes_the_talk_launch_and_its_bot_avatar():
     import server
     from hermes_talk import config, history
     from hermes_talk.pulse import engine as pulse_engine
-    from hermes_talk.thread_gateway import offer
+    from hermes_talk.thread.gateway import offer
     home = Path(tempfile.mkdtemp(prefix="talk-cli-startup-"))
     fx.write_home(home)
     cfg = config.parse_config(fx.config_data(profile={"id": "default", "display_name": "Synthetic Talk"}), ROOT)

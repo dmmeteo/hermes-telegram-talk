@@ -22,7 +22,7 @@ from hermes_talk import fixtures as fx  # noqa: E402
 from hermes_talk.config import load_config, parse_config  # noqa: E402
 from hermes_talk.context import compose  # noqa: E402
 from hermes_talk.talk import TalkRuntime  # noqa: E402
-from hermes_talk.thread_inbox import Thread, ThreadInbox, launch_thread  # noqa: E402
+from hermes_talk.thread.inbox import Thread, ThreadInbox, launch_thread  # noqa: E402
 
 BOT_ID = fx.BOT_TOKEN.split(":")[0]
 OTHER_BOT_TOKEN = "654321:synthetic-other-bot-token"
@@ -121,13 +121,13 @@ class MemoryExtras:
         self.origins = {}
 
     def talk_command(self, home, user_id, chat_id=None, chat_type="private", thread_id=None, bot_id=BOT_ID):
-        from hermes_talk.thread_gateway import offer
+        from hermes_talk.thread.gateway import offer
         text, url = offer(home, bot_id, user_id, chat_id or user_id, chat_type, thread_id)
         return [] if text is None else [{"chat_id": int(chat_id or user_id), "text": text, "url": url,
                                          "message_thread_id": thread_id}]
 
     def notify_flow(self, home, user_id, chat_id=None, chat_type="private", tap=None, tapper=None):
-        from hermes_talk.thread_gateway import notify_panel, notify_switch
+        from hermes_talk.thread.gateway import notify_panel, notify_switch
         chat = chat_id or user_id
         text, buttons = notify_panel(home, BOT_ID, user_id, chat_type, chat)
         out = [] if text is None else [("sendMessage", text, [b[0] for b in buttons or ()], [b[1] for b in buttons or ()])]
@@ -146,7 +146,7 @@ class MemoryExtras:
         (`api`, default: the event's caption plus its image hints), post_llm_call gets the clean persisted text (the
         caption; the payload itself when there is no caption) and the history ending in this turn's rows."""
         from types import SimpleNamespace
-        from hermes_talk.thread_gateway import chat_reply
+        from hermes_talk.thread.gateway import chat_reply
         sid = f"s-{event.source.user_id}-{event.source.chat_id}-{event.source.thread_id}"
         self.origins[sid] = event.source
         store = SimpleNamespace(lookup_by_session_id=lambda s: SimpleNamespace(origin=self.origins[s])
@@ -434,7 +434,7 @@ def run(history_factory, event_factory, dispatch, out, extras=None):
             rig.start()
             rig.clock.now += rig.config.voice_session_ttl_s + 5
             import time as _time
-            from hermes_talk.thread_inbox import take_event
+            from hermes_talk.thread.inbox import take_event
             assert take_event(event_factory(text="late", message_id=970), rig.home,
                               clock=lambda: rig.clock.now) is None
             assert _time.time() > 0

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Talk frontend checks against the backend in this checkout. Synthetic identities and media only.
 
-  python3 tests/e2e/run-frontend.py --offline            legacy offline suite, frontend unit checks, real-backend HTTP contract
+  python3 tests/e2e/run-frontend.py --offline            signaling/security suite, frontend unit checks, real-backend HTTP contract
   python3 tests/e2e/run-frontend.py --browser OUT_DIR    the same, then the Talk Chromium inventory and the avatar/settings/theme
                                                          checks (tests/browser/talk-ui.mjs), each in a capped offline container
   python3 tests/e2e/run-frontend.py --mobile OUT_DIR     the same, then cold/warm upgrade and audio unlock in Chromium and WebKit
@@ -51,7 +51,7 @@ def main():
             return 1
     env = {**os.environ, 'TALK_BACKEND_SOURCE': str(backend), 'PYTHONDONTWRITEBYTECODE': '1'}
     check = ['node', 'tests/frontend/check.mjs']
-    commands = [[sys.executable, 'tests/e2e/run-legacy.py', '--offline'],
+    commands = [[sys.executable, 'tests/e2e/run-signaling.py', '--offline'],
                 check if shutil.which('node') else capped(NODE_IMAGE, check),
                 [sys.executable, 'tests/frontend/test_contract.py']]
     if args.browser:

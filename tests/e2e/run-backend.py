@@ -4,7 +4,7 @@
   python3 tests/e2e/run-backend.py --offline
 
 runs, in order:
-  1. tests/e2e/run-legacy.py --offline, the legacy signaling/security suite (26 checks), and
+  1. tests/e2e/run-signaling.py --offline, the signaling/security suite (26 checks), and
      tests/resume/check.py, the Conduit resume plan;
   2. the Talk checks on synthetic in-memory history;
   3. the same Talk checks plus plugin discovery/registration in a disposable HERMES_HOME under a
@@ -60,11 +60,11 @@ class Harness:
             os.environ["HERMES_HOME"] = str(self.home)
             from hermes_talk.history import NativeHistory
             self.history = NativeHistory(self.home)
-            self.talk = TalkRuntime(self.config, fx.BOT_TOKEN, self.history, clock=self.clock)
+            self.talk = TalkRuntime(self.config, fx.BOT_TOKEN, self.history, clock=self.clock, home=self.home)
         else:
             self.history = MemoryHistory()
-            self.talk = TalkRuntime(self.config, fx.BOT_TOKEN, self.history, skill=fx.file_skill(self.home),
-                                    clock=self.clock)
+            self.talk = TalkRuntime(self.config, fx.BOT_TOKEN, self.history, soul=fx.file_soul(self.home),
+                                    skill=fx.file_skill(self.home), clock=self.clock)
         self.app = server.VoiceApp(fx.BOT_TOKEN, {fx.USER_ID, fx.OTHER_USER_ID}, fx.ORIGIN, "/tg-voice/",
                                    resolve=self.fake.resolve, post=self.fake.post, clock=self.clock,
                                    talk=self.talk)
@@ -243,9 +243,13 @@ def session_composes_voice_persona_allowlisted_skills_and_opening(h):
     assert set(data) == {"sdp", "type", "voice_session_id", "conversation_id"} and data["type"] == "answer"
     assert data["sdp"] == fx.ANSWER and data["voice_session_id"].startswith("vs_")
     assert data["conversation_id"] == h.ok("bootstrap", {})["conversation_id"]
-    assert fx.SOUL_MARKER not in instructions and fx.SECRET_IN_SOUL not in instructions, "SOUL is not imported"
     persona = instructions.split("<hermes_persona>\n", 1)[1].split("\n</hermes_persona>", 1)[0]
-    assert "calm and friendly voice" in persona and len(persona) <= 1200, persona
+    assert fx.SOUL_MARKER in persona and fx.SOUL_VOICE_MARKER in persona, "the profile's SOUL identity is the persona"
+    assert fx.SOUL_WORK_MARKER not in instructions, "SOUL's operational sections stay out of the voice"
+    assert fx.SECRET_IN_SOUL not in instructions and "[redacted]" in persona, "SOUL secrets are redacted"
+    assert "calm and friendly voice" not in persona and len(persona) <= 1200, persona
+    assert 'Your name is "Synthetic Talk"' in instructions.split("## Persona", 1)[0], "the frame names the voice"
+    assert "never introduce yourself as ChatGPT" in instructions
     assert fx.SKILL_MARKER in instructions, "allowlisted skill included"
     assert fx.OTHER_SKILL_MARKER not in instructions, "non-allowlisted skill excluded"
     assert "nothing was executed" in instructions
@@ -711,12 +715,34 @@ def a_ukrainian_profile_opens_in_ukrainian_and_speaks_last_rule_last(h):
 
 
 @check
+def a_configured_opening_line_is_said_verbatim_then_the_language_rule_applies(h):
+    line = "Hey, Vsauce, Michael here"
+    lit = Harness(h.native, fx.config_data(voice={"language": "uk", "language_hint": "Speak Ukrainian unless the "
+                                                  "user switches language."},
+                                           greeting={"enabled": True, "text": "Greet the user in one short sentence.",
+                                                     "phrases": [line]}))
+    try:
+        for _ in range(2):  # a single configured line is said on every call, not swapped for the language default
+            _, instructions = lit.call()
+            head, opening = instructions.rsplit("\n\n", 1)
+            assert opening.startswith("## Greeting\nOpening policy: speak first.") and f'"{line}"' in opening, opening
+            assert "exactly as written" in opening and "without translating" in opening, opening
+            assert "in Ukrainian" not in opening and "Привіт" not in instructions and "Greet the user" not in opening
+            assert "after the configured opening line" in head.split("## Persona", 1)[0], "uk applies after it"
+            assert opening.endswith("This applies whatever the persona above says.")
+            assert 'Your name is "Synthetic Talk"' in head and "never introduce yourself as ChatGPT" in head
+    finally:
+        lit.close()
+
+
+@check
 def a_configured_voice_persona_replaces_the_default(h):
     custom = Harness(h.native, fx.config_data(persona={"text": "Synthetic voice persona: warm, dry humour."}))
     try:
         _, instructions = custom.call()
         persona = instructions.split("<hermes_persona>\n", 1)[1].split("\n</hermes_persona>", 1)[0]
         assert persona == "Synthetic voice persona: warm, dry humour.", persona
+        assert fx.SOUL_MARKER not in instructions, "a configured persona replaces the SOUL identity"
     finally:
         custom.close()
     assert parse_config(fx.config_data(context={"budgets": {"soul_chars": 4000}}), h.home), "retired key still loads"
@@ -726,6 +752,41 @@ def a_configured_voice_persona_replaces_the_default(h):
         except ConfigError:
             continue
         raise AssertionError(f"accepted bad config {bad}")
+
+
+@check
+def each_profile_speaks_its_own_soul_and_a_missing_soul_is_reported(h):
+    other = Harness(h.native, fx.config_data(profile={"id": "other", "display_name": "Other Talk"}))
+    bare = Harness(h.native)
+    long = Harness(h.native)
+    try:
+        (other.home / "SOUL.md").write_text("# Other\nSYNTHETIC-OTHER-SOUL. Dry and quick.\n")
+        (bare.home / "SOUL.md").unlink()
+        (long.home / "SOUL.md").write_text("# Long\n" + "SYNTHETIC-LONG-SOUL words. " * 200 + "\n## Voice\nloud\n")
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        server.logger.addHandler(handler)
+        server.logger.setLevel(logging.INFO)
+        try:
+            _, mine = h.call()
+            _, theirs = other.call()
+            _, none = bare.call()
+            _, clipped = long.call()
+        finally:
+            server.logger.removeHandler(handler)
+        persona = lambda text: text.split("<hermes_persona>\n", 1)[1].split("\n</hermes_persona>", 1)[0]
+        assert fx.SOUL_MARKER in persona(mine) and "SYNTHETIC-OTHER-SOUL" not in mine, "profile isolation"
+        assert "SYNTHETIC-OTHER-SOUL" in persona(theirs) and fx.SOUL_MARKER not in theirs, "profile isolation"
+        assert 'Your name is "Other Talk"' in theirs
+        assert "calm and friendly voice" in persona(none), "no SOUL: the short default, said so in the report"
+        assert persona(clipped).endswith("[clipped]") and len(persona(clipped)) <= 1200 and "loud" not in clipped
+        sources = re.findall(r'"persona_source": "(\w+)"', stream.getvalue())
+        assert sources == ["soul", "soul", "default", "soul"], stream.getvalue()
+        assert fx.SOUL_MARKER not in stream.getvalue() and "SYNTHETIC-OTHER-SOUL" not in stream.getvalue()
+    finally:
+        other.close()
+        bare.close()
+        long.close()
 
 
 @check
@@ -793,30 +854,16 @@ def store_failure_is_a_json_500_without_details(h):
 
 
 @check
-def configured_talk_serves_the_talk_ui_and_legacy_keeps_its_page(h):
+def configured_talk_serves_only_the_current_ui(h):
     for name in ("", "index.html", "app.js", "app.css"):
         status, headers, body = h.get("/tg-voice/" + name)
         assert status == 200 and body == (server.TALK_STATIC_DIR / (name or "index.html")).read_bytes(), name
         assert headers["Content-Security-Policy"] == server.CSP, headers
-    assert (server.STATIC_DIR / "index.html").read_bytes() != (server.TALK_STATIC_DIR / "index.html").read_bytes()
-    legacy = server.VoiceApp(fx.BOT_TOKEN, {fx.USER_ID}, fx.ORIGIN, resolve=h.fake.resolve, post=h.fake.post)
-    httpd = server.BoundedServer(("127.0.0.1", 0), server.make_handler(legacy))
-    threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    try:
-        for name in ("", "app.js", "app.css"):
-            conn = http.client.HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=15)
-            conn.request("GET", "/tg-voice/" + name)
-            resp = conn.getresponse()
-            assert resp.status == 200 and resp.read() == (server.STATIC_DIR / (name or "index.html")).read_bytes()
-            conn.close()
-        conn = http.client.HTTPConnection("127.0.0.1", httpd.server_address[1], timeout=15)
-        conn.request("POST", "/tg-voice/api/bootstrap", body=b"{}",
-                     headers={"Content-Type": "application/json", "Origin": fx.ORIGIN})
-        assert conn.getresponse().status == 404, "legacy mode keeps its single route"
-        conn.close()
-    finally:
-        httpd.shutdown()
-        httpd.server_close()
+    for path in ("legacy/app.js", "legacy/index.html", "static/app.js"):
+        assert h.get("/tg-voice/" + path)[0] == 404
+    env = {**os.environ, "TG_VOICE_BOT_TOKEN": fx.BOT_TOKEN, "TG_VOICE_ALLOWED_USER_IDS": str(fx.USER_ID)}
+    result = subprocess.run([sys.executable, str(ROOT / "server.py")], env=env, capture_output=True, text=True)
+    assert result.returncode == 2 and "--config is required" in result.stderr
 
 
 def plugin_registers_in_a_disposable_home():
@@ -1039,10 +1086,10 @@ def hermes_python():
 
 def run_offline():
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
-    legacy = subprocess.run([sys.executable, str(ROOT / "tests/e2e/run-legacy.py"), "--offline"], cwd=ROOT, env=env,
+    signaling = subprocess.run([sys.executable, str(ROOT / "tests/e2e/run-signaling.py"), "--offline"], cwd=ROOT, env=env,
                             capture_output=True, text=True, timeout=300)
-    print(legacy.stdout.strip().splitlines()[-1] if legacy.stdout.strip() else legacy.stderr[-400:])
-    legacy_ok = legacy.returncode == 0 and "26/26 offline checks passed" in legacy.stdout
+    print(signaling.stdout.strip().splitlines()[-1] if signaling.stdout.strip() else signaling.stderr[-400:])
+    signaling_ok = signaling.returncode == 0 and "26/26 offline checks passed" in signaling.stdout
     resume = subprocess.run([sys.executable, str(ROOT / "tests/resume/check.py")], cwd=ROOT, env=env,
                             capture_output=True, text=True, timeout=120)
     print(resume.stdout.strip().splitlines()[-2] if resume.returncode == 0
@@ -1062,7 +1109,7 @@ def run_offline():
             shutil.rmtree(scratch, ignore_errors=True)
         print(host.stdout.strip() or f"host run produced no output: {host.stderr[-800:]}")
         host_ok = host.returncode == 0
-    ok = legacy_ok and resume_ok and memory_failures == 0 and host_ok
+    ok = signaling_ok and resume_ok and memory_failures == 0 and host_ok
     print(("BACKEND OK" + ("" if runtime else " (host integration SKIPPED)")) if ok else "BACKEND FAILED")
     return 0 if ok else 1
 

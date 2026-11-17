@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Offline behavioral checks for the Pewds voice test server, plus the browser fixture run.
+"""Talk signaling/security gate. Synthetic inputs, no provider or credentials.
 
-  python3 tests/e2e/run-legacy.py --offline            security, signaling and static checks (no network, no credentials)
-  python3 tests/e2e/run-legacy.py --browser OUT_DIR    real Chromium against tests/legacy/fixture.py in a capped --network none container
+  python3 tests/e2e/run-signaling.py --offline
 """
 import argparse
 import hashlib
@@ -299,18 +298,14 @@ def static_page_is_public_and_minimal(h):
     status, headers, body = h.request("GET", "/tg-voice/")
     assert status == 200 and "frame-ancestors" in headers["Content-Security-Policy"]
     assert headers["X-Content-Type-Options"] == "nosniff"
-    html = body.decode()
-    assert re.findall(r"<button[^>]*>([^<]*)</button>", html) == ["Start", "Mute", "End"]
-    assert 'id="start"' in html and 'id="mute"' in html and "disabled" in html
-    for banned in ("transcript", "waveform", "history", "settings", "status", "<select", "<input", "<canvas"):
-        assert banned not in html.lower(), banned
-    js = (ROOT / "static/app.js").read_text().lower()
-    for banned in ("transcript", "localstorage", "sessionstorage", "console.", "innerhtml", "getstats"):
+    assert body == (ROOT / "static/talk/index.html").read_bytes()
+    js = (ROOT / "static/talk/app.js").read_text().lower()
+    for banned in ("initdataunsafe", "console.", "innerhtml", "bearer"):
         assert banned not in js, banned
     assert h.request("GET", "/tg-voice/app.js")[0] == 200
     assert h.request("GET", "/tg-voice")[0] == 308
     for path in ("/tg-voice/../server.py", "/tg-voice/%2e%2e/server.py", "/server.py", "/tg-voice/verify.py",
-                 "/tg-voice/static/app.js", "/"):
+                 "/tg-voice/static/app.js", "/tg-voice/legacy/app.js", "/"):
         assert h.request("GET", path)[0] == 404, path
     assert h.request("GET", "/tg-voice/api/session")[0] == 404
     assert h.request("POST", "/tg-voice/other", {})[0] == 404
@@ -426,7 +421,7 @@ def credentials_resolved_via_hermes_only(h):
     src = (ROOT / "server.py").read_text()
     assert "from hermes_cli.auth_codex import resolve_codex_runtime_credentials" in src
     assert "/v1/realtime/sessions" not in src and "api.openai.com/v1" not in src
-    js = (ROOT / "static/app.js").read_text()
+    js = (ROOT / "static/talk/app.js").read_text()
     assert "initDataUnsafe" not in js and "chatgpt.com" not in js and "Bearer" not in js
     assert server._jwt_account("x.eyJmb28iOjF9.y") == ""
 
@@ -447,28 +442,11 @@ def run_offline():
     return 1 if failures else 0
 
 
-def run_browser(out_dir):
-    out = Path(out_dir).resolve()
-    out.mkdir(parents=True, exist_ok=True)
-    cmd = ["docker", "run", "--rm", "--init", "--network", "none",
-           "--memory", "1g", "--memory-swap", "1g", "--cpus", "1", "--pids-limit", "384", "--shm-size", "256m",
-           "--user", f"{os.getuid()}:{os.getgid()}", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
-           "--tmpfs", "/tmp:rw,size=256m", "--env", "HOME=/tmp/home", "--env", "TMPDIR=/tmp",
-           "--env", "PYTHONDONTWRITEBYTECODE=1",
-           "--mount", f"type=bind,src={ROOT},dst=/src,readonly",
-           "--mount", f"type=bind,src={ROOT / 'tests/legacy/run.mjs'},dst=/app/job.mjs,readonly",
-           "--mount", f"type=bind,src={out},dst=/output",
-           "--entrypoint", "node", "django-admin-repl-verify-browser:pw1.63.0", "/app/job.mjs"]
-    return subprocess.run(cmd, timeout=300).returncode
-
-
 def main():
     parser = argparse.ArgumentParser()
-    mode = parser.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--offline", action="store_true")
-    mode.add_argument("--browser", metavar="OUT_DIR")
+    parser.add_argument("--offline", action="store_true", required=True)
     args = parser.parse_args()
-    return run_offline() if args.offline else run_browser(args.browser)
+    return run_offline()
 
 
 if __name__ == "__main__":

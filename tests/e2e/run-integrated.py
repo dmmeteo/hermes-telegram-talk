@@ -2,7 +2,7 @@
 """The canonical Hermes Telegram Talk gate for this checkout. Synthetic data only; no network, no provider calls.
 
   python3 tests/e2e/run-integrated.py --offline [--require-host]
-      tests/e2e/run-backend.py --offline: legacy signaling suite, Talk checks on in-memory history, and the same
+      tests/e2e/run-backend.py --offline: signaling/security suite, Talk checks on in-memory history, and the same
           checks plus plugin registration and `hermes talk serve` under a real Hermes runtime in disposable
           homes (see its docstring for how the runtime is found);
       tests/e2e/run-frontend.py --offline: frontend unit checks and the HTTP contract against this backend;
@@ -12,8 +12,7 @@
           Hermes runtime, so it always counts as a host stage).
       --require-host fails instead of skipping when no Hermes runtime is found.
   python3 tests/e2e/run-integrated.py --browser OUT_DIR
-      the legacy Chromium inventory (tests/e2e/run-legacy.py --browser) and the Talk Chromium inventory
-      (tests/e2e/run-frontend.py --browser), each in a capped network-less container.
+      the Talk Chromium inventory (tests/e2e/run-frontend.py --browser) in capped network-less containers.
 """
 import argparse
 import json
@@ -24,7 +23,7 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[2]
-COUNTS = {"legacy": r"(\d+)/(\d+) offline checks passed", "memory": r"(\d+)/(\d+) talk checks passed \[memory\]",
+COUNTS = {"signaling": r"(\d+)/(\d+) offline checks passed", "memory": r"(\d+)/(\d+) talk checks passed \[memory\]",
           "host": r"(\d+)/(\d+) talk checks passed \[host\]", "frontend": r"(\d+)/(\d+) Talk frontend checks passed",
           "http": r"Ran (\d+) tests?()", "pulse_memory": r"(\d+)/(\d+) pulse checks passed \[memory\]",
           "pulse_host": r"(\d+)/(\d+) pulse checks passed \[host\]",
@@ -68,7 +67,7 @@ def offline(require_host):
     ok = ok and code == 0 and "TALK_REPORTS_OK" in reports
     code, titles = stage("titles", [sys.executable, "tests/titles/run.py"])
     ok = ok and code == 0 and "TALK_TITLES_OK" in titles
-    counts = {**counted(backend, ("legacy", "memory", "host")), **counted(frontend, ("frontend", "http")),
+    counts = {**counted(backend, ("signaling", "memory", "host")), **counted(frontend, ("frontend", "http")),
               **counted(pulse, ("pulse_memory", "pulse_host")), **counted(engine, ("pulse_engine",))}
     if "host" not in counts or "pulse_host" not in counts:
         ok = ok and not require_host
@@ -79,15 +78,14 @@ def offline(require_host):
 
 def browser(out_dir):
     out = Path(out_dir).resolve()
-    legacy, _ = stage("legacy browser", [sys.executable, "tests/e2e/run-legacy.py", "--browser", str(out / "legacy")])
     talk, _ = stage("talk browser", [sys.executable, "tests/e2e/run-frontend.py", "--browser", str(out / "talk")])
     summaries = {}
-    for name in ("legacy", "talk"):
+    for name in ("talk",):
         log = out / name / "browser.log"
         lines = [json.loads(line) for line in log.read_text().splitlines() if line.strip()] if log.is_file() else []
         summaries[name] = next((line for line in reversed(lines) if line.get("step") == "summary"), None)
     print("summaries", json.dumps(summaries, sort_keys=True))
-    ok = legacy == 0 and talk == 0
+    ok = talk == 0
     print("TALK_INTEGRATED_BROWSER_" + ("OK" if ok else "FAILED"))
     return 0 if ok else 1
 

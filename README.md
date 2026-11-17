@@ -106,8 +106,11 @@ section ends with `[clipped]`.
 1. A fixed frame. It covers the profile name, the voice limits, and "nothing was executed" when
    asked to do work. It also says ending the call cancels nothing.
 2. The language rule: `voice.language` (`en` or `uk`), then `voice.language_hint` and `persona.self_reference`.
-3. The voice persona: `persona.text`, else a short default, inside Conduit's `<hermes_persona>` framing. Talk does
-   not read the profile's SOUL.
+3. The voice persona inside Conduit's `<hermes_persona>` framing: `persona.text` if set, else the identity of the
+   profile's own SOUL.md (its lead before the first `## ` section, plus its `## Voice` section when that fits, at
+   most 1200 characters, redacted; read per call through the core `load_soul_md` pinned to the profile home), else a
+   short default. The frame names the voice by `profile.display_name`. See
+   [ADR 0012](docs/adr/0012-voice-persona-from-soul-identity.md).
 4. Skills named in `context.skills`, read through `tools.skills_tool.skill_view`. These are guidance
    text only and register no tools. Skills not on the list are never read.
 5. The summary of the earlier conversation, inside a `<previous_conversation>` data block, when one serves.
@@ -120,9 +123,10 @@ section ends with `[clipped]`.
    visit. If more changed, the briefing says older updates were not read, rather than claiming it saw everything.
    When room allows, a short "Pulse updates" section tells the model to name updates by title and how to delegate
    feedback.
-7. The opening policy, last so no section above overrides it. With the greeting on, the model speaks first in the
-   configured language and says one line: one of `greeting.phrases` (chosen locally, never the account's previous
-   one), else the language's own line, else it follows `greeting.text`. It leaves updates for later. With the
+7. The opening policy, last so no section above overrides it. With the greeting on, the model speaks first and says
+   one line: one of `greeting.phrases` (chosen locally, never the account's previous one) exactly as written, in its
+   own language and untranslated, after which the language rule applies; else the language's own line; else it
+   follows `greeting.text`. It leaves updates for later. With the
    greeting off, it waits for the user to speak first.
 
 ### Fast start and in-call catch-up
@@ -481,7 +485,8 @@ See [talk.example.yaml](talk.example.yaml). It sets:
 
 Typical changes:
 - **Add a voice skill.** Put its name in `context.skills`.
-- **Change the persona.** Edit `persona.text` (up to 1200 characters). Talk does not read the profile's SOUL.
+- **Change the persona.** Edit the lead or `## Voice` section of the profile's SOUL.md (next call), or set
+  `persona.text` (up to 1200 characters) to replace it for Talk only.
 - **Change the language.** Set `voice.language`; the call opens and speaks in it.
 - **Change colors or the avatar.** Edit `appearance.*` or `profile.avatar`.
 - **Change budgets.** Edit `context.budgets.*`.
@@ -518,21 +523,20 @@ python3 tests/e2e/run-integrated.py --offline --require-host   # canonical gate:
 python3 tests/e2e/run-agent.py --require-hermes                 # voice tasks through the real Hermes agent (scripted model),
                                                          # Telegram reports (synthetic transport) and delivery faults
 python3 tests/e2e/run-agent.py --browser <out-dir>              # Chromium delegation job: real app.js, server and tasks
-python3 tests/e2e/run-integrated.py --browser <out-dir>        # legacy and Talk Chromium inventories, capped containers
+python3 tests/e2e/run-integrated.py --browser <out-dir>        # Talk Chromium inventories, capped containers
 python3 tests/e2e/run-frontend.py --mobile <out-dir>            # Chromium and actual WebKit: cold/warm assets, rotation, retry and native audio unlock
 python3 tests/e2e/run-backend.py --offline     # full backend gate (below)
 python3 tests/e2e/run-thread.py --offline --require-host  # chat input of the exact thread, reply voice, Shopy (real hook)
 python3 tests/e2e/run-pulse.py --offline       # Pulse per-item acceptance through the real routes, memory and SessionDB
 python3 tests/e2e/run-pulse-engine.py --offline  # Pulse engine parity: model selection, memory, follow-ups via ctx.llm (host runtime required)
-python3 tests/e2e/run-frontend.py --offline    # legacy 26 + frontend unit checks + HTTP contract on this backend
-python3 tests/e2e/run-legacy.py --offline             # legacy 26 signaling/security checks only
-python3 tests/e2e/run-legacy.py --browser <out-dir>   # legacy UI/lifecycle run in a capped --network none container
+python3 tests/e2e/run-frontend.py --offline    # signaling 26 + frontend unit checks + HTTP contract on this backend
+python3 tests/e2e/run-signaling.py --offline             # 26 signaling/security checks only
 python3 -m hermes_talk.fixtures         # synthetic Talk server for frontend work
 ```
 
 `tests/e2e/run-backend.py --offline` runs three stages:
 
-1. `tests/e2e/run-legacy.py --offline`. It must print `26/26`.
+1. `tests/e2e/run-signaling.py --offline`. It must print `26/26`.
 2. The Talk checks on synthetic history:
    - the frozen bootstrap shape with no private fields;
    - HMAC, bot, user, origin and field rejection on every route, with no state or upstream access;
@@ -579,7 +583,7 @@ the package's SVG avatar. All identities and text remain synthetic.
 | Native session continuity, new, idempotent events | yes | yes | yes (real SessionDB) | no | no |
 | Persona / skills / summary / initial_items / activity context | yes | yes | yes (host loaders) | no | no |
 | Plugin registration, `hermes talk serve` | yes | n/a | yes | in fixture (named disposable profile) | no |
-| Talk UI served in configured mode; legacy page without config | yes | yes | yes | in fixture | no |
+| Talk UI served in configured mode; missing config is rejected | yes | yes | yes | in fixture | no |
 | Frontend use of the v2 routes (Chromium, local WebRTC peers) | yes | yes | n/a | n/a | no |
 | `api/session` against real GPT-Live | yes | fake upstream | not exercised | no | no |
 | Voice tasks: native agent, tools, delivery, restart | yes (off by default) | n/a | yes (real `hermes chat`, scripted model) | in fixture (named disposable profile) | no |

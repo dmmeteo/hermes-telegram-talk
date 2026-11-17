@@ -42,7 +42,7 @@ def stand_in_event(text="", message_id=1, user_id=None, chat_id=None, chat_type=
 def stage_memory():
     import checks
     from hermes_talk.history import MemoryHistory
-    from hermes_talk.thread_inbox import take_event
+    from hermes_talk.thread.inbox import take_event
     results = checks.run(lambda home: MemoryHistory(), stand_in_event, lambda home, event: take_event(event, home),
                          print)
     return all(ok for _, ok, _ in results), len(results)

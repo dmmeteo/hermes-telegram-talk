@@ -2,7 +2,7 @@
 
 `large` is a task T3 admitted work from (on by default); `micro` is every other task (off by default). The profile's
 Talk config sets the defaults (receipts.large_work, receipts.micro_tasks); a task user changes their own switches
-with `/talk_notify` in their private chat with the bot (thread_gateway.py). The choice is stored per (profile, bot,
+with `/talk_notify` in their private chat with the bot (thread/gateway.py). The choice is stored per (profile, bot,
 user) in the profile's plugin data, which the gateway writes and the voice server reads.
 
 A switch decides only whether a task that has no status message yet gets one. A message that already exists keeps

@@ -133,7 +133,7 @@ class TalkConfig:
     voice_choices: tuple = ()  # ((id, label), ...) the user may pick for replies; the default voice is first
     language: "Language" = None
     language_hint: str = ""
-    persona_text: str = ""
+    persona_text: str = ""     # persona.text; empty means the profile's SOUL identity, else DEFAULT_PERSONA
     self_reference: str = ""   # "feminine" or "masculine": grammatical gender the voice uses for itself
     greeting_enabled: bool = True
     greeting: str = "Say a short hello."
@@ -375,7 +375,7 @@ def parse_config(data, base_dir):
         language=_language(voice.get("language")),
         language_hint=voice.get("language_hint", "") if isinstance(voice.get("language_hint", ""), str) else "",
         self_reference=_self_reference(persona),
-        persona_text=_text(persona["text"], "persona.text", PERSONA_CHARS) if "text" in persona else DEFAULT_PERSONA,
+        persona_text=_text(persona["text"], "persona.text", PERSONA_CHARS) if "text" in persona else "",
         greeting_enabled=bool(greeting.get("enabled", True)),
         greeting=_text(greeting.get("text", TalkConfig.greeting), "greeting.text", 400),
         greeting_phrases=_phrases(greeting.get("phrases", [])),

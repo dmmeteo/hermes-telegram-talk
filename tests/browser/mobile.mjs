@@ -58,9 +58,9 @@ try {
         const page = await context.newPage();
         page.on('pageerror', error => errors.push(String(error)));
         if (warm) {
-          await mode('legacy');
+          await mode('stale');
           await page.goto(`${origin}/tg-voice/`);
-          assert(await page.locator('#end').count() === 1, 'legacy page primed');
+          assert(await page.locator('#stale-fixture').count() === 1, 'synthetic stale cache primed');
           await page.goto('about:blank');
         }
         const before = (await state()).requests.length;
@@ -83,7 +83,7 @@ try {
         assert(geometry.error.includes('Microphone access denied') && geometry.gum === 1, 'visible permission error');
         assert(geometry.control.width >= 44 && geometry.control.y >= 0 && geometry.control.y + geometry.control.height <= height, 'retry visible inside viewport');
         if (warm) {
-          assert(!requests.some(path => path === '/tg-voice/app.js' || path === '/tg-voice/app.css'), 'old unversioned asset cache remains in use only for legacy');
+          assert(!requests.some(path => path === '/tg-voice/app.js' || path === '/tg-voice/app.css'), 'stale unversioned assets are not requested by the current page');
           assert(requests.some(path => path.startsWith('/tg-voice/app.js?')) && requests.some(path => path.startsWith('/tg-voice/app.css?')), 'upgrade fetched distinct current assets');
         }
         const retried = page.waitForResponse(response => response.url().endsWith('/api/bootstrap'));

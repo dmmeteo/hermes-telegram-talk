@@ -105,7 +105,7 @@ def start_talk_logging(stderr):
     os.environ.update(TG_VOICE_BOT_TOKEN=TOKEN, TG_VOICE_ALLOWED_USER_IDS=str(USER))
     sys.stderr, server.BoundedServer = stderr, stop
     try:
-        server.main(["--port", "0"])
+        server.main(["--port", "0", "--config", "/synthetic/talk.yaml"])
     except Stop:
         pass
     finally:

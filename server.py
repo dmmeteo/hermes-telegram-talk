@@ -24,7 +24,7 @@ from pathlib import Path
 
 from hermes_talk.avatar import BotAvatar, telegram_photo
 from hermes_talk.store import TalkError
-from hermes_talk.thread_inbox import launch_thread
+from hermes_talk.thread.inbox import launch_thread
 
 logger = logging.getLogger("tg-voice")
 
@@ -77,9 +77,7 @@ def log_readiness(value):
 AVATAR_TYPES = {".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
 MAX_CONNECTIONS = 32
 CALL_ID = re.compile(r"rtc_[A-Za-z0-9_-]+|[0-9a-fA-F-]{36}")
-STATIC_DIR = Path(__file__).resolve().parent / "static"
-# A configured Talk runtime serves the Talk UI; without one the original voice-test page stays.
-TALK_STATIC_DIR = STATIC_DIR / "talk"
+TALK_STATIC_DIR = Path(__file__).resolve().parent / "static/talk"
 STATIC_FILES = {"": ("index.html", "text/html; charset=utf-8"),
                 "index.html": ("index.html", "text/html; charset=utf-8"),
                 "app.js": ("app.js", "text/javascript; charset=utf-8"),
@@ -250,7 +248,7 @@ class VoiceApp:
         self.active = threading.BoundedSemaphore(MAX_ACTIVE_EXCHANGES)
         self.avatar_fetch = avatar_fetch
         self.talk_limiters = {route: MintLimiter(limit, MINT_WINDOW_S, clock) for route, limit in TALK_LIMITS.items()}
-        # Without a Talk runtime the server is the original voice test: one route, fixed persona.
+        # Signaling can be tested in isolation before a Talk runtime is attached.
         self.talk = self.avatar = None
         if talk is not None:
             self.attach(talk)
@@ -448,8 +446,7 @@ def make_handler(app):
                 self._json(404, {"error": "Not found."})
                 return
             filename, content_type = STATIC_FILES[name]
-            static_dir = TALK_STATIC_DIR if app.talk else STATIC_DIR
-            self._send(200, (static_dir / filename).read_bytes(), content_type, {
+            self._send(200, (TALK_STATIC_DIR / filename).read_bytes(), content_type, {
                 "Content-Security-Policy": CSP, "Cache-Control": "no-cache",
                 "Permissions-Policy": "microphone=(self), camera=(), geolocation=()"})
 
@@ -520,12 +517,12 @@ def allowed_ids_from(text):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Pewds Telegram voice test server")
+    parser = argparse.ArgumentParser(description="Hermes Telegram Talk server")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8791)
     parser.add_argument("--origin", default="https://her.dmmeteo.dev")
     parser.add_argument("--base-path", default="/tg-voice/")
-    parser.add_argument("--config", help="Hermes Telegram Talk YAML; without it the server stays the original voice test")
+    parser.add_argument("--config", help="Required Hermes Telegram Talk YAML")
     args = parser.parse_args(argv)
     token = os.environ.get("TG_VOICE_BOT_TOKEN", "").strip()
     if not token:
@@ -535,33 +532,34 @@ def main(argv=None):
         allowed = allowed_ids_from(os.environ.get("TG_VOICE_ALLOWED_USER_IDS"))
     except ValueError as exc:
         parser.error(str(exc))
+    if not args.config:
+        parser.error("--config is required for Hermes Telegram Talk")
     app = VoiceApp(token, allowed, args.origin, args.base_path)
     # Bound before any job or report recovery: a second server that cannot serve must not recover anything.
     server = BoundedServer((args.host, args.port), make_handler(app))
-    if args.config:
-        import fcntl
-        from hermes_talk.config import load_config
-        from hermes_talk.history import NativeHistory
-        from hermes_talk.talk import TalkRuntime
-        home = os.environ.get("HERMES_HOME", "").strip()
-        if not home:
-            parser.error("HERMES_HOME must name the profile Talk binds to")
-        config = load_config(args.config)
-        home_path = Path(home).resolve()
-        profile = home_path.name if home_path.parent.name == "profiles" else "default"
-        if profile != config.profile_id:
-            parser.error(f"profile.id in the Talk config must be {profile!r}, the HERMES_HOME profile")
-        lock_dir = home_path / "plugin-data" / "hermes-talk"
-        lock_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        serve_lock = open(lock_dir / "serve.lock", "a")
-        try:
-            fcntl.flock(serve_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            parser.error("another Talk server already serves this profile")
-        from hermes_talk.pulse import model as pulse_model
-        app.attach(TalkRuntime(config, token, NativeHistory(home), home=home_path))
-        # Plugin discovery (this plugin's ctx.llm) runs in the Pulse worker after start, never before serving.
-        app.talk.engine.start(loader=pulse_model.load_host)
+    import fcntl
+    from hermes_talk.config import load_config
+    from hermes_talk.history import NativeHistory
+    from hermes_talk.talk import TalkRuntime
+    home = os.environ.get("HERMES_HOME", "").strip()
+    if not home:
+        parser.error("HERMES_HOME must name the profile Talk binds to")
+    config = load_config(args.config)
+    home_path = Path(home).resolve()
+    profile = home_path.name if home_path.parent.name == "profiles" else "default"
+    if profile != config.profile_id:
+        parser.error(f"profile.id in the Talk config must be {profile!r}, the HERMES_HOME profile")
+    lock_dir = home_path / "plugin-data" / "hermes-talk"
+    lock_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    serve_lock = open(lock_dir / "serve.lock", "a")
+    try:
+        fcntl.flock(serve_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        parser.error("another Talk server already serves this profile")
+    from hermes_talk.pulse import model as pulse_model
+    app.attach(TalkRuntime(config, token, NativeHistory(home), home=home_path))
+    # Plugin discovery (this plugin's ctx.llm) runs in the Pulse worker after start, never before serving.
+    app.talk.engine.start(loader=pulse_model.load_host)
     logger.info("serving %s on %s:%s for %s", args.base_path, args.host, args.port, app.origin)
     try:
         server.serve_forever()

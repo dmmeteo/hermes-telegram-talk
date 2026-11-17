@@ -14,3 +14,4 @@
 - [0012 A configurable mini-task pool with independent dispatch](0012-configurable-mini-task-pool.md)
 - [0013 Task status titles name the admitted objective, retry until the host route answers, and never show the speech](0013-objective-task-titles.md)
 - [0014 Status messages use Talk's own Bot API client, not Hermes' sender internals](0014-status-message-bot-api-client.md)
+- [0012 The voice persona is the profile's SOUL identity, bounded](0012-voice-persona-from-soul-identity.md)

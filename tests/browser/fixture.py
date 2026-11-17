@@ -18,7 +18,7 @@ from hermes_talk import fixtures as f
 from hermes_talk.config import parse_config
 from hermes_talk.history import MemoryHistory
 from hermes_talk.talk import TalkRuntime
-from hermes_talk.thread_inbox import Thread
+from hermes_talk.thread.inbox import Thread
 
 offers, answers = queue.Queue(), {}
 provider_generation = 0

@@ -80,7 +80,7 @@ voice conversation, and no model turn is created. This amends ADR 0004 when impl
 | Today in this repo | Goes to |
 | --- | --- |
 | `server.py` routes, `talk.py`, `store.py`, `history.py`, `context.py`, `jobs.py`, `agent.py`, `gateway_rpc.py`, `activity.py`, `pulse*.py`, `spool.py`, `config.py` (core part) | core |
-| `server.py::verify_init_data`, `thread_gateway.py`, `thread_inbox.py`, `avatar.py`, `receipts.py` (`TelegramSender`), Telegram config keys | add-on |
+| `server.py::verify_init_data`, `thread/gateway.py`, `thread/inbox.py`, `avatar.py`, `receipts.py` (`TelegramSender`), Telegram config keys | add-on |
 | `static/talk/` | Shared client: the core serves it. The add-on selects the phone layout without the sidebar |
 
 From the TypeScript Full Duplex: the desktop look, device switch and replug recovery (FDD-B002) and the optional

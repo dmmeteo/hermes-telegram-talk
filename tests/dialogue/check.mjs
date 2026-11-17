@@ -40,7 +40,7 @@ function fixture({greeting = true, phase = 'ready'} = {}) {
         stream: {getAudioTracks: () => [track], getTracks: () => [track]},
         channel: {readyState: 'open', send: m => log.push({at: performance.now(), ...JSON.parse(m)}), close() {}},
         peer: {connectionState: 'connected', close() {}}, audio: {state: 'running', resume: async () => {}, close: async () => {}},
-        outputLevel: 0, inputLevel: 0};
+        outputLevel: 0, inputLevel: 0, meters: {you: SILENT, agent: SILENT, due: 0}};
     }
     const sent = [];
     const current = makeCall('vs_synthetic', sent);

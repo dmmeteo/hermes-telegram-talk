@@ -12,8 +12,8 @@ Errors use JSON {error:non_sensitive_actionable_message}, appropriate HTTP code,
 
 These notes are backend-owned and add no field. Changing or removing a field above needs a manager decision.
 
-- **Implemented routes.** All five routes above exist in Talk mode (`server.py --config ...` or `hermes talk serve`). Without `--config` the server stays the original voice test and serves only `POST api/session {initData,sdp} -> {sdp}`.
-- **Explicit compatibility.** In Talk mode, `api/session` also accepts a body without `conversation_id`. The backend then uses the account's current conversation, so the existing `static/app.js` keeps working until integration. The response still carries the full v2 shape. Any other extra field gets a 400.
+- **Implemented routes.** All five routes above exist in Talk mode (`server.py --config ...` or `hermes talk serve`). `--config` is required; the standalone voice test has been removed.
+- **Explicit compatibility.** In Talk mode, `api/session` also accepts a body without `conversation_id`. The backend then uses the account's current conversation, so existing session clients remain compatible. The response still carries the full v2 shape. Any other extra field gets a 400.
 - **Field rules.**
   - Bodies must contain exactly the listed keys.
   - `initData` must be signed, at most 1 h old, and from an allowlisted user before any state, credential or upstream access.

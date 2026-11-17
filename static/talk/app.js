@@ -28,6 +28,7 @@ const startButton = document.getElementById("start");
 const muteButton = document.getElementById("mute");
 const noticeBox = document.getElementById("notice");
 const noticeTitle = document.getElementById("notice-title");
+const noticeMessage = document.getElementById("notice-message");
 const errorBox = document.getElementById("error");
 const remoteAudio = document.getElementById("remote");
 const orb = document.getElementById("orb");
@@ -206,31 +207,36 @@ function render() {
       ? "speaking" : current.muted ? "muted" : current.inputLevel > .005 && micLive(current) ? "listening" : "silent";
   orb.dataset.state = state;
   // While muted, the text keeps saying so; the ring still turns orange for assistant output.
-  showStatus(state === "speaking" && current.muted ? "muted" : state);
+  const status = state === "speaking" && current.muted ? "muted" : state;
+  showStatus(status);
   if (endButton) endButton.disabled = !current;
   muteButton.setAttribute("aria-label", current?.muted ? "Unmute microphone" : "Mute microphone");
   muteButton.disabled = !current || current.phase !== "ready";
   muteButton.setAttribute("aria-pressed", String(Boolean(current?.muted)));
   muteButton.querySelector("span").textContent = current?.muted ? "Unmute" : "Mute";
-  const shown = notice(current);
+  const shown = notice(current, status);
   noticeBox.hidden = !shown;
   noticeBox.dataset.kind = shown?.kind ?? "";
   write(noticeTitle, shown?.title ?? "");
-  write(errorBox, shown?.message ?? "");
-  errorBox.hidden = !shown?.message;
+  // An error speaks through its alert. A prompt's message is the status line's text, which already speaks it.
+  const alertText = shown?.kind === "error" ? shown.message : "";
+  write(errorBox, alertText);
+  errorBox.hidden = !alertText;
+  write(noticeMessage, shown?.kind === "prompt" ? shown.message : "");
   write(startButton, shown?.action ?? "");
   startButton.hidden = !shown?.action;
   draw(current);
 }
 
 // The action names the branch start() takes in the same state, so the button keeps running the real action.
-function notice(current) {
+function notice(current, status) {
   const action = !current ? (errorText ? "Retry" : "Connect") : current.phase === "blocked" ? "Enable audio"
     : current.conversation?.saveFailed ? "Retry saving" : null;
   // Enabling audio clears the error text; a save that still failed keeps saying so next to its button.
   const message = action === "Retry saving" ? SAVE_FAILED : errorText;
   if (message) return {kind: "error", title: "Error", message, action};
-  return action ? {kind: "prompt", title: "", message, action} : null;
+  // A prompt says what the status line says, so a Retro 95 window can show it in place of the line.
+  return action ? {kind: "prompt", title: "Information", message: STATUS[status].label, action} : null;
 }
 
 // render() runs every frame; rewriting unchanged text would replace the node and could repeat the alert.

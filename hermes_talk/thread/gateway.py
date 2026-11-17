@@ -1,9 +1,9 @@
-"""The profile gateway's side of an exact-thread Talk call, beside the inbound hook in thread_inbox.py.
+"""The profile gateway's side of an exact-thread Talk call, beside the inbound hook in thread/inbox.py.
 
 `/talk` (a PTB CommandHandler wired through the public `register_telegram_handler`) answers in the very private
 chat and topic the command arrived in with a web_app button. Its URL is the voice server's published Mini App URL
 plus a fresh launch handle the inbox stores for (profile, bot, user, chat, topic); the voice server binds a call to
-that thread only through the handle (thread_inbox.launch_thread).
+that thread only through the handle (thread.inbox.launch_thread).
 
 `/talk_notify` shows a task user, in their private chat with the bot, the two switches that decide which voice tasks
 get a Telegram status message (notify.py), as inline buttons; a tap switches one for that user only.
@@ -23,8 +23,8 @@ import json
 import os
 import time
 
-from . import notify
-from .thread_inbox import ANALYSIS_CHARS, LOCK_WAIT_S, SESSION_STORE, Busy, Thread, ThreadInbox, _digest, _value
+from .. import notify
+from .inbox import ANALYSIS_CHARS, LOCK_WAIT_S, SESSION_STORE, Busy, Thread, ThreadInbox, _digest, _value
 
 NOT_PRIVATE = "Talk opens only in a private chat with this bot."
 NOTIFY_PRIVATE = "Task status settings open only in a private chat with this bot."

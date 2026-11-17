@@ -186,7 +186,7 @@ test('exhausted saving retries expose a usable retry without reopening media',as
 });
 const SAVE_FAILED='Conversation could not be saved. Tap Retry saving.';
 const shownNotice=f=>{const n=id=>f.run(`document.getElementById('${id}')`);return n('notice').hidden?null:{kind:n('notice').dataset.kind,title:n('notice-title').textContent,
- message:n('error').hidden?'':n('error').textContent,action:n('start').hidden?null:n('start').textContent};};
+ message:n('error').hidden?n('notice-message').textContent:n('error').textContent,action:n('start').hidden?null:n('start').textContent};};
 test('a repeated failure rewrites the alert text so it is announced again, while frames leave it alone',()=>{
  const f=fixture();
  f.run(`current.phase='ready';showError();const box=document.getElementById('error');let text='';globalThis.writes=[];
@@ -211,7 +211,7 @@ test('the notice follows the call phase, the save state and the error text, and 
  assert.equal(f.run('owner.pending.length'),0);assert.equal(f.run('call===current'),true,'saving again keeps the call');
  assert.equal(shownNotice(f),null,'the notice clears once the conversation is saved');
  f.run(`current.phase='blocked';render();`);
- assert.deepEqual(shownNotice(f),{kind:'prompt',title:'',message:'',action:'Enable audio'},'blocked audio is a prompt');
+ assert.deepEqual(shownNotice(f),{kind:'prompt',title:'Information',message:'Audio and microphone paused.',action:'Enable audio'},'blocked audio is a prompt');
  f.run(`current.phase='ready';render();`);assert.equal(shownNotice(f),null,'the prompt clears with audio');
  f.run(`showError('That voice is not available.')`);
  assert.deepEqual(shownNotice(f),{kind:'error',title:'Error',message:'That voice is not available.',action:null},'an error during a call adds no button');
@@ -219,7 +219,25 @@ test('the notice follows the call phase, the save state and the error text, and 
  f.run(`stop('Connection lost. Tap Retry to reconnect.')`);
  assert.deepEqual(shownNotice(f),{kind:'error',title:'Error',message:'Connection lost. Tap Retry to reconnect.',action:'Retry'},'a stopped call with an error offers Retry');
  f.run('stop()');
- assert.deepEqual(shownNotice(f),{kind:'prompt',title:'',message:'',action:'Connect'},'a stopped call without an error offers Connect');
+ assert.deepEqual(shownNotice(f),{kind:'prompt',title:'Information',message:'Call stopped.',action:'Connect'},'a stopped call without an error offers Connect');
+});
+test('a prompt window repeats the status line silently; an error speaks only through its alert',()=>{
+ const f=fixture();const text=id=>f.run(`document.getElementById('${id}').textContent`);
+ for(const [enter,action,said] of [[`showError();current.phase='blocked';render();`,'Enable audio','Audio and microphone paused.'],['stop()','Connect','Call stopped.']]){
+  f.run(enter);
+  assert.equal(text('start'),action);
+  assert.equal(f.nodes.get('notice').dataset.kind,'prompt');
+  assert.equal(text('notice-message'),said,`the ${action} window carries the message`);
+  assert.equal(text('call-status'),said,`the status line still says it, so its role="status" stays truthful (${action})`);
+  assert.equal(f.nodes.get('error').hidden,true,`a prompt raises no alert (${action})`);assert.equal(text('error'),'');
+ }
+ f.run(`stop('Connection lost. Tap Retry to reconnect.')`);
+ assert.equal(text('error'),'Connection lost. Tap Retry to reconnect.');assert.equal(f.nodes.get('error').hidden,false);
+ assert.equal(text('notice-message'),'','an error has no silent copy');
+ assert.notEqual(text('call-status'),text('error'),'the status line says something else beside an error');
+ const html=readFileSync('static/talk/index.html','utf8');
+ assert.match(html,/<p id="notice-message" aria-hidden="true">/,'the window copy of the status text is hidden from assistive tech');
+ assert.match(html,/<p id="call-status" role="status">/);assert.match(html,/<p id="error" role="alert" hidden>/);
 });
 test('a save that failed while audio was blocked stays an error after Enable audio',async()=>{
  const f=fixture();

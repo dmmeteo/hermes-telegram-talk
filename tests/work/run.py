@@ -29,7 +29,8 @@ sys.path.insert(0, str(ROOT))
 
 import server  # noqa: E402
 from hermes_talk import fixtures as fx  # noqa: E402
-from hermes_talk import jobs, notify, thread_gateway, work  # noqa: E402
+from hermes_talk import jobs, notify, work
+from hermes_talk.thread import gateway as thread_gateway  # noqa: E402
 from hermes_talk.agent import NativeAgent, Readiness  # noqa: E402
 from hermes_talk.config import ConfigError, load_config  # noqa: E402
 from hermes_talk.history import MemoryHistory  # noqa: E402

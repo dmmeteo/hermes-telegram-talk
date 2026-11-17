@@ -20,6 +20,8 @@ USER_ID = 1001
 OTHER_USER_ID = 1002
 ORIGIN = "https://her.dmmeteo.dev"
 SOUL_MARKER = "SYNTHETIC-SOUL-MARKER"
+SOUL_VOICE_MARKER = "SYNTHETIC-SOUL-VOICE"
+SOUL_WORK_MARKER = "SYNTHETIC-SOUL-OPERATIONS"
 SKILL_MARKER = "SYNTHETIC-SKILL-TALK-BRIEF"
 OTHER_SKILL_MARKER = "SYNTHETIC-SKILL-NOT-ALLOWED"
 # Assembled at import so plugin install scanners do not take this synthetic value for a leaked key.
@@ -43,7 +45,9 @@ def write_home(home):
     home = Path(home)
     home.mkdir(parents=True, exist_ok=True)
     (home / "SOUL.md").write_text(f"# Synthetic persona\n{SOUL_MARKER}. Calm and brief. "
-                                  f"Example key {SECRET_IN_SOUL} must never be spoken.\n")
+                                  f"Example key {SECRET_IN_SOUL} must never be spoken.\n\n"
+                                  f"## Working rules\n{SOUL_WORK_MARKER}: run the deploy checklist.\n\n"
+                                  f"## Voice\n{SOUL_VOICE_MARKER}: curious and precise.\n")
     for name, marker in (("talk-brief", SKILL_MARKER), ("not-allowed", OTHER_SKILL_MARKER)):
         folder = home / "skills" / "voice" / name
         folder.mkdir(parents=True, exist_ok=True)
@@ -53,7 +57,8 @@ def write_home(home):
 
 
 def file_soul(home):
-    return lambda: (Path(home) / "SOUL.md").read_text()
+    path = Path(home) / "SOUL.md"
+    return lambda: path.read_text() if path.is_file() else ""
 
 
 def file_skill(home):

@@ -1,8 +1,7 @@
 # Agents
 
 Hermes Telegram Talk PoC v2. Keep it small: `plugin.yaml`, `__init__.py`, `server.py`, `hermes_talk/`, `static/`,
-`tests/` (all verification: `tests/e2e/run-*.py` entry points, `tests/legacy/` browser harness for the original
-voice test), `docs/adr/` (indexed decisions), `LICENSE` (both Conduit MIT notices), `talk.example.yaml`.
+`tests/` (all verification: `tests/e2e/run-*.py` entry points, signaling security and the current Talk browser harness), `docs/adr/` (indexed decisions), `LICENSE` (both Conduit MIT notices), `talk.example.yaml`.
 `static/`, `tests/frontend/`, `tests/browser/` and `DESIGN.md` belong to the frontend owner.
 
 Boundaries:
@@ -17,7 +16,7 @@ Boundaries:
 - Keep the Conduit-derived code under its MIT notice (`LICENSE`).
 
 Before committing: `python3 tests/e2e/run-integrated.py --offline --require-host` must print
-`TALK_INTEGRATED_OFFLINE_OK`. It includes `tests/e2e/run-backend.py --offline` (`BACKEND OK`, with `tests/e2e/run-legacy.py --offline`
+`TALK_INTEGRATED_OFFLINE_OK`. It includes `tests/e2e/run-backend.py --offline` (`BACKEND OK`, with `tests/e2e/run-signaling.py --offline`
 at `26/26`), `tests/e2e/run-frontend.py --offline`, `tests/e2e/run-pulse.py --offline` (`TALK_PULSE_OK`, memory and host),
 `tests/e2e/run-pulse-engine.py --offline` (`TALK_PULSE_ENGINE_PARITY_OK`; TMPDIR must not be under `~/.hermes/profiles/`) and
 `tests/logsecrets/run.py` (`TALK_LOG_SECRETS_OK`: no bot token in logs or stored errors), `tests/reports/run.py`
@@ -43,5 +42,5 @@ either `hermes chat` single-query processes or (manager-authorized 2026-11-03, f
 `session.interrupt`, finite single-query turns under the profile's own `approvals.single_query_mode`; never
 `unattended`, which on current cores is the `hermes -z` auto-approve contract). Never bypass the gateway, copy core internals, add an
 approval path or UI, use `--yolo`, change profile policy or run an in-process agent. For UI or lifecycle changes, also run
-`python3 tests/e2e/run-integrated.py --browser <out-dir>` (legacy and Talk Chromium, capped containers) and never weaken
+`python3 tests/e2e/run-integrated.py --browser <out-dir>` (Talk Chromium, capped containers) and never weaken
 its assertions.
