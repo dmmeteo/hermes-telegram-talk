@@ -30,7 +30,7 @@ main { max-width: 760px; height: 100svh; height: 100dvh; margin: auto; padding: 
 #error { color: var(--danger); text-align: center; font-size: 14px; max-width: 360px; margin: 0; }
 /* No box of its own, so the error line and the button stay items of .actions. */
 #notice { display: contents; }
-.notice-title, .notice-symbol { display: none; }
+.notice-title, .notice-symbol, #notice-message { display: none; }
 .control-row { position: relative; width: 100%; display: grid; grid-template-columns: 1fr 120px 1fr; align-items: center; justify-items: center; }
 .presence { display: flex; flex-direction: column; align-items: center; min-width: 0; max-width: 100%; }
 h2 { max-width: 100%; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin: -6px 0 0; font-size: 14px; font-weight: 500; }
@@ -102,12 +102,14 @@ button:disabled { opacity: .45; cursor: default; }
 [data-theme="typesafe"] #ring { display: none; }
 [data-theme="typesafe"] .portrait { inset: 0; border-radius: 0; }
 [data-theme="typesafe"] .meter { display: block; position: absolute; top: 0; width: 8px; height: 100%; box-shadow: -1px -1px #5a5d56, 1px 1px #fff, 0 0 0 2px #272d26; }
-[data-theme="typesafe"] #meter-you { right: calc(100% + 7px); }
-[data-theme="typesafe"] #meter-agent { left: calc(100% + 7px); }
+[data-theme="typesafe"] #meter-you { left: calc(100% + 7px); }
+[data-theme="typesafe"] #meter-agent { right: calc(100% + 7px); }
 [data-theme="typesafe"] button, [data-theme="typesafe"] #menu-toggle, [data-theme="typesafe"] #mute { border-radius: 0; box-shadow: var(--raised); }
 [data-theme="typesafe"] button:hover:enabled { filter: brightness(1.06); }
 [data-theme="typesafe"] button:active:enabled, [data-theme="typesafe"] #menu-toggle[aria-expanded="true"], [data-theme="typesafe"] #mute[aria-pressed="true"] { transform: none; box-shadow: var(--inset); }
-[data-theme="typesafe"] #start, [data-theme="typesafe"] #reconnect { border-color: #222; }
+/* A window's action is a Windows 95 default button: the grey bevel inside a heavy dark outline. Pink is only the focus ring. */
+[data-theme="typesafe"] #start, [data-theme="typesafe"] #reconnect { background: var(--surface); color: var(--ink); border-color: #171b18; box-shadow: 0 0 0 1px #171b18, var(--raised); }
+[data-theme="typesafe"] #start:active:enabled, [data-theme="typesafe"] #reconnect:active:enabled { box-shadow: 0 0 0 1px #171b18, var(--inset); }
 [data-theme="typesafe"] #call-menu { padding-top: 3px; border: 1px solid #222; border-radius: 0; box-shadow: var(--raised), 4px 4px #171b18; }
 [data-theme="typesafe"] .menu-heading { margin: 0 -13px; padding-left: 12px; background: #171b18; color: #fff; box-shadow: inset 1px 1px #fff; }
 [data-theme="typesafe"] .menu-heading h3 { font-weight: 500; }
@@ -118,12 +120,14 @@ button:disabled { opacity: .45; cursor: default; }
 [data-theme="typesafe"] .theme-options input { accent-color: #9d264b; }
 [data-theme="typesafe"] .menu-footer { border-top-color: #7d8477; box-shadow: inset 0 1px #fff; }
 [data-theme="typesafe"] #end { font-weight: 650; }
-/* An error is a window framed like Call settings; a prompt has no message, so it stays its raised button alone. */
-[data-theme="typesafe"] #notice[data-kind="error"] { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 12px; width: min(360px, 100%); padding: 3px 3px 14px; color: var(--ink); background: var(--surface); border: 1px solid #222; box-shadow: var(--raised), 4px 4px #171b18; }
-[data-theme="typesafe"] #notice[data-kind="error"] .notice-title { display: block; grid-column: 1 / -1; margin: 0; padding: 3px 9px; background: #171b18; color: #fff; box-shadow: inset 1px 1px #fff; font-size: 14px; font-weight: 500; line-height: 1.4; }
-[data-theme="typesafe"] #notice[data-kind="error"] .notice-symbol { display: block; width: 32px; height: 32px; margin-left: 13px; }
-[data-theme="typesafe"] #notice[data-kind="error"] #error { max-width: none; margin-right: 13px; color: var(--ink); text-align: left; }
-[data-theme="typesafe"] #notice[data-kind="error"] #start { grid-column: 1 / -1; justify-self: center; }
+/* Every notice is a window framed like Call settings, with the error symbol or, for a prompt, the information symbol.
+   A prompt's message is the status line's text, so the line steps out of sight and still speaks it. */
+[data-theme="typesafe"] #notice { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 12px; width: min(360px, 100%); padding: 3px 3px 14px; color: var(--ink); background: var(--surface); border: 1px solid #222; box-shadow: var(--raised), 4px 4px #171b18; }
+[data-theme="typesafe"] #notice .notice-title { display: block; grid-column: 1 / -1; margin: 0; padding: 3px 9px; background: #171b18; color: #fff; box-shadow: inset 1px 1px #fff; font-size: 14px; font-weight: 500; line-height: 1.4; }
+[data-theme="typesafe"] #notice[data-kind="error"] .notice-symbol[data-kind="error"], [data-theme="typesafe"] #notice[data-kind="prompt"] .notice-symbol[data-kind="prompt"] { display: block; width: 32px; height: 32px; margin-left: 13px; }
+[data-theme="typesafe"] #notice #error, [data-theme="typesafe"] #notice[data-kind="prompt"] #notice-message { display: block; max-width: none; margin: 0 13px 0 0; color: var(--ink); font-size: 14px; text-align: left; }
+[data-theme="typesafe"] #notice #start { grid-column: 1 / -1; justify-self: center; }
+[data-theme="typesafe"] .actions:has(> #notice[data-kind="prompt"]) > #call-status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
 @media (max-height: 500px) {
   main { gap: 4px; padding-top: max(6px, env(safe-area-inset-top)); padding-bottom: max(6px, env(safe-area-inset-bottom)); }
@@ -133,8 +137,8 @@ button:disabled { opacity: .45; cursor: default; }
   #call-menu { bottom: calc(100% + 4px); width: min(600px, 100%); grid-template-columns: 1fr 1fr; align-items: start; max-height: calc(100dvh - 112px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)); padding-bottom: 12px; gap: 10px 16px; }
   [data-theme="typesafe"] #call-menu { padding-top: 3px; }
   .menu-footer { padding-top: 10px; }
-  [data-theme="typesafe"] #notice[data-kind="error"] { width: min(600px, 100%); grid-template-columns: auto minmax(0, 1fr) auto; row-gap: 8px; padding-bottom: 8px; }
-  [data-theme="typesafe"] #notice[data-kind="error"] #error { margin-right: 0; }
-  [data-theme="typesafe"] #notice[data-kind="error"] #start { grid-column: auto; margin-right: 13px; }
+  [data-theme="typesafe"] #notice { width: min(600px, 100%); grid-template-columns: auto minmax(0, 1fr) auto; row-gap: 8px; padding-bottom: 8px; }
+  [data-theme="typesafe"] #notice #error, [data-theme="typesafe"] #notice[data-kind="prompt"] #notice-message { margin-right: 0; }
+  [data-theme="typesafe"] #notice #start { grid-column: auto; margin-right: 13px; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
