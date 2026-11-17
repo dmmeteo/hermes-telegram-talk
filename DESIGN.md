@@ -90,3 +90,7 @@ The frontend slice's [task report](/home/me/.hermes/run/coding/prime-tgv2-front-
 The user-provided phone screenshot was inspected. Its oversized avatar, repeated heading and always-visible selector are deliberately replaced by the requested dialogue-first hierarchy. The system font and restrained circular ring remain; the palette now comes from the two Full Duplex themes. See [ADR 0005](docs/adr/0005-compact-talk-media-and-avatar.md) for media, catalogue and avatar ownership.
 
 The separate `tests/compact/run.py OUT` gate exercises both synthetic profiles, actual outbound WebRTC receiver energy, mute and reconnect, blocked output, long-dialogue geometry, reading position, menu, End call and an unlinked launch that shows no note. The canonical mobile gate continues to exercise Chromium and WebKit. Exact final revision screenshot paths and review dispositions are recorded in the delivery report under `/home/me/.hermes/profiles/prime/run/coding/prime-talk-compact-qa-1107/report.md`.
+
+The static tree has one current UI, `static/talk/{index.html,app.js,app.css}`. Retired bundles and browser fixtures
+are not runtime assets. `tests/release/check.py` checks the physical tree against `server.STATIC_FILES`; the release
+builder exports committed main into a fresh directory so files from an older checkout cannot survive an overlay.

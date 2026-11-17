@@ -361,10 +361,12 @@ when the task is accepted, and then edited at each real transition. It never car
 transcript, the prompt or a tool log, and secret-shaped text is redacted. The full result stays in the task's native
 Hermes session and reaches the user by voice.
 
-The title is one short English sentence naming the task's objective. It is the voice model's last-line `TITLE:` when
-that line is usable (the call instructions ask for one in English; a `TITLE:` line inside the task stays the user's
-text), or the request itself when the request is already a short plain English sentence. Otherwise the plugin's own
-host model (`ctx.llm`, the Pulse route, no override) names it. It is given the work the task's turn admitted to T3
+The title is a short English summary of the task's objective or topic. A usable voice-model last-line `TITLE:`
+is final (a `TITLE:` line inside the task stays the user's text). A large task may also use its short plain English
+request. Other untitled tasks use the plugin's own host model (`ctx.llm`, the Pulse route, no override).
+Mini-tasks always need a summary, even for short English requests. Questions and explanations get topic titles.
+A completed mini-task result supplies bounded, redacted context while naming is pending.
+The host receives the work the task's turn admitted to T3
 (the `t3_control` start's title and message, or a send's message, never a reused thread's old title, as the hook
 recorded them) and the redacted request, which is a speech transcript and often opens with filler. The first attempt
 runs before the only send. If it gives nothing usable (for example, the route is not bound yet after a Talk start),
@@ -411,8 +413,14 @@ and other sessions record nothing. The large task's turn then holds no slot. Whe
 running and Talk follows the thread through the profile's own `t3_control` handler until T3 shows the run completed
 (the result is the thread's newest message when it is the assistant's), failed, interrupted, or stopped after a cancel.
 When T3 no longer shows how the run ended (a later run of the thread started first, only `idle`, or the thread is
-gone), the task ends as unknown (❔, no result), never as completed. A blocked thread stays open. A
-restart keeps following; nothing is relaunched or resent. The voice model handles existing tasks with control lines
+gone), the task ends as unknown (❔, no result), never as completed. The same holds once Talk has spent 30 minutes
+failing to read T3: only time between failed reads counts (a pause such as Talk being down adds at most 2 minutes),
+and any good read starts the count again. A blocked thread stays open. A restart keeps following; nothing is relaunched or resent. When Hermes
+stops waiting for a running start or send (a cancel, the run budget, the live-turn bound, or its own tool deadline),
+it reports that call to the same hook as `cancelled` or `timeout` and drops T3's real answer. T3 may then hold work
+that no read can tell from another run: the task settles from its turn and says so ("T3 may run that work unseen by
+Talk"); that work is never followed and never given a result. A process killed outright during the call reports
+nothing, so such a task settles from its turn without the note. The voice model handles existing tasks with control lines
 (`CONTROL: list`, `CONTROL: status N`, `CONTROL: result N`, `CONTROL: cancel N`), answered at once from server state and
 never queued. See `docs/adr/0011-t3-work-and-task-visibility.md`.
 
@@ -627,3 +635,12 @@ mechanisms of Conduit notifier's Pulse at d25391f6382211dc22e90672c02ea2709112e3
 b7fd1cc81bf72c6ef8c35a87cd6b15a135fabd5c (both MIT; `LICENSE`,
 `LICENSE`). `pulse/memory.py`, `pulse/select.py` and `pulse/followup.py` port the notifier's
 prompts and decision rules (adapted, under that notice); the rest is written for Talk.
+
+### Release from main
+
+Build the installed-plugin artifact with `python3 tests/release/package.py --output <new-directory>`.
+The command always exports committed `main`, regardless of the checked-out branch or dirty working files.
+The artifact contains only the plugin runtime, current static assets, LICENSE and a source/hash receipt.
+Use that artifact as the complete deployment input under the shared rollout lock and idle-call activation fence.
+Do not overlay files from feature worktrees onto an installed plugin. The frontend gate rejects legacy or orphaned
+files in `static/` against the assets the server serves. Preserve configuration and plugin data outside the artifact.

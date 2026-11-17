@@ -16,6 +16,7 @@ Script, keyed on the newest user message:
   "big <n>"       -> a result of about <n> characters between BIG-START and BIG-END markers
   "t3start <name>" / "t3read <name>" -> a t3_control start of thread th-<name> / a read of it
   "t3goal <name> ..." -> a t3_control start of thread th-<name> with T3_GOALS[name] (its title and message)
+  "t3hang <name>" -> a t3_control start of thread th-hang-<name> that T3 accepts but answers only much later
   "t3status" / "skill <name>" -> a t3_control status call / a skill_view of <name>
 A tool the request does not offer directly but that sits behind Hermes' Tool Search bridge is called via tool_call.
   anything else   -> "SCRIPTED-ANSWER: <request>"
@@ -52,7 +53,10 @@ def is_title_request(messages):
     return isinstance(first, str) and first.startswith("You name chat sessions")
 
 
-TASK_TITLES = {"перевір синтетичну збірку": "Check the synthetic build",
+TASK_TITLES = {"slow 90": "Wait for synthetic timer.",
+               "secret check": "Check synthetic secret handling.",
+               "Well okay about exports": "Explain synthetic exports.",
+               "перевір синтетичну збірку": "Check the synthetic build",
                "SYN-MUTE": "Remove the mute indicator from the assistant avatar."}
 T3_GOALS = {"mute": {"title": "Avatar mute indicator",
                      "message": "Remove the mute indicator from the assistant avatar in the Talk Mini App. [SYN-MUTE]"}}
@@ -95,10 +99,10 @@ def plan(messages):
         return ("tool", "t3_control", {"action": "status"})
     if word == "skill" and rest:
         return ("tool", "skill_view", {"name": rest.strip()})
-    if word in ("t3start", "t3read") and rest:
-        name = rest.strip()
+    if word in ("t3start", "t3read", "t3hang") and rest:
+        name = ("hang-" if word == "t3hang" else "") + rest.strip()
         call = {"action": "start", "cwd": "/synthetic", "message": name, "request_id": f"req-start-{name}"} \
-            if word == "t3start" else {"action": "read", "thread_id": f"th-{name}"}
+            if word != "t3read" else {"action": "read", "thread_id": f"th-{name}"}
         return ("tool", "t3_control", call)
     if word == "t3goal" and rest.split()[0] in T3_GOALS:
         name = rest.split()[0]

@@ -51,7 +51,8 @@ def main():
             return 1
     env = {**os.environ, 'TALK_BACKEND_SOURCE': str(backend), 'PYTHONDONTWRITEBYTECODE': '1'}
     check = ['node', 'tests/frontend/check.mjs']
-    commands = [[sys.executable, 'tests/e2e/run-signaling.py', '--offline'],
+    commands = [[sys.executable, 'tests/release/check.py'],
+                [sys.executable, 'tests/e2e/run-signaling.py', '--offline'],
                 check if shutil.which('node') else capped(NODE_IMAGE, check),
                 [sys.executable, 'tests/frontend/test_contract.py']]
     if args.browser:

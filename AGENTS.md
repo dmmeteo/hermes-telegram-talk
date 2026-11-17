@@ -44,3 +44,13 @@ either `hermes chat` single-query processes or (manager-authorized 2026-11-03, f
 approval path or UI, use `--yolo`, change profile policy or run an in-process agent. For UI or lifecycle changes, also run
 `python3 tests/e2e/run-integrated.py --browser <out-dir>` (Talk Chromium, capped containers) and never weaken
 its assertions.
+
+## Release invariants
+
+| Rule | Enforcement |
+|---|---|
+| `static/` contains only the current Talk assets served by `server.STATIC_FILES`. | `tests/release/check.py`, included in every frontend/offline integrated gate. |
+| Installed releases come from committed `main`, never a worker checkout or a directory overlay. | `python3 tests/release/package.py --output <new-directory>` exports only main and validates the asset inventory. |
+
+Do not restore retired legacy UI or copy scratch/test artifacts into `static/`. Tests and evidence belong under
+`tests/` and the task output directory. Preserve other worktrees' dirty work before consolidating or retiring them.

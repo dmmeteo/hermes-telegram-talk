@@ -133,7 +133,9 @@ def titles():
     assert usable("Перевірити збірку") == usable("") == usable(None) == ""
     fallback = receipts.job_title
     assert fallback(job(title="Check build"), str) == ("Check build", True)
-    assert fallback(job(request="check the synthetic build"), str) == ("check the synthetic build", True)
+    assert fallback(job(request="check the synthetic build"), str) == ("Hermes task 1", False)
+    assert fallback(replace(job(request="check the synthetic build"), links=(work.Link(
+        key="english", thread_id="th-english", via="start", confirmed=True),)), str) == ("check the synthetic build", True)
     assert fallback(job(number=4, request="перевір збірку"), str) == ("Hermes task 4", False), \
         "until the host model names it, another language shows the task number, never the speech"
     filler = "Okay, okay, so, um, now about that thing, you know, the avatar should not show the mute badge any more"
@@ -192,7 +194,7 @@ def other_language_named_in_english():
     asked = len(host.asked)
     for english in (job(number=6, request="check the synthetic build"), job(number=7, request="перевір", title="Check it")):
         walk(desk, english, jobs.ACCEPTED)
-    assert len(host.asked) == asked, "an English request or a voice TITLE needs no model"
+    assert len(host.asked) == asked + 1, "an untitled English mini-task is summarized; a voice TITLE needs no model"
     secret = "sk-" + "s" * 24
     redact = lambda t: t.replace(secret, "[redacted]")
     cases = {"outage": TimeoutError("synthetic outage"), "not English": {"title": "Перевірити збірку"},
@@ -268,6 +270,46 @@ def every_status_survives_naming():
     assert [c["text"][0] for c in sender.calls] == ["🕓", "⏳", "✅"], sender.calls
     return {"shown_after_naming": ["queued, running, completed", "queued, cancelled", "queued, running, failed"],
             "status_during_first_send": "queued, running, completed"}
+
+
+def transition_after_naming_before_send():
+    history, sender, host = MemoryHistory(), ScriptedSender(), HostModel()
+    desk = desk_for(history, sender, namer=namer(host))
+    j = job(number=31, request="перевір синтетичну збірку")
+    named = desk._named
+
+    def advance(job_id, title, why):
+        named(job_id, title, why)
+        # The worker has named the title but has not claimed its first send yet.
+        running = j.to(jobs.RUNNING)
+        desk.follow(running)
+        desk.follow(running.to(jobs.SUCCEEDED))
+
+    desk._named = advance
+    desk.follow(j)
+    settle(desk, j.id)
+    assert [c["text"] for c in sender.calls] == ["🕓 Check the synthetic build", "⏳ Check the synthetic build",
+                                                "✅ Check the synthetic build"], sender.calls
+    assert sender.kinds() == ["send", "edit", "edit"] and len(host.asked) == 1
+
+    history, sender, host = MemoryHistory(), ScriptedSender(), HostModel()
+    sender.gate = threading.Event()
+    desk = desk_for(history, sender, namer=namer(host))
+    desk.follow(j)
+    deadline = time.monotonic() + 5
+    while not sender.calls and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert sender.calls, "the named first send is in flight"
+    running = j.to(jobs.RUNNING)
+    desk.follow(running)
+    desk.follow(running.to(jobs.SUCCEEDED))
+    sender.gate.set()
+    settle(desk, j.id)
+    assert [c["text"] for c in sender.calls] == ["🕓 Check the synthetic build", "⏳ Check the synthetic build",
+                                                "✅ Check the synthetic build"], sender.calls
+    assert sender.kinds() == ["send", "edit", "edit"] and len(host.asked) == 1
+    return {"between_naming_and_send": "queued, running, completed",
+            "during_named_first_send": "queued, running, completed", "messages_per_task": 1}
 
 
 def naming_survives_a_restart():
@@ -677,7 +719,7 @@ def no_detail_in_messages():
     return {"max_text_chars": max(len(c["text"]) for c in sender.calls), "attachments": 0}
 
 
-CHECKS = (titles, other_language_named_in_english, every_status_survives_naming, naming_survives_a_restart, one_message_lifecycle, coalesced_transitions, uncertain_create_never_resent,
+CHECKS = (titles, other_language_named_in_english, every_status_survives_naming, transition_after_naming_before_send, naming_survives_a_restart, one_message_lifecycle, coalesced_transitions, uncertain_create_never_resent,
           refused_create_retries_then_fails, edits_converge, restart_recovery, binding_and_since,
           telegram_sender_contract, outage_held_edits_recover, connect_failures_are_not_sent, no_detail_in_messages)
 

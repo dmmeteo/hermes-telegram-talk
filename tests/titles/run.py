@@ -305,7 +305,71 @@ def redaction_and_plain_text():
         w.close()
 
 
-CHECKS = [filler_speech_named_from_admitted_work, good_and_invalid_title_lines, route_unbound_at_promotion,
+def mini_tasks_summarize_instead_of_echoing():
+    from hermes_talk import notify
+    class SlowHost(HostModel):
+        def __init__(self):
+            super().__init__(answer="Explain synthetic exports.")
+            self.entered, self.release = threading.Event(), threading.Event()
+
+        def complete_structured(self, **kwargs):
+            self.entered.set()
+            assert self.release.wait(10), "synthetic title release"
+            return super().complete_structured(**kwargs)
+
+    host = SlowHost()
+    w = world(host)
+    try:
+        w.conv = w.call()
+        notify.toggle(w.home, w.scope(), notify.MICRO, w.talk.notify_defaults())
+        request = "Well okay about exports quick mfast"
+        status, body = w.task(*w.conv, request)
+        assert status == 200, body
+        w.until(lambda: w.job("mfast").terminal, "fast request finishes without waiting for naming")
+        assert host.entered.wait(1), ("conversational English must be summarized", w.posts.shown())
+        assert not w.posts.sends(), "the first title attempt precedes the one send"
+        host.release.set()
+        fast = shown(w, "mfast")
+        status, body = w.task(*w.conv, "Well okay about exports hold mrun")
+        assert status == 200, body
+        w.until(lambda: w.state("mrun") == "running", "ordinary micro request runs")
+        running = shown(w, "mrun")
+        w.release("mrun")
+        w.until(lambda: w.job("mrun").terminal, "ordinary micro request completes")
+        final = shown(w, "mrun")
+        assert fast == ["🕓 Explain synthetic exports.", "⏳ Explain synthetic exports.",
+                        "✅ Explain synthetic exports."], fast
+        assert running[-1] == "⏳ Explain synthetic exports." and final[-1] == "✅ Explain synthetic exports.", final
+        assert len(w.posts.sends()) == 2 and w.job("mfast").request == request, (w.posts.calls, w.job("mfast"))
+        assert all(not w.job(k).large for k in ("mfast", "mrun"))
+        return {"fast": fast, "ordinary": final, "sends": len(w.posts.sends())}
+    finally:
+        host.release.set()
+        w.close()
+
+
+def mini_retry_uses_completed_topic():
+    from hermes_talk import notify
+    host = HostModel(answer="Explain synthetic exports.")
+    w = world(host, bound=False)
+    try:
+        w.conv = w.call()
+        notify.toggle(w.home, w.scope(), notify.MICRO, w.talk.notify_defaults())
+        status, body = w.task(*w.conv, "Ну гаразд, поясни це ще раз quick topic")
+        assert status == 200, body
+        w.until(lambda: w.job("topic").terminal, "quick task finishes while route is unbound")
+        w.talk.model.bound = True
+        texts = shown(w, "topic")
+        assert texts[-1] == "✅ Explain synthetic exports.", texts
+        asked = host.titles_asked()
+        assert asked and "done topic" in asked[-1]["text"], ("the finished mini-task adds topic context", asked)
+        assert len(w.posts.sends()) == 1 and not w.job("topic").large
+        return {"texts": texts, "input": asked[-1]["text"]}
+    finally:
+        w.close()
+
+
+CHECKS = [mini_tasks_summarize_instead_of_echoing, mini_retry_uses_completed_topic, filler_speech_named_from_admitted_work, good_and_invalid_title_lines, route_unbound_at_promotion,
           outage_is_bounded_and_honest, restart_keeps_the_naming_input, redaction_and_plain_text]
 
 

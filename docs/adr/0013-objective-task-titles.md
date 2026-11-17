@@ -43,3 +43,15 @@ title and message, or a send's message) was not recorded, and an English request
 - Semantic quality depends on the profile's live model and is not verified offline. The gates use a synthetic host
   model (`tests/titles/run.py`) and the real host `PluginLlm` against the scripted local model
   (`tests/e2e/run-agent.py`, `t3_objective_title_real_hook`).
+
+## Mini-task summaries (2026-11-17)
+
+Untitled non-T3 tasks always use the host summarizer. Short English speech can still be conversational filler,
+so it is not accepted verbatim as a mini-task title. A usable explicit TITLE remains final, and large-task
+selection is unchanged. The prompt requests a short objective or topic for questions and explanations and
+states both the word and character limits. While naming remains pending, a completed mini-task contributes
+up to 2000 redacted result characters as topic context. The result is never posted as the status message.
+
+Naming stays asynchronous, with the existing bounded retries and honest outage fallback. The real task can
+finish before naming; its queued, running and final marks still update the same message. The title gate covers
+fast completion before the first model answer, ordinary running mini-tasks and a route that binds after completion.

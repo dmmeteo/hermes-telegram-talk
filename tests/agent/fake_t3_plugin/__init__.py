@@ -1,13 +1,17 @@
 """Synthetic `t3_control` for run-agent: the real t3-bridge's result shapes over a file store, no T3 server.
 
-install(home, root, store) copies this plugin into a synthetic profile with the repository root and store folder."""
+install(home, root, store) copies this plugin into a synthetic profile with the repository root and store folder.
+A start whose message begins with `hang-` is accepted at once and then answers only after HANG_S, without watching
+for an interrupt: the call a stop or the core's tool deadline cuts after T3 took the work."""
 import json
 import shutil
 import sys
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 CONFIG = HERE / "store.json"
+HANG_S = 30.0
 
 
 def install(home, root, store):
@@ -27,6 +31,10 @@ def register(ctx):
 
     def handle(args, **_):
         action = args.get("action")
+        if action == "start" and str(args.get("message")).startswith("hang-"):
+            started = store.start("th-" + str(args.get("message")))
+            time.sleep(HANG_S)
+            return json.dumps({"ok": True, "action": "start", **started})
         if action == "start":
             name = str(args.get("request_id") or "").removeprefix("req-start-") or str(args.get("message"))
             return json.dumps({"ok": True, "action": "start", **store.start("th-" + name)})
