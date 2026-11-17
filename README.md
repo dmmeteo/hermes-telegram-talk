@@ -357,10 +357,12 @@ when the task is accepted, and then edited at each real transition. It never car
 transcript, the prompt or a tool log, and secret-shaped text is redacted. The full result stays in the task's native
 Hermes session and reaches the user by voice.
 
-The title is one short English sentence naming the task's objective. It is the voice model's last-line `TITLE:` when
-that line is usable (the call instructions ask for one in English; a `TITLE:` line inside the task stays the user's
-text), or the request itself when the request is already a short plain English sentence. Otherwise the plugin's own
-host model (`ctx.llm`, the Pulse route, no override) names it. It is given the work the task's turn admitted to T3
+The title is a short English summary of the task's objective or topic. A usable voice-model last-line `TITLE:`
+is final (a `TITLE:` line inside the task stays the user's text). A large task may also use its short plain English
+request. Other untitled tasks use the plugin's own host model (`ctx.llm`, the Pulse route, no override).
+Mini-tasks always need a summary, even for short English requests. Questions and explanations get topic titles.
+A completed mini-task result supplies bounded, redacted context while naming is pending.
+The host receives the work the task's turn admitted to T3
 (the `t3_control` start's title and message, or a send's message, never a reused thread's old title, as the hook
 recorded them) and the redacted request, which is a speech transcript and often opens with filler. The first attempt
 runs before the only send. If it gives nothing usable (for example, the route is not bound yet after a Talk start),

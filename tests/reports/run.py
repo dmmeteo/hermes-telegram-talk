@@ -136,7 +136,9 @@ def titles():
     assert usable("Перевірити збірку") == usable("") == usable(None) == ""
     fallback = receipts.job_title
     assert fallback(job(title="Check build"), str) == ("Check build", True)
-    assert fallback(job(request="check the synthetic build"), str) == ("check the synthetic build", True)
+    assert fallback(job(request="check the synthetic build"), str) == ("Hermes task 1", False)
+    assert fallback(replace(job(request="check the synthetic build"), links=(work.Link(
+        key="english", thread_id="th-english", via="start", confirmed=True),)), str) == ("check the synthetic build", True)
     assert fallback(job(number=4, request="перевір збірку"), str) == ("Hermes task 4", False), \
         "until the host model names it, another language shows the task number, never the speech"
     filler = "Okay, okay, so, um, now about that thing, you know, the avatar should not show the mute badge any more"
@@ -195,7 +197,7 @@ def other_language_named_in_english():
     asked = len(host.asked)
     for english in (job(number=6, request="check the synthetic build"), job(number=7, request="перевір", title="Check it")):
         walk(desk, english, jobs.ACCEPTED)
-    assert len(host.asked) == asked, "an English request or a voice TITLE needs no model"
+    assert len(host.asked) == asked + 1, "an untitled English mini-task is summarized; a voice TITLE needs no model"
     secret = "sk-" + "s" * 24
     redact = lambda t: t.replace(secret, "[redacted]")
     cases = {"outage": TimeoutError("synthetic outage"), "not English": {"title": "Перевірити збірку"},

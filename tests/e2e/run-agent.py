@@ -1006,6 +1006,7 @@ def bind_host_model(e):
 def telegram_default_receipt(model):
     from scripted_model import task_title_request
     from hermes_talk import receipts
+    earlier = len(model.requests)
     TELEGRAM.reset()
     e = Env(model, profile_extra=PLUGIN_ENABLED)
     try:
@@ -1041,27 +1042,38 @@ def telegram_default_receipt(model):
         e.post("task/cancel", {"conversation_id": conv, "job_id": cancel_body["job"]["id"]})
         e.wait(cancel_body["job"]["id"], conv, vs, timeout=40)
         cancelled = settled_report(e, cancel_body["job"]["id"])
-        assert shown_texts(cancelled.message_id)[-1] == "⏹ slow 90", "without a TITLE line the English request names it"
+        assert shown_texts(cancelled.message_id)[-1] == "⏹ Wait for synthetic timer.", "an untitled running English mini-task is summarized"
         secret = "sk-" + "s" * 24
         _, secret_body = e.task(conv, vs, f"secret check {secret}", "del_tg3")
         e.wait(secret_body["job"]["id"], conv, vs)
         redacted = settled_report(e, secret_body["job"]["id"])
         assert all(secret not in c["text"] for c in TELEGRAM.calls)
-        assert shown_texts(redacted.message_id)[-1] == "✅ secret check redacted"
+        assert shown_texts(redacted.message_id)[-1] == "✅ Check synthetic secret handling."
         _, other_language = e.task(conv, vs, "перевір синтетичну збірку", "del_tg4")
         e.wait(other_language["job"]["id"], conv, vs)
         untitled = settled_report(e, other_language["job"]["id"])
         named = shown_texts(untitled.message_id)
         assert named == ["🕓 Check the synthetic build", "⏳ Check the synthetic build", "✅ Check the synthetic build"], \
             ("a Ukrainian request without a TITLE line gets the host model's English sentence, every status shown", named)
-        assert len([r for r in model.requests if task_title_request(r)]) == 1, "one host title call"
+        request = "Well okay about exports"
+        _, fast_body = e.task(conv, vs, request, "del_tg_fast")
+        e.wait(fast_body["job"]["id"], conv, vs)
+        fast = settled_report(e, fast_body["job"]["id"])
+        fast_texts = shown_texts(fast.message_id)
+        assert fast_texts[-1] == "✅ Explain synthetic exports." and all(
+            t[2:] == "Explain synthetic exports." for t in fast_texts), fast_texts
+        assert e.native(fast_body["job"]["id"]).request == request and not e.native(fast_body["job"]["id"]).large
+        sources = [task_title_request(r) for r in model.requests[earlier:] if task_title_request(r)]
+        for request in ("slow 90", "secret check", "перевір синтетичну збірку", "Well okay about exports"):
+            own = [text for text in sources if "\n" + request in text]
+            assert len(own) == 1, ("one host title call for this check's request", request, own)
         _, big_body = e.task(conv, vs, "big 5000\nTITLE: Build big synthetic result", "del_tg5")
         e.wait(big_body["job"]["id"], conv, vs)
         big = settled_report(e, big_body["job"]["id"])
         assert shown_texts(big.message_id)[-1] == "✅ Build big synthetic result"
         assert not any(c.get("media") for c in TELEGRAM.calls) and max(len(c["text"]) for c in TELEGRAM.calls) <= 3 + receipts.TITLE_CHARS
         assert not (e.home / "plugin-data" / "hermes-talk" / "reports").exists(), "no result document is written"
-        assert len(TELEGRAM.sent()) == 5, "one message per task"
+        assert len(TELEGRAM.sent()) == 6, "one message per task"
         from hermes_talk import receipts
         before = len(TELEGRAM.calls)
         other = receipts.TelegramSender("654321:" + "x" * 30)
@@ -1072,7 +1084,7 @@ def telegram_default_receipt(model):
         return {"chat_id": sends[0]["chat_id"], "bot": "the Talk bot that signed the call's initData",
                 "message_id": report.message_id, "shown": shown, "stored_before_send": claims[0],
                 "voice_receipt": listed["receipt"], "cancelled": shown_texts(cancelled.message_id)[-1],
-                "secret": shown_texts(redacted.message_id)[-1], "non_english": named,
+                "secret": shown_texts(redacted.message_id)[-1], "non_english": named, "fast_mini": fast_texts,
                 "large_result": shown_texts(big.message_id)[-1], "sends": len(TELEGRAM.sent()),
                 "edits": len(TELEGRAM.edits()), "other_bot_refused": [r["error"] for r in refused],
                 "transport": "synthetic (tests/agent/synthetic_telegram.py) behind Hermes _send_to_platform and "
@@ -1137,7 +1149,7 @@ def telegram_closed_call_delivery(model):
     e = Env(model)
     try:
         conv, vs = e.call()
-        _, body = e.task(conv, vs, "slow 3", "del_closed")
+        _, body = e.task(conv, vs, "slow 3\nTITLE: slow 3", "del_closed")
         assert e.post("end", {"conversation_id": conv, "voice_session_id": vs})[0] == 200
         state = json.loads(e.history.get_meta(f"hermes_talk:conversation:{conv}"))
         assert state["voice_sessions"][vs]["ended"] is not None
@@ -1162,7 +1174,7 @@ def telegram_ambiguous_send(model):
     root = e.root
     try:
         conv, vs = e.call()
-        _, a = e.task(conv, vs, "ambiguous alpha", "del_amb1")
+        _, a = e.task(conv, vs, "ambiguous alpha\nTITLE: ambiguous alpha", "del_amb1")
         e.wait(a["job"]["id"], conv, vs)
         uncertain = settled_report(e, a["job"]["id"])
         time.sleep(1.5)
@@ -1170,19 +1182,19 @@ def telegram_ambiguous_send(model):
         assert stored_report(e, a["job"]["id"]).status == "completed", "the status is kept, never sent a second time"
         e.talk.desk.sender.timeout = 1.0
         TELEGRAM.reset("hang")
-        _, b = e.task(conv, vs, "ambiguous beta", "del_amb2")
+        _, b = e.task(conv, vs, "ambiguous beta\nTITLE: ambiguous beta", "del_amb2")
         e.wait(b["job"]["id"], conv, vs)
         hung = settled_report(e, b["job"]["id"], timeout=15)
         assert hung.state == "uncertain" and "may still have been delivered" in hung.error and len(TELEGRAM.calls) == 1, hung
         TELEGRAM.reset("chat_not_found")
-        _, c = e.task(conv, vs, "ambiguous gamma", "del_amb3")
+        _, c = e.task(conv, vs, "ambiguous gamma\nTITLE: ambiguous gamma", "del_amb3")
         e.wait(c["job"]["id"], conv, vs)
         failed = settled_report(e, c["job"]["id"])
         time.sleep(1)
         assert failed.state == "failed" and len(TELEGRAM.calls) == 1, failed
         e.talk.desk.backoff = (0.3, 0.3)
         TELEGRAM.reset("refused", "ok")
-        _, d = e.task(conv, vs, "ambiguous delta", "del_amb4")
+        _, d = e.task(conv, vs, "ambiguous delta\nTITLE: ambiguous delta", "del_amb4")
         e.wait(d["job"]["id"], conv, vs)
         retried = settled_report(e, d["job"]["id"])
         sends = [x for x in TELEGRAM.calls if x["kind"] == "send"]
@@ -1190,7 +1202,7 @@ def telegram_ambiguous_send(model):
         assert "not sent: retry 1" in retried.notes and shown_texts(retried.message_id)[-1] == "✅ ambiguous delta"
         assert len(requests_with(model, "TASK: ambiguous delta")) == 1, "the task was not rerun"
         TELEGRAM.reset("refused", "refused", "refused")
-        _, f = e.task(conv, vs, "ambiguous epsilon", "del_amb5")
+        _, f = e.task(conv, vs, "ambiguous epsilon\nTITLE: ambiguous epsilon", "del_amb5")
         e.wait(f["job"]["id"], conv, vs)
         exhausted = settled_report(e, f["job"]["id"])
         assert exhausted.state == "failed" and exhausted.attempts == 3 and "gave up" in exhausted.error, exhausted
@@ -1315,7 +1327,7 @@ def queue_start_failure(model):
         for n in (1, 2):
             job = jobs.new_job(scope, conv, vs, 1, f"del_q{n}", n, f"queued {n}", time.time() + n * 0.01,
                                {"kind": "private", "chat_id": fx.USER_ID, "thread_id": None, "name": "",
-                                "bot_id": fx.BOT_TOKEN.split(":")[0]})
+                                "bot_id": fx.BOT_TOKEN.split(":")[0]}, f"queued {n}")
             history.set_meta(jobs.job_key(job.id), jobs.dump(job))
             seeded.append(job.id)
         history.close()
@@ -1465,7 +1477,7 @@ def bounded_native_spool(model):
                                 env={**os.environ, "NOISY_MODE": mode})
             e.talk.board.agent = agent
             conv, vs = e.call()
-            _, body = e.task(conv, vs, f"noisy {mode}", f"del_noisy_{mode}")
+            _, body = e.task(conv, vs, f"noisy {mode}\nTITLE: noisy {mode}", f"del_noisy_{mode}")
             job_id = body["job"]["id"]
             peak = 0
             deadline = time.time() + 120
@@ -1572,7 +1584,8 @@ def t3_objective_title_real_hook(model):
         conv, vs = e.call()
         speech = ("t3goal mute Так... Нє, ну загалом оця от типу апка в принципі працює, ну я подивився, все норм, "
                   "але от що я хотів сказати: на аватарці асистента досі видно індикатор мюту, його треба прибрати.")
-        _, body = e.task(conv, vs, speech, "del_t3goal")
+        status, body = e.task(conv, vs, speech, "del_t3goal")
+        assert status == 200, (status, body)
         big = body["job"]["id"]
         deadline = time.time() + 120
         while time.time() < deadline and not (e.native(big).large and e.native(big).turn):

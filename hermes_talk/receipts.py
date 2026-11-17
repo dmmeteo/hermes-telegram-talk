@@ -2,8 +2,8 @@
 
 The message is a status mark and one short English sentence naming the task's objective: queued, running,
 completed, failed or cancelled. It never carries the result, which stays in the native task session and reaches the
-user by voice. The title is the voice model's TITLE line when it gave a usable one, or the request itself when that is
-already a short English sentence. Otherwise the profile's own model, through the plugin's host ctx.llm, names the
+user by voice. A usable voice-model TITLE line is final. A large task may also use its short English request.
+Untitled mini-tasks always need a summary, even for short English requests. The profile's host ctx.llm names the
 objective from the work the task's turn admitted to T3 (work.py intents, newest last) and the request (a speech
 transcript, often with filler): first before the only send, then, while it has no usable answer (the route is not
 bound yet after a Talk start, an outage, an unusable answer), again with backoff up to TITLE_ATTEMPTS times in all;
@@ -68,12 +68,13 @@ TITLE_INSTRUCTIONS = (
     "You write the title of a background task's one-line status message. Below is the work the assistant admitted "
     "for the task, if any, and the user's spoken request it came from: a speech transcript, possibly in another "
     "language, often opening with filler, acknowledgements or other topics. Reply with a JSON object "
-    "{\"title\": \"...\"}: one short plain English sentence, an imperative of at most "
-    f"{TITLE_WORDS} words ending with a period, stating the task's concrete objective, for example \"Add a dark theme "
+    "{\"title\": \"...\"}: a plain English title, preferably two to five words, at most "
+    f"{TITLE_WORDS} words and {TITLE_CHARS} characters, naming the task's objective or topic, for example \"Add a dark theme "
     "to the settings page.\" When admitted work is given, name the objective of the newest admitted work. Name the "
     "goal, not the conversation: leave out filler, greetings and thinking aloud, and never translate the request's "
-    "opening words. Do not claim it is done and do not add anything the text does not say. If no concrete objective "
-    "is stated, reply {\"title\": \"\"}. No quotes, markup or emoji.")
+    "opening words. For questions or explanations, summarize the subject, not a code change. A completed "
+    "mini-task may include its result as context: name its topic, never quote the answer or claim completion. "
+    "Do not add anything the text does not say. If no objective or topic can be identified, reply {\"title\": \"\"}. No quotes, markup or emoji.")
 # Markup that Hermes' formatter (first send) and a plain-text edit would render differently.
 MARKUP = re.compile(r"[*_`\[\]~|<>#\\]")
 DIRECTIVE = re.compile(r"(?im)^\s*report\s+to\s*:\s*(.+?)\s*$")
@@ -126,11 +127,10 @@ def report_status(job):
 
 
 def job_title(job, redact):
-    """(title, final). A usable TITLE line, or a request that is itself a short English sentence, is final. Otherwise the
-    title is provisional until the host model names the objective: the newest admitted T3 start's own title when it
-    is usable, else the task's number. Never the request's words, whose opening is filler more often than not."""
+    """(title, final). A usable TITLE line is final; large tasks may also use a short English request.
+    Otherwise keep the admitted start's title or task number until the host summarizes the objective or topic."""
     title = usable_title(redact(job.title)) if job.title else ""
-    request = usable_title(redact(job.request))
+    request = usable_title(redact(job.request)) if job.large else ""
     if title or request:
         return title or request, True
     starts = (usable_title(redact(link.intent_title)) for link in reversed(job.links)
@@ -151,7 +151,10 @@ def name_source(job, redact):
             head = "- New work sent to an existing T3 thread: "
         admitted.append(head + _flat(redact(link.intent)))
     parts = ["Work the assistant admitted for this task, newest last:\n" + "\n".join(admitted)] if admitted else []
-    return "\n\n".join(parts + ["The user's spoken request (a speech transcript):\n" + _flat(redact(job.request))])
+    parts.append("The user's spoken request (a speech transcript):\n" + _flat(redact(job.request)))
+    if not job.large and job.result:
+        parts.append("Completed mini-task result (topic context only):\n" + _flat(redact(job.result))[:2000])
+    return "\n\n".join(parts)
 
 
 def ask_title(model, source):

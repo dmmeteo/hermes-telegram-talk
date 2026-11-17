@@ -419,7 +419,7 @@ def visibility_flags_and_telegram_control():
         assert len(w.posts.calls) == 1, "switching sends, edits, starts and cancels nothing"
         assert w.state("v2") == "running" and len(w.ledger("start")) == 2
 
-        assert w.task(conv, vs, "hold v3")[0] == 200
+        assert w.task(conv, vs, "hold v3\nTITLE: hold v3")[0] == 200
         w.until(lambda: w.state("v3") == "running", "v3")
         w.release("v3")
         w.until(lambda: w.state("v3") == "succeeded", "v3 done")
@@ -430,7 +430,7 @@ def visibility_flags_and_telegram_control():
 
         thread_gateway.notify_switch(str(w.home), bot, fx.USER_ID, "private", fx.USER_ID, "talk_notify:large")
         assert w.talk.visibility(w.scope()) == notify.Visibility(large=False, micro=True), "micro only"
-        assert w.task(conv, vs, "code v4")[0] == 200
+        assert w.task(conv, vs, "code v4\nTITLE: code v4")[0] == 200
         w.until(lambda: w.job("v4").large, "v4 promoted")
         w.t3.finish("th-v2", "completed", "V2 done.")
         w.release("v2")
@@ -673,7 +673,7 @@ def review_regressions():
         thread_gateway.notify_switch(str(w.home), fx.BOT_TOKEN.split(":")[0], fx.USER_ID, "private", fx.USER_ID,
                                      "talk_notify:micro")
         w.talk.board.mark_delivered([w.job("z1").id], "context")
-        assert w.task(conv, vs, "lostnothread n1")[0] == 200
+        assert w.task(conv, vs, "lostnothread n1\nTITLE: lostnothread n1")[0] == 200
         w.until(lambda: w.state("n1") == "succeeded", "a lost start without a thread id settles from its turn")
         assert not w.job("n1").large and work.LOST_START in w.job("n1").result, w.job("n1").result
         assert w.task(conv, vs, "code d1")[0] == 200

@@ -52,7 +52,10 @@ def is_title_request(messages):
     return isinstance(first, str) and first.startswith("You name chat sessions")
 
 
-TASK_TITLES = {"перевір синтетичну збірку": "Check the synthetic build",
+TASK_TITLES = {"slow 90": "Wait for synthetic timer.",
+               "secret check": "Check synthetic secret handling.",
+               "Well okay about exports": "Explain synthetic exports.",
+               "перевір синтетичну збірку": "Check the synthetic build",
                "SYN-MUTE": "Remove the mute indicator from the assistant avatar."}
 T3_GOALS = {"mute": {"title": "Avatar mute indicator",
                      "message": "Remove the mute indicator from the assistant avatar in the Talk Mini App. [SYN-MUTE]"}}

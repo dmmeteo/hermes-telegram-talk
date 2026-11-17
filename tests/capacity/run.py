@@ -124,7 +124,7 @@ class World:
 
     def task(self, conv, vs, key):
         return self.post("task", {"conversation_id": conv, "voice_session_id": vs, "delegation_item_id": f"del_{key}",
-                                  "request": f"hold {key}"})
+                                  "request": f"hold {key}\nTITLE: hold {key}"})
 
     def ledger(self, event=None):
         path = self.root / "ledger.jsonl"
